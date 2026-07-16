@@ -8,6 +8,8 @@ interface SessionState {
   currentIconId: number;
   heartbeatCount: number;
   iconChangeAt: number;
+  score: number;
+  penaltyAt: number;
 }
 
 const CHARS = [
@@ -59,6 +61,13 @@ let cryTimer: ReturnType<typeof setInterval> | null = null;
 let changeTimer: ReturnType<typeof setTimeout> | null = null;
 let wasHeartbeatActive: boolean | null = null;
 let lastIconChangeAt = 0;
+let lastPenaltyAt = 0;
+// The first state we receive carries the persisted nonces; we sync to them
+// WITHOUT animating so a page load never replays an old change/penalty. Every
+// change after that is a real event and does animate. (A plain `=== 0` guard
+// fails for penaltyAt, which legitimately starts at 0 → the first real penalty
+// would be mistaken for the load value and skipped.)
+let noncesInited = false;
 let scaleAnimTimer: ReturnType<typeof setInterval> | null = null;
 
 // ── Step-based movement ───────────────────────────────────────────────────────
@@ -114,9 +123,14 @@ function interactionStep() {
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 let spriteEl: HTMLDivElement;
 let iconEl: HTMLSpanElement;
+let scoreEl: HTMLSpanElement;
 
 function setIconText(text: string) {
   iconEl.textContent = text;
+}
+
+function setScore(n: number) {
+  if (scoreEl) scoreEl.textContent = String(Math.round(n));
 }
 
 // ── CSS ───────────────────────────────────────────────────────────────────────
@@ -151,6 +165,7 @@ function startGrowAnimation() {
   px = centerX;
   py = centerY;
   spriteEl.style.transform = 'scale(1)';
+  counterScaleScore(1);
 
   const maxScale = Math.ceil(Math.max(window.innerWidth, window.innerHeight) / SIZE) + 2;
   const duration = 20_000;
@@ -161,6 +176,7 @@ function startGrowAnimation() {
     const progress = Math.min((Date.now() - startTime) / duration, 1);
     const scale = 1 + (maxScale - 1) * (progress * progress); // easeIn
     spriteEl.style.transform = `scale(${scale})`;
+    counterScaleScore(scale);
     if (progress >= 1) stopScaleAnimation();
   }, 50);
 }
@@ -178,7 +194,15 @@ function applyActiveSize() {
   if (!appState) return;
   stopScaleAnimation();
   spriteEl.style.transition = ACTIVE_TRANSITION;
-  spriteEl.style.transform = `scale(${activeScale(appState.heartbeatCount)})`;
+  const sc = activeScale(appState.heartbeatCount);
+  spriteEl.style.transform = `scale(${sc})`;
+  counterScaleScore(sc);
+}
+
+// Keep the score badge a constant on-screen size regardless of how the sprite is
+// scaled (shrinking while active, growing while idle) by inverting the scale.
+function counterScaleScore(spriteScale: number) {
+  if (scoreEl) scoreEl.style.transform = `translateX(-50%) scale(${1 / spriteScale})`;
 }
 
 // ── Fireworks (icon change celebration) ───────────────────────────────────────
@@ -216,6 +240,43 @@ function triggerFireworks() {
     );
     anim.onfinish = () => dot.remove();
   }
+}
+
+/** Idle-penalty feedback: a huge red "−10" that pops up over the sprite, holds
+ *  at full size for ~2 s, then fades — ~3 s total. Fired once per idle lapse
+ *  (driven by the background's penaltyAt). Sized to the viewport so it reads big
+ *  on any screen. Rendered at the screen centre so the grown idle sprite never
+ *  covers it. */
+function triggerPenalty() {
+  const rootEl = document.getElementById('focus-flow-root');
+  if (!rootEl) return;
+  const label = document.createElement('div');
+  label.textContent = '−10';
+  const fontSize = Math.max(120, Math.min(window.innerWidth * 0.28, 320));
+  Object.assign(label.style, {
+    position: 'fixed',
+    left: '50%',
+    top: '50%',
+    color: '#ef4444',
+    fontWeight: '900',
+    fontSize: fontSize + 'px',
+    lineHeight: '1',
+    fontFamily: 'system-ui, sans-serif',
+    textShadow: '0 4px 16px rgba(0,0,0,0.55)',
+    pointerEvents: 'none',
+    zIndex: '2147483647',
+  });
+  rootEl.appendChild(label);
+  const anim = label.animate(
+    [
+      { transform: 'translate(-50%, -50%) scale(0.3)', opacity: 0, offset: 0 },
+      { transform: 'translate(-50%, -50%) scale(1)',   opacity: 1, offset: 0.12 }, // pop in (~0.35 s)
+      { transform: 'translate(-50%, -50%) scale(1)',   opacity: 1, offset: 0.78 }, // hold full size (~2 s)
+      { transform: 'translate(-50%, -75%) scale(1)',   opacity: 0, offset: 1 },     // rise + fade out
+    ],
+    { duration: 3000, easing: 'ease-out' },
+  );
+  anim.onfinish = () => label.remove();
 }
 
 /** Play the icon-change celebration: fireworks + a quick spin pop, then the new
@@ -389,6 +450,8 @@ function applyState(s: SessionState) {
 
   const char = CHARS[s.currentIconId % CHARS.length] ?? CHARS[0];
 
+  setScore(s.score ?? 0);
+
   const transitioned = wasHeartbeatActive !== s.isHeartbeatActive;
   wasHeartbeatActive = s.isHeartbeatActive;
 
@@ -413,11 +476,21 @@ function applyState(s: SessionState) {
     if (transitioned && !changeTimer) startGrowAnimation();
   }
 
-  // Fire the celebration when the background reports a fresh icon change.
-  if (s.iconChangeAt && s.iconChangeAt !== lastIconChangeAt) {
-    const first = lastIconChangeAt === 0;
+  // Nonces (iconChangeAt / penaltyAt): sync silently on the first state, then
+  // animate on every later change — including the first real one.
+  if (!noncesInited) {
+    noncesInited = true;
     lastIconChangeAt = s.iconChangeAt;
-    if (!first) triggerIconChange();
+    lastPenaltyAt = s.penaltyAt ?? 0;
+  } else {
+    if (s.iconChangeAt && s.iconChangeAt !== lastIconChangeAt) {
+      lastIconChangeAt = s.iconChangeAt;
+      triggerIconChange();
+    }
+    if (s.penaltyAt && s.penaltyAt !== lastPenaltyAt) {
+      lastPenaltyAt = s.penaltyAt;
+      triggerPenalty();
+    }
   }
 }
 
@@ -448,6 +521,29 @@ function buildSprite(): HTMLDivElement {
   icon.style.pointerEvents = 'none';
   el.appendChild(icon);
   iconEl = icon;
+
+  // Score badge pinned to the bottom of the circle. It counter-scales in
+  // applyActiveSize so it stays legible whatever size the sprite is.
+  const score = document.createElement('span');
+  Object.assign(score.style, {
+    position: 'absolute',
+    bottom: '-9px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    padding: '1px 6px',
+    borderRadius: '9px',
+    background: 'rgba(15,23,42,0.9)',
+    color: '#fff',
+    fontSize: '11px',
+    fontWeight: '700',
+    lineHeight: '1.3',
+    whiteSpace: 'nowrap',
+    pointerEvents: 'none',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.35)',
+  });
+  score.textContent = '0';
+  el.appendChild(score);
+  scoreEl = score;
 
   el.addEventListener('pointerdown', (e: PointerEvent) => {
     e.stopPropagation();

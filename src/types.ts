@@ -12,6 +12,10 @@ export interface SessionState {
   heartbeatCount: number;
   /** Timestamp of the most recent icon change — bumped to trigger the fireworks animation */
   iconChangeAt: number;
+  /** Gamified focus score: +30/iconChangeHeartbeats per character change, −10 per idle lapse (>5 s) */
+  score: number;
+  /** Timestamp nonce bumped each time an idle penalty is applied — triggers the "−10" sprite animation */
+  penaltyAt: number;
 }
 
 export interface Settings {

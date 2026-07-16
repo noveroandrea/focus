@@ -8,6 +8,8 @@ let state: SessionState = {
   currentIconId: Math.floor(Math.random() * CHARACTER_COUNT),
   heartbeatCount: 0,
   iconChangeAt: 0,
+  score: 0,
+  penaltyAt: 0,
 };
 
 // Tabs whose CURRENT page has run our content script. Our content script runs on
@@ -140,23 +142,88 @@ function broadcastState() {
 // 1s throttle (`lastCountAt`) keeps accumulation at ≈one per real second no
 // matter how fast (or from how many sources) heartbeats arrive.
 let lastCountAt = 0;
+let lastCountWeight = 0; // the heaviest weight already applied in the current 1s window
 
-function registerHeartbeat() {
-  if (!state.isHeartbeatActive && !settings.forceActive) return;
-  const now = Date.now();
-  if (now - lastCountAt < 1000) return; // ≈one count per second, whatever the source rate
-  lastCountAt = now;
-
+// Advance the count by `amount`, handling the character change + score reward
+// when it reaches the threshold.
+function applyCount(amount: number) {
   const threshold = clampIconChangeHeartbeats(settings.iconChangeHeartbeats);
-  const next = state.heartbeatCount + 1;
+  const next = state.heartbeatCount + amount;
   if (next >= threshold) {
+    // Reward a completed character: +30/x points (x = threshold), so a shorter
+    // interval is worth more per change and a full 30-heartbeat run is worth 1.
+    // Only real "Working" activity scores — forceActive ("Not working") pins the
+    // sprite active without genuine work, so it earns nothing (and the idle
+    // penalty is likewise skipped while forced).
+    const gained = settings.forceActive ? 0 : 30 / threshold;
     updateState({
       currentIconId: (state.currentIconId + 1) % CHARACTER_COUNT,
       heartbeatCount: 0,
-      iconChangeAt: now,
+      iconChangeAt: Date.now(),
+      score: roundScore(state.score + gained),
     });
   } else {
     updateState({ heartbeatCount: next });
+  }
+}
+
+// `weight` is how much this heartbeat advances the count. Direct page input
+// (mouse/keyboard/scroll → the HEARTBEAT message) counts DOUBLE (weight 2) —
+// real interaction is worth more than the OS-idle poll's passive "still active"
+// signal (weight 1). The count still advances at most once per real second, but
+// within that second we keep the HEAVIEST weight seen: if the 0.5s idle poll got
+// here first with weight 1 and a page heartbeat (weight 2) then arrives, we top
+// up the +1 difference so direct input reliably counts double.
+function registerHeartbeat(weight = 1) {
+  if (!state.isHeartbeatActive && !settings.forceActive) return;
+  const now = Date.now();
+  if (now - lastCountAt < 1000) {
+    if (weight > lastCountWeight) {   // heavier source this second → top up the gap
+      const extra = weight - lastCountWeight;
+      lastCountWeight = weight;
+      applyCount(extra);
+    }
+    return;
+  }
+  lastCountAt = now;
+  lastCountWeight = weight;
+  applyCount(weight);
+}
+
+// ── Score ──────────────────────────────────────────────────────────────────────
+// A gamified focus score, persisted in SessionState: it rises by 30/x on every
+// character change (see registerHeartbeat) and drops by 10 each time an idle
+// lapse lasts longer than IDLE_PENALTY_MS. Kept ≥ 0 and rounded to 2 decimals so
+// small (large-x) increments still accumulate cleanly.
+const IDLE_PENALTY_MS = 5000;   // idle must last > 5 s before it costs points
+const IDLE_PENALTY = 10;        // points removed per idle lapse
+let idleWasActive = state.isHeartbeatActive; // tracks the active→idle edge
+let idleSince = 0;              // when the current idle lapse began
+let idlePenaltyApplied = false; // one penalty per idle lapse
+
+function roundScore(n: number): number {
+  return Math.max(0, Math.round(n * 100) / 100);
+}
+
+// Called once per second from the status loop. Detects the transition into idle
+// and, once that lapse has lasted longer than IDLE_PENALTY_MS, deducts the
+// penalty a single time until activity resumes.
+function trackIdlePenalty() {
+  const now = Date.now();
+  if (state.isHeartbeatActive) {
+    idleWasActive = true;
+    idlePenaltyApplied = false;
+    return;
+  }
+  if (idleWasActive) {          // just went idle → start timing this lapse
+    idleWasActive = false;
+    idleSince = now;
+    idlePenaltyApplied = false;
+  }
+  if (!idlePenaltyApplied && now - idleSince > IDLE_PENALTY_MS) {
+    idlePenaltyApplied = true;
+    // penaltyAt is a nonce the sprite watches to play the "−10" fly-up once.
+    updateState({ score: roundScore(state.score - IDLE_PENALTY), penaltyAt: now });
   }
 }
 
@@ -205,6 +272,7 @@ setInterval(() => {
   if (state.isHeartbeatActive && now - state.lastHeartbeat > idleSec * 1000) {
     updateState({ isHeartbeatActive: false });
   }
+  trackIdlePenalty(); // dock points for an idle lapse longer than 5 s
 }, 1000);
 
 // (2) OS idle poll — twice per second. queryState(idleTime) already means "no input
@@ -354,7 +422,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
         } else {
           updateState({ isHeartbeatActive: true, lastHeartbeat: Date.now() }); // transition
         }
-        registerHeartbeat(); // page-sourced heartbeat (mouse/keyboard) → advance count + step
+        registerHeartbeat(); // page-sourced heartbeat (mouse/keyboard) → counts DOUBLE
       }
       break;
 

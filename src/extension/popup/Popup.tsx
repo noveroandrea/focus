@@ -28,6 +28,13 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
       </span>
     </div>
 
+    <div className="flex items-center justify-between rounded-xl bg-indigo-50 px-3 py-2">
+      <span className="text-sm text-indigo-600 font-medium">Focus score</span>
+      <span className="text-lg font-extrabold tabular-nums text-indigo-700">
+        {Math.round(state.score ?? 0)}
+      </span>
+    </div>
+
     {currentTabDomain && (
       <div className="space-y-1">
         <button
@@ -375,7 +382,7 @@ const Popup = () => {
       chrome.runtime.sendMessage({ type: 'GET_STATE' }, (res) => {
         const empty: SessionState = {
           isHeartbeatActive: false, lastHeartbeat: 0, activeWindowId: null, enabled: true,
-          currentIconId: 0, heartbeatCount: 0, iconChangeAt: 0,
+          currentIconId: 0, heartbeatCount: 0, iconChangeAt: 0, score: 0, penaltyAt: 0,
         };
         if (chrome.runtime.lastError) { setState(empty); return; }
         setState(res ?? empty);
