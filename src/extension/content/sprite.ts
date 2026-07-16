@@ -51,6 +51,13 @@ let cryBeepVolume = 100;       // mirrors settings; peak volume (0–100 %) of t
 let cryBeepDuration = 60;      // mirrors settings; seconds the idle beep lasts before stopping
 let cryBeepStyle: 'ramp' | 'pulse' | 'siren' = 'ramp'; // mirrors settings; beep pattern
 let soundEnabled = true;       // mirrors settings; master switch for the idle beep
+// Whether THIS page is whitelisted. The sprite runs on every page but only a
+// whitelisted one counts as work, so off-whitelist we show the crying face right
+// away as a hint. This is a face swap only — every real idle behaviour (beep,
+// grow, colour, steps) still waits out the normal idle time, since the state that
+// drives them is global and owned by the background. Defaults to true so a
+// whitelisted page never flashes a crying face before settings load.
+let pageAllowed = true;
 let px = Math.random() * 300 + 100;
 let py = Math.random() * 200 + 100;
 let vx = 2.5, vy = 1.8;
@@ -127,6 +134,22 @@ let scoreEl: HTMLSpanElement;
 
 function setIconText(text: string) {
   iconEl.textContent = text;
+}
+
+/** Mirrors isAllowedUrl in background.ts: a page is work when its URL contains a
+ *  whitelisted domain. Treats missing settings as allowed (see pageAllowed). */
+function isPageAllowed(domains: unknown): boolean {
+  if (!Array.isArray(domains)) return true;
+  return domains.some((d) => typeof d === 'string' && d.trim() !== '' && location.href.includes(d.trim()));
+}
+
+/** Paint the face for the active state: the real character on a whitelisted page,
+ *  the crying icon on any other. No-op while actually idle — the cry animation
+ *  owns the face then. */
+function renderActiveFace() {
+  if (!appState?.isHeartbeatActive || cryTimer) return;
+  const char = CHARS[appState.currentIconId % CHARS.length] ?? CHARS[0];
+  setIconText(pageAllowed ? char.icon : CRYING[0]);
 }
 
 function setScore(n: number) {
@@ -468,7 +491,7 @@ function applyState(s: SessionState) {
 
   if (s.isHeartbeatActive) {
     stopCrying();
-    setIconText(char.icon);
+    renderActiveFace();
     // Size follows the heartbeat count (shrinks as focus accumulates).
     if (!changeTimer) applyActiveSize();
   } else {
@@ -576,7 +599,7 @@ function onSpriteUp(_e: PointerEvent) {
 
 // ── Settings sync ──────────────────────────────────────────────────────────────
 function readSettings(raw: unknown) {
-  const s = raw as { iconChangeHeartbeats?: number; cryBeepVolume?: number; cryBeepDuration?: number; cryBeepStyle?: string; soundEnabled?: boolean } | undefined;
+  const s = raw as { iconChangeHeartbeats?: number; cryBeepVolume?: number; cryBeepDuration?: number; cryBeepStyle?: string; soundEnabled?: boolean; allowedDomains?: unknown } | undefined;
   const h = Number(s?.iconChangeHeartbeats);
   if (Number.isFinite(h)) iconChangeHeartbeats = Math.min(300, Math.max(5, Math.round(h)));
   const v = Number(s?.cryBeepVolume);
@@ -585,6 +608,7 @@ function readSettings(raw: unknown) {
   if (Number.isFinite(d)) cryBeepDuration = Math.min(300, Math.max(10, Math.round(d)));
   cryBeepStyle = s?.cryBeepStyle === 'pulse' || s?.cryBeepStyle === 'siren' ? s.cryBeepStyle : 'ramp';
   if (typeof s?.soundEnabled === 'boolean') soundEnabled = s.soundEnabled;
+  if (s?.allowedDomains !== undefined) pageAllowed = isPageAllowed(s.allowedDomains);
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -605,10 +629,19 @@ function init() {
 
   // Unlock the AudioContext on the first real gesture. Capture phase + multiple
   // gesture types so pages that stopPropagation on input still let us through.
+  // Note this can only ever fire on a genuine user activation: mousemove/wheel/
+  // scroll do NOT qualify, and neither does the background's OS idle poll — so a
+  // page you only read (or stay active on via another window) still has no
+  // context and stays silent on idle until you click or type in it once.
   const unlockOpts = { capture: true, passive: true } as AddEventListenerOptions;
   window.addEventListener('pointerdown', unlockAudio, unlockOpts);
+  window.addEventListener('pointerup', unlockAudio, unlockOpts);
+  window.addEventListener('mousedown', unlockAudio, unlockOpts);
+  window.addEventListener('mouseup', unlockAudio, unlockOpts);
   window.addEventListener('keydown', unlockAudio, unlockOpts);
+  window.addEventListener('keyup', unlockAudio, unlockOpts);
   window.addEventListener('touchstart', unlockAudio, unlockOpts);
+  window.addEventListener('touchend', unlockAudio, unlockOpts);
   window.addEventListener('click', unlockAudio, unlockOpts);
 
   // Step the sprite on REAL page interaction, locally — the background's heartbeat
@@ -626,6 +659,7 @@ function init() {
 
   chrome.storage.local.get(['focusFlowSettings'], (r) => {
     readSettings(r.focusFlowSettings);
+    renderActiveFace(); // the whitelist just resolved — the face may need to change
     if (appState?.isHeartbeatActive && !changeTimer) applyActiveSize();
   });
 
@@ -635,6 +669,9 @@ function init() {
       // Reconcile the beep with the new settings (volume/style/duration/sound):
       // restart it cleanly if still crying, otherwise it stays stopped.
       restartBeepIfCrying();
+      // Whitelisting this page (popup toggle or AI classify) swaps the face back
+      // to the real character without waiting for the next state broadcast.
+      renderActiveFace();
       if (appState?.isHeartbeatActive && !changeTimer) applyActiveSize();
     }
   });

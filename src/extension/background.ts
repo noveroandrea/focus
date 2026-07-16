@@ -422,7 +422,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
         } else {
           updateState({ isHeartbeatActive: true, lastHeartbeat: Date.now() }); // transition
         }
-        registerHeartbeat(); // page-sourced heartbeat (mouse/keyboard) → counts DOUBLE
+        registerHeartbeat(1); // page-sourced heartbeat (mouse/keyboard) → counts SINGLE
       }
       break;
 
