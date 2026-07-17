@@ -8,7 +8,8 @@ interface SessionState {
   currentIconId: number;
   heartbeatCount: number;
   iconChangeAt: number;
-  score: number;
+  focusScore: number;
+  distractedScore: number;
   penaltyAt: number;
 }
 
@@ -58,6 +59,10 @@ let soundEnabled = true;       // mirrors settings; master switch for the idle b
 // drives them is global and owned by the background. Defaults to true so a
 // whitelisted page never flashes a crying face before settings load.
 let pageAllowed = true;
+// Mirrors settings.forceActive — the "Not working" status. It pins the sprite
+// active with no real work behind it (and earns no score), so we desaturate the
+// whole thing to make that legible at a glance.
+let forcedNotWorking = false;
 let px = Math.random() * 300 + 100;
 let py = Math.random() * 200 + 100;
 let vx = 2.5, vy = 1.8;
@@ -131,6 +136,8 @@ function interactionStep() {
 let spriteEl: HTMLDivElement;
 let iconEl: HTMLSpanElement;
 let scoreEl: HTMLSpanElement;
+let focusEl: HTMLSpanElement;
+let distractedEl: HTMLSpanElement;
 
 function setIconText(text: string) {
   iconEl.textContent = text;
@@ -143,6 +150,13 @@ function isPageAllowed(domains: unknown): boolean {
   return domains.some((d) => typeof d === 'string' && d.trim() !== '' && location.href.includes(d.trim()));
 }
 
+/** Grey the sprite out while the status is "Not working". A CSS filter desaturates
+ *  the character emoji and its coloured disc together, so it keeps every bit of
+ *  its normal behaviour (steps, shrink, face) but reads as paused, not earning. */
+function renderWorkingFilter() {
+  if (spriteEl) spriteEl.style.filter = forcedNotWorking ? 'grayscale(1)' : 'none';
+}
+
 /** Paint the face for the active state: the real character on a whitelisted page,
  *  the crying icon on any other. No-op while actually idle — the cry animation
  *  owns the face then. */
@@ -152,8 +166,10 @@ function renderActiveFace() {
   setIconText(pageAllowed ? char.icon : CRYING[0]);
 }
 
-function setScore(n: number) {
-  if (scoreEl) scoreEl.textContent = String(Math.round(n));
+function setScore(focus: number, distracted: number) {
+  if (focusEl) focusEl.textContent = String(Math.round(focus));
+  // Already negative — String() keeps the minus sign, which is the point.
+  if (distractedEl) distractedEl.textContent = String(Math.round(distracted));
 }
 
 // ── CSS ───────────────────────────────────────────────────────────────────────
@@ -447,6 +463,33 @@ function restartBeepIfCrying() {
   if (soundEnabled && cryTimer && cryBeepVolume > 0) startBeep();
 }
 
+// ── Idle warning ──────────────────────────────────────────────────────────────
+// Going idle doesn't escalate straight to the full crying behaviour. For the
+// first IDLE_WARNING_MS we only swap the face to the crying icon as a heads-up —
+// no beep, no cry animation, no grow to centre. Come back within the window and
+// none of that ever fires; stay away and it all starts at the end of it. The
+// score's grace period only begins here, once the warning is over — see the phase
+// breakdown above IDLE_WARNING_MS in background.ts, and keep the two in sync.
+const IDLE_WARNING_MS = 5000;
+let warningTimer: ReturnType<typeof setTimeout> | null = null;
+
+function startIdleWarning() {
+  if (warningTimer || cryTimer) return;
+  setIconText(CRYING[0]);
+  warningTimer = setTimeout(() => {
+    warningTimer = null;
+    if (appState?.isHeartbeatActive) return; // activity resumed → never escalate
+    startCrying();
+    if (!changeTimer) startGrowAnimation();
+  }, IDLE_WARNING_MS);
+}
+
+function stopIdleWarning() {
+  if (!warningTimer) return;
+  clearTimeout(warningTimer);
+  warningTimer = null;
+}
+
 // ── Crying ────────────────────────────────────────────────────────────────────
 function startCrying() {
   if (cryTimer) return;
@@ -473,7 +516,7 @@ function applyState(s: SessionState) {
 
   const char = CHARS[s.currentIconId % CHARS.length] ?? CHARS[0];
 
-  setScore(s.score ?? 0);
+  setScore(s.focusScore ?? 0, s.distractedScore ?? 0);
 
   const transitioned = wasHeartbeatActive !== s.isHeartbeatActive;
   wasHeartbeatActive = s.isHeartbeatActive;
@@ -490,13 +533,15 @@ function applyState(s: SessionState) {
   spriteEl.style.backgroundColor = s.isHeartbeatActive ? char.color : '#94a3b8';
 
   if (s.isHeartbeatActive) {
+    stopIdleWarning();
     stopCrying();
     renderActiveFace();
     // Size follows the heartbeat count (shrinks as focus accumulates).
     if (!changeTimer) applyActiveSize();
-  } else {
-    startCrying();
-    if (transitioned && !changeTimer) startGrowAnimation();
+  } else if (transitioned) {
+    startIdleWarning();          // face-only heads-up; escalates after the window
+  } else if (!warningTimer) {
+    startCrying();               // window already elapsed → keep the real idle state
   }
 
   // Nonces (iconChangeAt / penaltyAt): sync silently on the first state, then
@@ -545,18 +590,21 @@ function buildSprite(): HTMLDivElement {
   el.appendChild(icon);
   iconEl = icon;
 
-  // Score badge pinned to the bottom of the circle. It counter-scales in
-  // applyActiveSize so it stays legible whatever size the sprite is.
+  // Score badge pinned to the bottom of the circle: focus earned (green) beside
+  // distraction lost (red). It counter-scales in applyActiveSize so it stays
+  // legible whatever size the sprite is.
   const score = document.createElement('span');
   Object.assign(score.style, {
     position: 'absolute',
     bottom: '-9px',
     left: '50%',
     transform: 'translateX(-50%)',
+    display: 'flex',
+    gap: '5px',
+    alignItems: 'center',
     padding: '1px 6px',
     borderRadius: '9px',
     background: 'rgba(15,23,42,0.9)',
-    color: '#fff',
     fontSize: '11px',
     fontWeight: '700',
     lineHeight: '1.3',
@@ -564,9 +612,17 @@ function buildSprite(): HTMLDivElement {
     pointerEvents: 'none',
     boxShadow: '0 1px 3px rgba(0,0,0,0.35)',
   });
-  score.textContent = '0';
+  const focus = document.createElement('span');
+  focus.style.color = '#4ade80';
+  focus.textContent = '0';
+  const distracted = document.createElement('span');
+  distracted.style.color = '#f87171';
+  distracted.textContent = '0';
+  score.append(focus, distracted);
   el.appendChild(score);
   scoreEl = score;
+  focusEl = focus;
+  distractedEl = distracted;
 
   el.addEventListener('pointerdown', (e: PointerEvent) => {
     e.stopPropagation();
@@ -599,7 +655,7 @@ function onSpriteUp(_e: PointerEvent) {
 
 // ── Settings sync ──────────────────────────────────────────────────────────────
 function readSettings(raw: unknown) {
-  const s = raw as { iconChangeHeartbeats?: number; cryBeepVolume?: number; cryBeepDuration?: number; cryBeepStyle?: string; soundEnabled?: boolean; allowedDomains?: unknown } | undefined;
+  const s = raw as { iconChangeHeartbeats?: number; cryBeepVolume?: number; cryBeepDuration?: number; cryBeepStyle?: string; soundEnabled?: boolean; allowedDomains?: unknown; forceActive?: boolean } | undefined;
   const h = Number(s?.iconChangeHeartbeats);
   if (Number.isFinite(h)) iconChangeHeartbeats = Math.min(300, Math.max(5, Math.round(h)));
   const v = Number(s?.cryBeepVolume);
@@ -609,6 +665,7 @@ function readSettings(raw: unknown) {
   cryBeepStyle = s?.cryBeepStyle === 'pulse' || s?.cryBeepStyle === 'siren' ? s.cryBeepStyle : 'ramp';
   if (typeof s?.soundEnabled === 'boolean') soundEnabled = s.soundEnabled;
   if (s?.allowedDomains !== undefined) pageAllowed = isPageAllowed(s.allowedDomains);
+  if (typeof s?.forceActive === 'boolean') forcedNotWorking = s.forceActive;
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -660,6 +717,7 @@ function init() {
   chrome.storage.local.get(['focusFlowSettings'], (r) => {
     readSettings(r.focusFlowSettings);
     renderActiveFace(); // the whitelist just resolved — the face may need to change
+    renderWorkingFilter();
     if (appState?.isHeartbeatActive && !changeTimer) applyActiveSize();
   });
 
@@ -672,6 +730,9 @@ function init() {
       // Whitelisting this page (popup toggle or AI classify) swaps the face back
       // to the real character without waiting for the next state broadcast.
       renderActiveFace();
+      // Covers both the popup's toggle and the background's automatic switch to
+      // "Not working" after the beep runs out.
+      renderWorkingFilter();
       if (appState?.isHeartbeatActive && !changeTimer) applyActiveSize();
     }
   });
@@ -691,6 +752,7 @@ function init() {
     stopBeep();
     if (audioCtx)       { audioCtx.close().catch(() => {}); audioCtx = null; }
     if (cryTimer)       { clearInterval(cryTimer);       cryTimer = null; }
+    if (warningTimer)   { clearTimeout(warningTimer);    warningTimer = null; }
     if (stepTimer)      { clearTimeout(stepTimer);        stepTimer = null; }
     if (scaleAnimTimer) { clearInterval(scaleAnimTimer);  scaleAnimTimer = null; }
     if (changeTimer)    { clearTimeout(changeTimer);      changeTimer = null; }

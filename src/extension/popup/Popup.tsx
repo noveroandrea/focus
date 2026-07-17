@@ -1,18 +1,379 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { SessionState, Settings, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
-import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check } from 'lucide-react';
+import { SessionState, Settings, DayScore, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
+import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX } from 'lucide-react';
 import '../../index.css';
 
 
+// Diverging pair for both charts: focus green, distraction red, matched at the
+// 700 step. As a *colour pair* these are indistinguishable to a red/green
+// colourblind reader (deutan ΔE 4.2 — same lightness, and CVD collapses the hue
+// axis that separates them). That's acceptable ONLY because neither chart asks
+// colour to carry identity: focusScore is always ≥ 0 and distractedScore always
+// ≤ 0, so focus is always the mark ABOVE the zero baseline and distraction always
+// the one below — position tells them apart, and the lines can never cross.
+// If a series ever gains a sign, this pair must be re-validated.
+const FOCUS_COLOR = '#15803d';      // green-700
+const DISTRACTED_COLOR = '#b91c1c'; // red-700
+const DAY_MS = 86_400_000;
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** Mean of each score over the `days` complete days ENDING YESTERDAY. Today is
+ *  excluded on purpose: it's still accumulating, so folding a half-finished day
+ *  into the average would drag it down all morning and make the bar meaningless.
+ *  Counts only days that were actually recorded — a day the PC never came on
+ *  shouldn't read as a day of zero focus. */
+function windowAvg(rows: DayScore[], days: number, todayKey: string) {
+  const end = new Date(`${todayKey}T00:00:00`).getTime() - DAY_MS; // yesterday
+  const start = end - (days - 1) * DAY_MS;
+  const win = rows.filter((r) => {
+    const t = new Date(`${r.date}T00:00:00`).getTime();
+    return t >= start && t <= end;
+  });
+  if (win.length === 0) return { focusScore: 0, distractedScore: 0 };
+  return {
+    focusScore: win.reduce((s, r) => s + r.focusScore, 0) / win.length,
+    distractedScore: win.reduce((s, r) => s + r.distractedScore, 0) / win.length,
+  };
+}
+
+/** Diverging bar chart: one column per period, green growing up from the zero
+ *  baseline and red growing down. Both series share ONE magnitude scale so the
+ *  two halves stay comparable. Exact numbers live in the list above, so the bars
+ *  carry hover tooltips instead of a label on every mark. */
+const ScoreChart = ({ rows, todayKey }: { rows: DayScore[]; todayKey: string }) => {
+  // Left→right runs from the widest lookback to the most recent: the 30- and
+  // 7-day averages, then the 3 previous days, then today at the far right.
+  const last4 = rows.slice(0, 4).reverse(); // rows arrive newest-first; today ends up last
+  const bars = [
+    { key: 'm', label: '30 d', isAvg: true, ...windowAvg(rows, 30, todayKey) },
+    { key: 'w', label: '7 d', isAvg: true, ...windowAvg(rows, 7, todayKey) },
+    ...last4.map((d) => ({ key: d.date, label: d.weekday.slice(0, 3), isAvg: false, ...d })),
+  ];
+
+  const H = 39; // px per half — the chart is 2H tall plus the baseline
+  const max = Math.max(1, ...bars.map((b) => Math.max(Math.abs(b.focusScore), Math.abs(b.distractedScore))));
+  const px = (v: number) => Math.round((Math.min(Math.abs(v), max) / max) * H);
+
+  return (
+    <div className="rounded-xl border border-slate-100 px-2 pt-2 pb-1">
+      <div className="flex items-start justify-between gap-[2px]">
+        {bars.map((b) => (
+          <div
+            key={b.key}
+            className="flex flex-1 flex-col items-center"
+            title={`${b.label}: focus ${Math.round(b.focusScore)}, distracted ${Math.round(b.distractedScore)}`}
+          >
+            <div className="flex w-full flex-col justify-end" style={{ height: H }}>
+              <div
+                className="mx-auto w-2/3"
+                style={{ height: px(b.focusScore), background: FOCUS_COLOR, borderRadius: '4px 4px 0 0' }}
+              />
+            </div>
+            <div className="h-px w-full bg-slate-200" />
+            <div className="w-full" style={{ height: H }}>
+              <div
+                className="mx-auto w-2/3"
+                style={{ height: px(b.distractedScore), background: DISTRACTED_COLOR, borderRadius: '0 0 4px 4px' }}
+              />
+            </div>
+            <span className={`mt-0.5 whitespace-nowrap text-[8px] ${b.isAvg ? 'font-bold text-slate-500' : 'text-slate-400'}`}>
+              {b.label}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+/** Two series → a legend is always present, so identity never rests on colour
+ *  alone. Shared by both charts, which use the same pair. */
+const ScoreLegend = () => (
+  <div className="flex justify-center gap-3 text-[8px] text-slate-400">
+    <span className="flex items-center gap-1">
+      <span className="h-1.5 w-1.5 rounded-sm" style={{ background: FOCUS_COLOR }} /> Focus (above 0)
+    </span>
+    <span className="flex items-center gap-1">
+      <span className="h-1.5 w-1.5 rounded-sm" style={{ background: DISTRACTED_COLOR }} /> Distracted (below 0)
+    </span>
+  </div>
+);
+
+/** Whole-history trend: every banked day plus today's live score as the final
+ *  point. Days sit on a real time scale, so gaps (days the PC was off) show as
+ *  gaps rather than being squashed out. At this width individual days are only a
+ *  few px apart and can't be labelled, so the x axis carries month names only. */
+const ScoreTrend = ({ rows }: { rows: DayScore[] }) => {
+  const pts = [...rows].reverse(); // rows are newest-first; a trend reads oldest→newest
+  if (pts.length < 2) return null; // one point is not a line — the bars already show it
+
+  const W = 250, H = 73, PAD = 3, LABEL_H = 10;
+  const ms = (d: string) => new Date(`${d}T00:00:00`).getTime();
+  const t0 = ms(pts[0].date);
+  const tN = ms(pts[pts.length - 1].date);
+  const span = Math.max(1, tN - t0); // guard: all points on one day
+  const max = Math.max(1, ...pts.map((p) => Math.max(Math.abs(p.focusScore), Math.abs(p.distractedScore))));
+  const x = (d: string) => ((ms(d) - t0) / span) * W;
+  const y = (v: number) => H / 2 - (v / max) * (H / 2 - PAD); // zero centred, one shared scale
+  const path = (get: (p: DayScore) => number) =>
+    pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(get(p)).toFixed(1)}`).join(' ');
+
+  // A tick at each month boundary inside the range, plus the first point's month
+  // so a range shorter than a month is still labelled.
+  const ticks: { x: number; label: string }[] = [{ x: 0, label: MONTHS[new Date(t0).getMonth()] }];
+  const cursor = new Date(t0);
+  cursor.setDate(1);
+  cursor.setMonth(cursor.getMonth() + 1);
+  while (cursor.getTime() <= tN) {
+    ticks.push({ x: ((cursor.getTime() - t0) / span) * W, label: MONTHS[cursor.getMonth()] });
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H + LABEL_H}`} className="w-full" style={{ height: H + LABEL_H }}>
+      <line x1="0" y1={y(0)} x2={W} y2={y(0)} stroke="#e2e8f0" strokeWidth="1" />
+      {ticks.map((t) => (
+        <g key={t.label + t.x}>
+          <line x1={t.x} y1="0" x2={t.x} y2={H} stroke="#f1f5f9" strokeWidth="1" />
+          <text
+            x={Math.min(Math.max(t.x, 8), W - 8)}
+            y={H + LABEL_H - 1}
+            textAnchor="middle"
+            fontSize="8"
+            fill="#94a3b8"
+          >
+            {t.label}
+          </text>
+        </g>
+      ))}
+      <path d={path((p) => p.focusScore)} fill="none" stroke={FOCUS_COLOR} strokeWidth="2"
+            strokeLinejoin="round" strokeLinecap="round" />
+      <path d={path((p) => p.distractedScore)} fill="none" stroke={DISTRACTED_COLOR} strokeWidth="2"
+            strokeLinejoin="round" strokeLinecap="round" />
+      {/* Today is the point that matters most — mark where the lines end. */}
+      <circle cx={x(pts[pts.length - 1].date)} cy={y(pts[pts.length - 1].focusScore)} r="2.5" fill={FOCUS_COLOR} />
+      <circle cx={x(pts[pts.length - 1].date)} cy={y(pts[pts.length - 1].distractedScore)} r="2.5" fill={DISTRACTED_COLOR} />
+    </svg>
+  );
+};
+
+// ── Daily history ─────────────────────────────────────────────────────────────
+// Past days are banked into storage by the background at rollover. Today is NOT in
+// there yet — it's still live in SessionState — so we append it here to get one
+// complete row per day.
+/** Copy to clipboard, with a fallback for when the async Clipboard API is
+ *  unavailable or denied. Deliberately NOT a file download: on Wayland, a native
+ *  save/open dialog parented to the extension popup — a transient surface that is
+ *  destroyed the moment focus leaves it — is a protocol violation that gets the
+ *  whole browser killed by the compositor (SIGTRAP, "WL: error in client
+ *  communication"). Nothing here may open a native dialog. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      Object.assign(ta.style, { position: 'fixed', opacity: '0' });
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** Parse a pasted CSV back into history. The date drives everything: rows whose
+ *  first cell isn't a YYYY-MM-DD date are skipped, which conveniently also skips
+ *  the header. The weekday column is re-derived rather than trusted, so a
+ *  hand-edited file can't display a day that contradicts its own date. */
+function parseCsv(text: string): DayScore[] {
+  const rows: DayScore[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const cells = raw.split(',').map((c) => c.trim());
+    const date = cells[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    const focusScore = Number(cells[2]);
+    const distractedScore = Number(cells[3]);
+    if (!Number.isFinite(focusScore) || !Number.isFinite(distractedScore)) continue;
+    rows.push({ date, weekday: weekdayName(date), focusScore, distractedScore });
+  }
+  // Last row wins on a duplicate date; store oldest-first like the background does.
+  return [...new Map(rows.map((r) => [r.date, r])).values()]
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/** Stand-in days used ONLY when nothing has been banked yet, so the charts have
+ *  something to draw on day one (the trend needs ≥2 points, the bars want 4).
+ *  Never written to storage and never exported — see `realRows` below. */
+const SAMPLE_FOCUS = 50;
+const SAMPLE_DISTRACTED = -20;
+function sampleDays(todayKey: string): DayScore[] {
+  return [1, 2, 3, 4].map((i) => {
+    const d = new Date(`${todayKey}T00:00:00`);
+    d.setDate(d.getDate() - i);
+    const date = localDateKey(d);
+    return { date, weekday: weekdayName(date), focusScore: SAMPLE_FOCUS, distractedScore: SAMPLE_DISTRACTED };
+  });
+}
+
+const DailyHistory = ({ state }: { state: SessionState }) => {
+  const [history, setHistory] = useState<DayScore[]>([]);
+  const [importMsg, setImportMsg] = useState('');
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState('');
+
+  useEffect(() => {
+    const load = () => chrome.storage.local.get([HISTORY_KEY], (r) => {
+      setHistory(Array.isArray(r[HISTORY_KEY]) ? r[HISTORY_KEY] : []);
+    });
+    load();
+    // Repaint if a rollover banks a day while the popup happens to be open.
+    const listener = (changes: Record<string, unknown>, area: string) => {
+      if (area === 'local' && changes[HISTORY_KEY]) load();
+    };
+    chrome.storage.onChanged.addListener(listener);
+    return () => chrome.storage.onChanged.removeListener(listener);
+  }, []);
+
+  const date = state.scoreDate || localDateKey();
+  const today: DayScore = {
+    date,
+    weekday: weekdayName(date),
+    focusScore: state.focusScore ?? 0,
+    distractedScore: state.distractedScore ?? 0,
+  };
+  // Newest first for display. Filter today out of history first: the live value
+  // wins if a stale row for the same date somehow exists.
+  const realRows = [...history.filter((d) => d.date !== today.date), today]
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  // Nothing banked yet → pad with sample days so the charts render. The moment a
+  // single real day exists the samples vanish for good. They stay out of realRows,
+  // which is what the CSV exports, so demo numbers can never leak into your data.
+  const isSample = history.length === 0;
+  const rows = isSample
+    ? [...realRows, ...sampleDays(today.date)].sort((a, b) => b.date.localeCompare(a.date))
+    : realRows;
+
+  const copyCsv = async () => {
+    const header = 'date,weekday,focus,distracted';
+    // Oldest first — it reads like a log and charts without sorting.
+    const body = [...realRows].reverse()
+      .map((d) => `${d.date},${d.weekday},${Math.round(d.focusScore)},${Math.round(d.distractedScore)}`);
+    const ok = await copyText([header, ...body].join('\n') + '\n');
+    setImportMsg(ok
+      ? `Copied ${realRows.length} day${realRows.length === 1 ? '' : 's'} — paste into a file to keep`
+      : 'Copy failed — clipboard unavailable');
+  };
+
+  const applyPaste = () => {
+    const parsed = parseCsv(pasteText);
+    if (parsed.length === 0) {
+      setImportMsg('No valid rows found — expected date,weekday,focus,distracted');
+      return;
+    }
+    // Replaces the stored history outright, as intended. Today is untouched:
+    // it lives in SessionState, not here, and still wins on display.
+    chrome.storage.local.set({ [HISTORY_KEY]: parsed }, () => {
+      setHistory(parsed);
+      setPasteOpen(false);
+      setPasteText('');
+      setImportMsg(`Replaced history with ${parsed.length} day${parsed.length === 1 ? '' : 's'}`);
+    });
+  };
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <span className="text-sm text-slate-500 font-medium">Daily history</span>
+        <div className="flex gap-1">
+          <button
+            onClick={copyCsv}
+            title="Copy every recorded day as CSV to the clipboard"
+            className="flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-200 cursor-pointer"
+          >
+            <Copy size={11} /> Copy
+          </button>
+          <button
+            onClick={() => { setPasteOpen((v) => !v); setImportMsg(''); }}
+            title="Paste CSV — REPLACES all stored past days"
+            className="flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-200 cursor-pointer"
+          >
+            <ClipboardPaste size={11} /> Paste
+          </button>
+        </div>
+      </div>
+      {pasteOpen && (
+        <div className="space-y-1 rounded-xl bg-slate-50 p-2">
+          <textarea
+            value={pasteText}
+            onChange={(e) => setPasteText(e.target.value)}
+            placeholder={'date,weekday,focus,distracted\n2026-07-14,Tuesday,12,-30'}
+            rows={4}
+            className="w-full resize-none rounded-lg border border-slate-200 p-1.5 font-mono text-[9px] text-slate-700 focus:border-slate-400 focus:outline-none"
+          />
+          <div className="flex justify-end gap-1">
+            <button
+              onClick={() => { setPasteOpen(false); setPasteText(''); }}
+              className="rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 hover:bg-slate-200 cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={applyPaste}
+              disabled={!pasteText.trim()}
+              className="rounded-lg bg-slate-700 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-slate-800 disabled:opacity-40 cursor-pointer"
+            >
+              Replace history
+            </button>
+          </div>
+        </div>
+      )}
+      {isSample && (
+        <p className="text-[9px] font-medium text-amber-600">
+          Sample days shown — no history banked yet
+        </p>
+      )}
+      {importMsg && <p className="text-[9px] text-slate-500">{importMsg}</p>}
+      <ScoreChart rows={rows} todayKey={today.date} />
+      <ScoreTrend rows={rows} />
+      <ScoreLegend />
+      {/* Per-day detail last: the charts answer "how am I doing", this answers
+          "what exactly did I score on Tuesday". It doubles as the table view the
+          charts lean on for exact values. */}
+      <div className="max-h-28 overflow-y-auto rounded-xl border border-slate-100 divide-y divide-slate-100">
+        {rows.map((d) => (
+          <div key={d.date} className="flex items-center justify-between px-3 py-1.5 text-xs">
+            <span>
+              <span className="font-medium text-slate-600">{d.weekday.slice(0, 3)}</span>{' '}
+              <span className="text-slate-400">{d.date}</span>
+            </span>
+            <span className="font-bold tabular-nums">
+              <span className="text-green-600">{Math.round(d.focusScore)}</span>
+              <span className="text-slate-300"> / </span>
+              <span className="text-red-600">{Math.round(d.distractedScore)}</span>
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+
 // ── Main tab ──────────────────────────────────────────────────────────────────
-const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelistToggle, onChange }: {
+const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelistToggle }: {
   state: SessionState;
-  settings: Settings;
+  settings: Settings;   // read-only here: the whitelist check. Edits live in SettingsTab.
   currentTabDomain: string;
   currentTabUrl: string;
   onWhitelistToggle: () => void;
-  onChange: (s: Settings) => void;
 }) => {
   const isWhitelisted = currentTabUrl.length > 0 &&
     settings.allowedDomains.some(d => d.trim() !== '' && currentTabUrl.includes(d.trim()));
@@ -25,13 +386,6 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
         state.isHeartbeatActive ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600'
       }`}>
         {state.isHeartbeatActive ? 'Active' : 'Idle'}
-      </span>
-    </div>
-
-    <div className="flex items-center justify-between rounded-xl bg-indigo-50 px-3 py-2">
-      <span className="text-sm text-indigo-600 font-medium">Focus score</span>
-      <span className="text-lg font-extrabold tabular-nums text-indigo-700">
-        {Math.round(state.score ?? 0)}
       </span>
     </div>
 
@@ -60,28 +414,22 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
       </div>
     )}
 
-    {/* Feature toggles */}
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <span className="text-[11px] text-slate-600">Sound on</span>
-        <div
-          onClick={() => onChange({ ...settings, soundEnabled: !settings.soundEnabled })}
-          className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.soundEnabled ? 'bg-blue-500' : 'bg-slate-300'}`}
-        >
-          <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.soundEnabled ? 'translate-x-5' : ''}`} />
-        </div>
+    <div className="grid grid-cols-2 gap-2">
+      <div className="flex items-center justify-between rounded-xl bg-green-50 px-3 py-2">
+        <span className="text-sm text-green-600 font-medium">Focus</span>
+        <span className="text-lg font-extrabold tabular-nums text-green-700">
+          {Math.round(state.focusScore ?? 0)}
+        </span>
       </div>
-
-      <div className="flex items-center justify-between">
-        <span className="text-[11px] text-slate-600">AI request</span>
-        <div
-          onClick={() => onChange({ ...settings, aiRequestEnabled: !settings.aiRequestEnabled })}
-          className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.aiRequestEnabled ? 'bg-blue-500' : 'bg-slate-300'}`}
-        >
-          <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.aiRequestEnabled ? 'translate-x-5' : ''}`} />
-        </div>
+      <div className="flex items-center justify-between rounded-xl bg-red-50 px-3 py-2">
+        <span className="text-sm text-red-600 font-medium">Distracted</span>
+        <span className="text-lg font-extrabold tabular-nums text-red-700">
+          {Math.round(state.distractedScore ?? 0)}
+        </span>
       </div>
     </div>
+
+    <DailyHistory state={state} />
 
   </div>
   );
@@ -108,6 +456,22 @@ const SettingsTab = ({ settings, onChange }: {
 
   return (
     <div className="space-y-5 text-sm">
+
+      {/* Feature toggles. Sound lives in the header next to Working — it's a
+          one-click mute, not a setting you come in here to change. */}
+      <section className="space-y-2">
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Features</h3>
+
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] text-slate-600">AI request</span>
+          <div
+            onClick={() => set({ aiRequestEnabled: !settings.aiRequestEnabled })}
+            className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.aiRequestEnabled ? 'bg-blue-500' : 'bg-slate-300'}`}
+          >
+            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.aiRequestEnabled ? 'translate-x-5' : ''}`} />
+          </div>
+        </div>
+      </section>
 
       {/* Timers */}
       <section className="space-y-3">
@@ -382,7 +746,8 @@ const Popup = () => {
       chrome.runtime.sendMessage({ type: 'GET_STATE' }, (res) => {
         const empty: SessionState = {
           isHeartbeatActive: false, lastHeartbeat: 0, activeWindowId: null, enabled: true,
-          currentIconId: 0, heartbeatCount: 0, iconChangeAt: 0, score: 0, penaltyAt: 0,
+          currentIconId: 0, heartbeatCount: 0, iconChangeAt: 0, focusScore: 0, distractedScore: 0,
+          scoreDate: localDateKey(), penaltyAt: 0,
         };
         if (chrome.runtime.lastError) { setState(empty); return; }
         setState(res ?? empty);
@@ -462,6 +827,19 @@ const Popup = () => {
             <Activity className={settings.forceActive ? 'text-slate-300' : 'text-green-500'} size={20} />
             Focus
           </h1>
+          <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => saveSettings({ ...settings, soundEnabled: !settings.soundEnabled })}
+            className={`flex flex-shrink-0 items-center justify-center rounded-full p-1.5 transition-colors cursor-pointer ${
+              settings.soundEnabled
+                ? 'bg-blue-500 text-white hover:bg-blue-600'
+                : 'bg-slate-200 text-slate-500 hover:bg-slate-300'
+            }`}
+            title={settings.soundEnabled ? 'Sound on — click to mute the idle beep' : 'Sound off — click to unmute the idle beep'}
+            aria-label={settings.soundEnabled ? 'Sound on' : 'Sound off'}
+          >
+            {settings.soundEnabled ? <Volume2 size={13} /> : <VolumeX size={13} />}
+          </button>
           <button
             onClick={() => saveSettings({ ...settings, forceActive: !settings.forceActive })}
             className={`flex items-center gap-1.5 flex-shrink-0 px-3 py-1.5 rounded-full text-[11px] font-bold transition-colors cursor-pointer ${
@@ -476,6 +854,7 @@ const Popup = () => {
             {settings.forceActive ? <ZapOff size={13} /> : <Zap size={13} />}
             {settings.forceActive ? 'Not working' : 'Working'}
           </button>
+          </div>
         </div>
       </header>
 
@@ -506,7 +885,6 @@ const Popup = () => {
             currentTabDomain={currentTabDomain}
             currentTabUrl={currentTabUrl}
             onWhitelistToggle={handleWhitelistToggle}
-            onChange={saveSettings}
           />
         ) : (
           <SettingsTab settings={settings} onChange={saveSettings} />

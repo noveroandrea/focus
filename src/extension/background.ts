@@ -1,4 +1,4 @@
-import { SessionState, MessageType, Settings, DEFAULT_SETTINGS, CHARACTER_COUNT, clampIconChangeHeartbeats, clampIdleTime } from '../types';
+import { SessionState, MessageType, Settings, DayScore, DEFAULT_SETTINGS, CHARACTER_COUNT, HISTORY_KEY, clampIconChangeHeartbeats, clampIdleTime, clampCryBeepDuration, localDateKey, weekdayName } from '../types';
 
 let state: SessionState = {
   isHeartbeatActive: false,
@@ -8,7 +8,9 @@ let state: SessionState = {
   currentIconId: Math.floor(Math.random() * CHARACTER_COUNT),
   heartbeatCount: 0,
   iconChangeAt: 0,
-  score: 0,
+  focusScore: 0,
+  distractedScore: 0,
+  scoreDate: '',
   penaltyAt: 0,
 };
 
@@ -86,6 +88,7 @@ chrome.storage.local.get(['focusFlowState', 'focusFlowSettings'], (result) => {
   }
   state.enabled = settings.enabled;
   if (settings.forceActive) state.isHeartbeatActive = true;
+  maybeRollover(); // the PC may have been off across midnight — bank the old day now
   updateActionIcon();
   chrome.windows.getLastFocused((win) => {
     if (win.id) updateState({ activeWindowId: win.id });
@@ -160,7 +163,7 @@ function applyCount(amount: number) {
       currentIconId: (state.currentIconId + 1) % CHARACTER_COUNT,
       heartbeatCount: 0,
       iconChangeAt: Date.now(),
-      score: roundScore(state.score + gained),
+      focusScore: round2(state.focusScore + gained),
     });
   } else {
     updateState({ heartbeatCount: next });
@@ -191,39 +194,104 @@ function registerHeartbeat(weight = 1) {
 }
 
 // ── Score ──────────────────────────────────────────────────────────────────────
-// A gamified focus score, persisted in SessionState: it rises by 30/x on every
-// character change (see registerHeartbeat) and drops by 10 each time an idle
-// lapse lasts longer than IDLE_PENALTY_MS. Kept ≥ 0 and rounded to 2 decimals so
-// small (large-x) increments still accumulate cleanly.
-const IDLE_PENALTY_MS = 5000;   // idle must last > 5 s before it costs points
+// Two independent counters, persisted in SessionState, each moving one way only:
+//   • focusScore      rises by 30/x on every character change (see registerHeartbeat).
+//   • distractedScore falls by 10 once an idle lapse has outlasted the warning face
+//                     AND the grace period after it — so it runs negative.
+// Neither is clamped against the other; they're kept apart on purpose so a bad
+// stretch never erases earned focus. Rounded to 2 decimals so small (large-x)
+// focus increments still accumulate cleanly.
+//
+// An idle lapse runs in three phases:
+//   0 … 5 s   warning  — the sprite shows the crying face only (IDLE_WARNING_MS
+//                        in sprite.ts; keep the two in sync).
+//   5 … 10 s  grace    — the real idle behaviour (beep, grow) has started, but the
+//                        counters are untouched: there's still time to come back.
+//   > 10 s             — the −10 lands on distractedScore, once per lapse.
+// Finally, once the beep has run its full cryBeepDuration the lapse is treated as
+// "you've stopped working" and the status auto-switches to Not working.
+const IDLE_WARNING_MS = 5000;   // face-only warning, before any idle behaviour
+const IDLE_PENALTY_MS = 5000;   // grace period that starts once the warning ends
 const IDLE_PENALTY = 10;        // points removed per idle lapse
 let idleWasActive = state.isHeartbeatActive; // tracks the active→idle edge
 let idleSince = 0;              // when the current idle lapse began
 let idlePenaltyApplied = false; // one penalty per idle lapse
+let autoPauseApplied = false;   // one auto "Not working" switch per idle lapse
 
-function roundScore(n: number): number {
-  return Math.max(0, Math.round(n * 100) / 100);
+// No max(0) here: focusScore only ever rises from 0 and distractedScore is meant
+// to run negative, so clamping either would be wrong.
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+// ── Daily rollover ─────────────────────────────────────────────────────────────
+// The two counters belong to one local calendar day (state.scoreDate) and survive
+// reboots via chrome.storage.local. When the day changes we bank the finished day
+// into the DayScore[] history and reset the live counters to 0.
+//
+// This is date-driven, NOT a midnight timer: an MV3 service worker is asleep most
+// of the time and can't be trusted to fire at 00:00, and the PC may be off
+// entirely. Instead we compare dates on every wake — at startup and on each tick
+// of the status loop — so the rollover lands at midnight if the machine is awake,
+// or at the first moment it's switched on afterwards. Either way no day is lost.
+function maybeRollover() {
+  const today = localDateKey();
+  if (state.scoreDate === today) return;
+
+  // Empty scoreDate = first run since this feature shipped; there's no complete
+  // previous day to bank, so just claim today.
+  if (state.scoreDate) archiveDay(state.scoreDate, state.focusScore, state.distractedScore);
+  updateState({ scoreDate: today, focusScore: 0, distractedScore: 0 });
+}
+
+function archiveDay(date: string, focusScore: number, distractedScore: number) {
+  chrome.storage.local.get([HISTORY_KEY], (r) => {
+    const history: DayScore[] = Array.isArray(r[HISTORY_KEY]) ? r[HISTORY_KEY] : [];
+    const entry: DayScore = { date, weekday: weekdayName(date), focusScore, distractedScore };
+    // Overwrite rather than append if the date is somehow already there, so a
+    // double rollover can never duplicate a day.
+    const i = history.findIndex((e) => e.date === date);
+    if (i >= 0) history[i] = entry;
+    else history.push(entry);
+    history.sort((a, b) => a.date.localeCompare(b.date));
+    chrome.storage.local.set({ [HISTORY_KEY]: history });
+    console.log('Focus: banked', date, entry);
+  });
 }
 
 // Called once per second from the status loop. Detects the transition into idle
-// and, once that lapse has lasted longer than IDLE_PENALTY_MS, deducts the
+// and, once that lapse has outlasted the warning + grace phases, deducts the
 // penalty a single time until activity resumes.
 function trackIdlePenalty() {
   const now = Date.now();
   if (state.isHeartbeatActive) {
     idleWasActive = true;
     idlePenaltyApplied = false;
+    autoPauseApplied = false;
     return;
   }
   if (idleWasActive) {          // just went idle → start timing this lapse
     idleWasActive = false;
     idleSince = now;
     idlePenaltyApplied = false;
+    autoPauseApplied = false;
   }
-  if (!idlePenaltyApplied && now - idleSince > IDLE_PENALTY_MS) {
+  if (!idlePenaltyApplied && now - idleSince > IDLE_WARNING_MS + IDLE_PENALTY_MS) {
     idlePenaltyApplied = true;
     // penaltyAt is a nonce the sprite watches to play the "−10" fly-up once.
-    updateState({ score: roundScore(state.score - IDLE_PENALTY), penaltyAt: now });
+    updateState({ distractedScore: round2(state.distractedScore - IDLE_PENALTY), penaltyAt: now });
+  }
+  // The beep has nagged for its full duration and you're still gone → you're not
+  // working, so stop nagging and say so. We only WRITE the setting: the
+  // storage.onChanged listener above owns applying it, so the sprite snap and the
+  // toolbar recolour go through exactly the same path as the popup's own toggle.
+  // (Writing `settings` here first would make that listener see no change and skip
+  // both.) Deliberately keyed off cryBeepDuration whether or not the sound is
+  // actually enabled — it's the "how long do I nag you" knob either way.
+  const nagEndsAt = IDLE_WARNING_MS + clampCryBeepDuration(settings.cryBeepDuration) * 1000;
+  if (!autoPauseApplied && now - idleSince > nagEndsAt) {
+    autoPauseApplied = true;
+    chrome.storage.local.set({ focusFlowSettings: { ...settings, forceActive: true } });
   }
 }
 
@@ -259,6 +327,8 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 //   • acts as a backup Idle expiry if nothing refreshed the heartbeat within
 //     `idleTime` (the idle poll is the primary path to Idle).
 setInterval(() => {
+  // Before any early return: the day must roll over even while disabled or forced.
+  maybeRollover();
   if (!settings.enabled) return;
 
   if (settings.forceActive) {

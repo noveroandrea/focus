@@ -12,10 +12,45 @@ export interface SessionState {
   heartbeatCount: number;
   /** Timestamp of the most recent icon change — bumped to trigger the fireworks animation */
   iconChangeAt: number;
-  /** Gamified focus score: +30/iconChangeHeartbeats per character change, −10 per idle lapse (>5 s) */
-  score: number;
+  /** Points earned by focusing: +30/iconChangeHeartbeats per character change. Only ever rises. */
+  focusScore: number;
+  /** Points lost to distraction: −10 per idle lapse. Only ever falls, so it goes negative. */
+  distractedScore: number;
+  /** Local calendar day (YYYY-MM-DD) the two scores above belong to. When the day
+   *  changes, the old day is banked into DayScore[] history and the scores reset. */
+  scoreDate: string;
   /** Timestamp nonce bumped each time an idle penalty is applied — triggers the "−10" sprite animation */
   penaltyAt: number;
+}
+
+/** One archived day of scores, kept in chrome.storage.local under HISTORY_KEY.
+ *  Written once, when the day rolls over — never edited afterwards. */
+export interface DayScore {
+  /** Local calendar day, YYYY-MM-DD */
+  date: string;
+  /** Day of the week for that date, e.g. "Monday" — stored so the CSV is readable as-is */
+  weekday: string;
+  focusScore: number;
+  distractedScore: number;
+}
+
+export const HISTORY_KEY = 'focusScoreHistory';
+
+export const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** The LOCAL calendar day as YYYY-MM-DD. Deliberately not toISOString(), which is
+ *  UTC and would roll the day over at the wrong moment for most timezones. */
+export function localDateKey(d: Date = new Date()): string {
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+/** Weekday name for a YYYY-MM-DD key. The T00:00:00 suffix forces local-time
+ *  parsing — a bare date string is parsed as UTC and can land on the day before. */
+export function weekdayName(dateKey: string): string {
+  const d = new Date(`${dateKey}T00:00:00`);
+  return WEEKDAYS[d.getDay()] ?? '';
 }
 
 export interface Settings {
