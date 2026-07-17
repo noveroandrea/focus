@@ -43,8 +43,9 @@ let settings: Settings = { ...DEFAULT_SETTINGS };
 // ── Toolbar icon ──────────────────────────────────────────────────────────────
 // No static icon file ships with the extension; we draw it in the service worker
 // with OffscreenCanvas so its colour can reflect the working state: green while
-// "Working" (forceActive off), grey while "Not working" (forceActive on). It
-// reproduces the old auto-generated look — a rounded square with a white "F".
+// "Working" on an authorized page, yellow while "Working" on a page that is NOT
+// whitelisted, grey while "Not working" (forceActive on). It reproduces the old
+// auto-generated look — a rounded square with a white "F".
 function makeIcon(size: number, color: string): ImageData {
   const canvas = new OffscreenCanvas(size, size);
   const ctx = canvas.getContext('2d')!;
@@ -61,9 +62,8 @@ function makeIcon(size: number, color: string): ImageData {
   return ctx.getImageData(0, 0, size, size);
 }
 
-function updateActionIcon() {
+function paintActionIcon(color: string) {
   try {
-    const color = settings.forceActive ? '#94a3b8' : '#22c55e'; // grey | green
     chrome.action.setIcon({
       imageData: {
         16: makeIcon(16, color),
@@ -73,6 +73,23 @@ function updateActionIcon() {
       },
     });
   } catch { /* OffscreenCanvas/action unavailable — ignore */ }
+}
+
+// Recolour the toolbar icon. "Not working" (forceActive) is grey regardless of
+// page. While "Working" the colour depends on the currently active tab: green on
+// a whitelisted page, yellow on any other page. Because that depends on which tab
+// is in front, we look up the active tab of the last-focused window each time.
+function updateActionIcon() {
+  if (settings.forceActive) { paintActionIcon('#94a3b8'); return; } // grey
+  try {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+      const url = tabs[0]?.url ?? '';
+      const whitelisted = !!url && isAllowedUrl(url);
+      paintActionIcon(whitelisted ? '#22c55e' : '#eab308'); // green | yellow
+    });
+  } catch {
+    paintActionIcon('#22c55e');
+  }
 }
 
 // ── Init from storage ─────────────────────────────────────────────────────────
@@ -107,7 +124,12 @@ chrome.storage.onChanged.addListener((changes, area) => {
     // Force-active toggled: snap the sprite into (or out of) the active state
     if (prev.forceActive !== settings.forceActive) {
       updateState({ isHeartbeatActive: settings.forceActive, lastHeartbeat: Date.now() });
-      updateActionIcon(); // recolour the toolbar icon for the new working state
+    }
+    // Recolour the toolbar icon whenever the working state OR the whitelist changed
+    // (whitelisting the current page flips its icon green↔yellow).
+    if (prev.forceActive !== settings.forceActive ||
+        prev.allowedDomains.join('\n') !== settings.allowedDomains.join('\n')) {
+      updateActionIcon();
     }
   }
 });
@@ -301,6 +323,7 @@ function trackIdlePenalty() {
 chrome.windows.onFocusChanged.addListener((windowId) => {
   if (windowId !== chrome.windows.WINDOW_ID_NONE) {
     updateState({ activeWindowId: windowId });
+    updateActionIcon(); // the front page changed — recolour green/yellow
   }
 });
 
@@ -478,8 +501,13 @@ function scheduleViewerClassify(tabId: number) {
 
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status === 'complete' && tab.active) scheduleViewerClassify(tabId);
+  // A navigation on the active tab may have changed its whitelist status
+  if (tab.active && (info.url || info.status === 'complete')) updateActionIcon();
 });
-chrome.tabs.onActivated.addListener(({ tabId }) => scheduleViewerClassify(tabId));
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  scheduleViewerClassify(tabId);
+  updateActionIcon(); // switched tabs — recolour green/yellow for the new front page
+});
 
 // ── Message handler ───────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse) => {

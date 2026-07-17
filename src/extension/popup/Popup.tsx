@@ -441,6 +441,9 @@ const SettingsTab = ({ settings, onChange }: {
   onChange: (s: Settings) => void;
 }) => {
   const [newDomain, setNewDomain] = useState('');
+  const [domainPasteOpen, setDomainPasteOpen] = useState(false);
+  const [domainPasteText, setDomainPasteText] = useState('');
+  const [domainMsg, setDomainMsg] = useState('');
 
   const set = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
 
@@ -453,6 +456,31 @@ const SettingsTab = ({ settings, onChange }: {
 
   const removeDomain = (d: string) =>
     set({ allowedDomains: settings.allowedDomains.filter(x => x !== d) });
+
+  // Copy the whitelist to the clipboard, one domain per line.
+  const copyDomains = async () => {
+    const ok = await copyText(settings.allowedDomains.join('\n') + '\n');
+    setDomainMsg(ok
+      ? `Copied ${settings.allowedDomains.length} domain${settings.allowedDomains.length === 1 ? '' : 's'} to clipboard`
+      : 'Copy failed — clipboard unavailable');
+  };
+
+  // Overwrite the whitelist with the pasted list (one domain per line). Same
+  // normalisation as addDomain; blanks and duplicates are dropped.
+  const applyDomainPaste = () => {
+    const seen = new Set<string>();
+    const domains: string[] = [];
+    for (const line of domainPasteText.split(/[\n,]/)) {
+      const d = line.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+      if (!d || seen.has(d)) continue;
+      seen.add(d);
+      domains.push(d);
+    }
+    set({ allowedDomains: domains });
+    setDomainPasteOpen(false);
+    setDomainPasteText('');
+    setDomainMsg(`Replaced whitelist with ${domains.length} domain${domains.length === 1 ? '' : 's'}`);
+  };
 
   return (
     <div className="space-y-5 text-sm">
@@ -687,7 +715,53 @@ const SettingsTab = ({ settings, onChange }: {
 
       {/* Allowed pages */}
       <section className="space-y-2">
-        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Allowed Pages</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Allowed Pages</h3>
+          <div className="flex gap-1">
+            <button
+              onClick={copyDomains}
+              title="Copy the whitelist to the clipboard, one domain per line"
+              className="flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-200 cursor-pointer"
+            >
+              <Copy size={11} /> Copy
+            </button>
+            <button
+              onClick={() => { setDomainPasteOpen(v => !v); setDomainMsg(''); }}
+              title="Paste a list — REPLACES the whole whitelist"
+              className="flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-200 cursor-pointer"
+            >
+              <ClipboardPaste size={11} /> Paste
+            </button>
+          </div>
+        </div>
+
+        {domainPasteOpen && (
+          <div className="space-y-1 rounded-xl bg-slate-50 p-2">
+            <textarea
+              value={domainPasteText}
+              onChange={e => setDomainPasteText(e.target.value)}
+              placeholder={'overleaf.com\narxiv.org\nwikipedia.org'}
+              rows={4}
+              className="w-full resize-none rounded-lg border border-slate-200 p-1.5 font-mono text-[9px] text-slate-700 focus:border-slate-400 focus:outline-none"
+            />
+            <div className="flex justify-end gap-1">
+              <button
+                onClick={() => { setDomainPasteOpen(false); setDomainPasteText(''); }}
+                className="rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 hover:bg-slate-200 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={applyDomainPaste}
+                disabled={!domainPasteText.trim()}
+                className="rounded-lg bg-slate-700 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-slate-800 disabled:opacity-40 cursor-pointer"
+              >
+                Replace whitelist
+              </button>
+            </div>
+          </div>
+        )}
+        {domainMsg && <p className="text-[9px] text-slate-500">{domainMsg}</p>}
 
         <div className="rounded-xl border border-slate-100 bg-white p-2 space-y-0.5 max-h-48 overflow-y-auto">
           {settings.allowedDomains.length === 0 && (
