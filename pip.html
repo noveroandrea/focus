@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Focus companion</title>
+    <style>
+        html, body { margin: 0; height: 100%; }
+        body {
+            background: radial-gradient(circle at 30% 30%, #1e293b, #0f172a);
+            color: #e2e8f0;
+            font-family: system-ui, sans-serif;
+            overflow: hidden;
+        }
+        #root { height: 100vh; display: flex; flex-direction: column; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module" src="./src/extension/pip/pip.ts"></script>
+</body>
+</html>

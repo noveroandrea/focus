@@ -1,4 +1,8 @@
 import { SessionState, MessageType, Settings, DayScore, DEFAULT_SETTINGS, CHARACTER_COUNT, HISTORY_KEY, clampIconChangeHeartbeats, clampIdleTime, clampCryBeepDuration, localDateKey, weekdayName } from '../types';
+import {
+  IDLE_POLL_MS, STATUS_LOOP_MS, HEARTBEAT_THROTTLE_MS, VIEWER_CLASSIFY_DELAY_MS,
+  IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
+} from './timings';
 
 let state: SessionState = {
   isHeartbeatActive: false,
@@ -202,7 +206,7 @@ function applyCount(amount: number) {
 function registerHeartbeat(weight = 1) {
   if (!state.isHeartbeatActive && !settings.forceActive) return;
   const now = Date.now();
-  if (now - lastCountAt < 1000) {
+  if (now - lastCountAt < HEARTBEAT_THROTTLE_MS) {
     if (weight > lastCountWeight) {   // heavier source this second → top up the gap
       const extra = weight - lastCountWeight;
       lastCountWeight = weight;
@@ -232,9 +236,8 @@ function registerHeartbeat(weight = 1) {
 //   > 10 s             — the −10 lands on distractedScore, once per lapse.
 // Finally, once the beep has run its full cryBeepDuration the lapse is treated as
 // "you've stopped working" and the status auto-switches to Not working.
-const IDLE_WARNING_MS = 5000;   // face-only warning, before any idle behaviour
-const IDLE_PENALTY_MS = 5000;   // grace period that starts once the warning ends
-const IDLE_PENALTY = 10;        // points removed per idle lapse
+// (Timeline constants — IDLE_WARNING_MS, IDLE_GRACE_MS, IDLE_PENALTY — and the
+//  derived delays live in ./timings.ts, shared with the sprite.)
 let idleWasActive = state.isHeartbeatActive; // tracks the active→idle edge
 let idleSince = 0;              // when the current idle lapse began
 let idlePenaltyApplied = false; // one penalty per idle lapse
@@ -298,7 +301,7 @@ function trackIdlePenalty() {
     idlePenaltyApplied = false;
     autoPauseApplied = false;
   }
-  if (!idlePenaltyApplied && now - idleSince > IDLE_WARNING_MS + IDLE_PENALTY_MS) {
+  if (!idlePenaltyApplied && now - idleSince > idlePenaltyDelayMs()) {
     idlePenaltyApplied = true;
     // penaltyAt is a nonce the sprite watches to play the "−10" fly-up once.
     updateState({ distractedScore: round2(state.distractedScore - IDLE_PENALTY), penaltyAt: now });
@@ -310,7 +313,7 @@ function trackIdlePenalty() {
   // (Writing `settings` here first would make that listener see no change and skip
   // both.) Deliberately keyed off cryBeepDuration whether or not the sound is
   // actually enabled — it's the "how long do I nag you" knob either way.
-  const nagEndsAt = IDLE_WARNING_MS + clampCryBeepDuration(settings.cryBeepDuration) * 1000;
+  const nagEndsAt = autoPauseDelayMs(clampCryBeepDuration(settings.cryBeepDuration));
   if (!autoPauseApplied && now - idleSince > nagEndsAt) {
     autoPauseApplied = true;
     chrome.storage.local.set({ focusFlowSettings: { ...settings, forceActive: true } });
@@ -366,7 +369,7 @@ setInterval(() => {
     updateState({ isHeartbeatActive: false });
   }
   trackIdlePenalty(); // dock points for an idle lapse longer than 5 s
-}, 1000);
+}, STATUS_LOOP_MS);
 
 // (2) OS idle poll — twice per second. queryState(idleTime) already means "no input
 // for idleTime s", so it maps straight onto the status — we do NOT stack another
@@ -395,7 +398,7 @@ setInterval(() => {
       registerHeartbeat(); // idle-sourced heartbeat → advance count + step (≤1/s)
     });
   });
-}, 500);
+}, IDLE_POLL_MS);
 
 // Mirrors heartbeat.ts: a URL is authorized when it matches a whitelisted domain.
 function isAllowedUrl(url: string): boolean {
@@ -496,7 +499,7 @@ function scheduleViewerClassify(tabId: number) {
       if (chrome.runtime.lastError || !tab.active) return;
       maybeClassifyViewerTab(tab);
     });
-  }, 2500);
+  }, VIEWER_CLASSIFY_DELAY_MS);
 }
 
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {

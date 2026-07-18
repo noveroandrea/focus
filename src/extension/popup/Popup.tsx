@@ -805,6 +805,27 @@ const SettingsTab = ({ settings, onChange }: {
   );
 };
 
+// Open (or focus) the floating-companion helper window. It's an extension page, so
+// it can pop out an always-on-top video PiP even on sites that block PiP for their
+// own document (e.g. Overleaf). Deduped via a stored window id so repeated clicks
+// don't stack windows.
+function openCompanionWindow() {
+  const url = chrome.runtime.getURL('pip.html');
+  const create = () => chrome.windows.create(
+    { url, type: 'popup', width: 380, height: 320 },
+    (w) => { if (w?.id != null) chrome.storage.local.set({ pipWindowId: w.id }); },
+  );
+  chrome.storage.local.get(['pipWindowId'], ({ pipWindowId }) => {
+    if (typeof pipWindowId === 'number') {
+      chrome.windows.update(pipWindowId, { focused: true, drawAttention: true }, () => {
+        if (chrome.runtime.lastError) create(); // stored window gone → make a new one
+      });
+    } else {
+      create();
+    }
+  });
+}
+
 // ── Root ──────────────────────────────────────────────────────────────────────
 const Popup = () => {
   const [activeTab, setActiveTab] = useState<'main' | 'settings'>('main');
@@ -915,15 +936,18 @@ const Popup = () => {
             {settings.soundEnabled ? <Volume2 size={13} /> : <VolumeX size={13} />}
           </button>
           <button
-            onClick={() => saveSettings({ ...settings, forceActive: !settings.forceActive })}
+            onClick={() => {
+              saveSettings({ ...settings, forceActive: !settings.forceActive });
+              openCompanionWindow();
+            }}
             className={`flex items-center gap-1.5 flex-shrink-0 px-3 py-1.5 rounded-full text-[11px] font-bold transition-colors cursor-pointer ${
               settings.forceActive
                 ? 'bg-slate-200 text-slate-500 hover:bg-slate-300'
                 : 'bg-green-500 text-white hover:bg-green-600'
             }`}
             title={settings.forceActive
-              ? 'Not working — sprite kept active on every page'
-              : 'Working — only active on authorized pages with real activity'}
+              ? 'Not working — click to resume (and pop out the floating companion)'
+              : 'Working — click to pause (and pop out the floating companion)'}
           >
             {settings.forceActive ? <ZapOff size={13} /> : <Zap size={13} />}
             {settings.forceActive ? 'Not working' : 'Working'}

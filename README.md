@@ -24,6 +24,7 @@ on your machine. An **optional** local AI helper (Ollama) can auto-detect study 
 - [How it works](#how-it-works)
 - [The sprite](#the-sprite)
 - [The popup menu](#the-popup-menu)
+- [Floating companion (picture-in-picture)](#floating-companion-picture-in-picture)
 - [Optional: Ollama AI auto-classify](#optional-ollama-ai-auto-classify)
   - [Working without Ollama](#working-without-ollama)
   - [Limiting Ollama CPU usage](#limiting-ollama-cpu-usage)
@@ -185,7 +186,7 @@ Click the Focus icon in the toolbar.
 
 | Element | What it does |
 |---|---|
-| **Force-active toggle** (top-right) | When ON, the sprite is pinned to the **Active** state on every page regardless of real input — useful to keep the companion alive while reading something it can't "see" (e.g. a video lecture). When OFF, activity is detected normally. |
+| **Force-active toggle** (top-right) | When ON, the sprite is pinned to the **Active** state on every page regardless of real input — useful to keep the companion alive while reading something it can't "see" (e.g. a video lecture). When OFF, activity is detected normally. Clicking it also opens the **floating companion** helper window — see [Floating companion](#floating-companion-picture-in-picture). |
 
 ### Main tab
 
@@ -230,6 +231,73 @@ with **✕**. Newly added pages need a tab reload to start tracking.
 **Default whitelist** (pre-authorized out of the box): `overleaf.com`, `arxiv.org`,
 `nature.com`, `ieee.org`, `claude.ai`, `scholar.google.com`, `wikipedia.org`, `unipd.it`,
 `mail.google.com`, `outlook.live.com`, `outlook.office.com` — plus **every `.pdf` URL**.
+
+---
+
+## Floating companion (picture-in-picture)
+
+You can pop the companion out into a small **always-on-top window** that stays visible
+over other apps, so you keep an eye on it while you work in another program.
+
+**How to open it:** click the **Working** button in the popup header. That opens a small
+**helper window** showing the companion and a **Pop out ⤢** button. Click **Pop out** and
+the companion moves into an always-on-top picture-in-picture (PiP) overlay. Keep the helper
+window open (behind other windows is fine) — closing it closes the overlay.
+
+### Why it's a separate extension window
+
+The obvious approach — pop out from the content script running on the page — does **not**
+work on every site. Picture-in-picture is governed by the page's **Permissions-Policy**, and
+some sites (for example many Overleaf deployments) send `picture-in-picture=()`, which
+disables PiP for the whole document. A content script runs *inside that page* and inherits
+its policy, so it simply cannot open PiP there.
+
+To sidestep this, the companion PiP is hosted in a dedicated **extension page**
+(`pip.html` / `src/extension/pip/pip.ts`, opened as its own window). That page has the
+extension's origin and its **own** permissions policy, so PiP is always allowed regardless of
+what the visited site sends. It mirrors the live state and renders the character to a
+`<canvas>`, which is captured to a `<video>` and shown as **video PiP** (the OS overlay that
+can float above every app).
+
+### Linux / Wayland: making the overlay actually stay on top
+
+Whether a PiP window floats **above all other windows** is decided by your desktop
+**compositor**, not by the browser or this extension — the web APIs can only *request* PiP,
+never force OS window stacking.
+
+On **Wayland** (e.g. GNOME's default session), the core protocol does **not** let a browser
+mark its own window always-on-top, so Chromium browsers (Chrome, Edge, **Brave** — they all
+share this) let the PiP drop behind whatever window you focus next. This is not Brave- or
+extension-specific; it is a Chromium-on-Wayland limitation. On **macOS/Windows** PiP is
+always-on-top natively, so none of this applies there.
+
+**The fix is to run the browser on the X11 backend**, where always-on-top works. Recent
+Chromium removed the `chrome://flags` → *Preferred Ozone platform* entry, so pass the launch
+flag instead:
+
+```bash
+# Fully quit the browser first (a second launch reuses the running process and
+# ignores the flag), then:
+brave-browser --ozone-platform=x11
+```
+
+Verify with a **YouTube** native PiP or the companion overlay: focus another window and it
+should stay on top.
+
+**Make it permanent (Brave, native `.deb` on Linux).** The launcher is a plain binary, so
+there is no flags file — add the flag to a **user-level** desktop override (fully reversible;
+just delete the file):
+
+```bash
+mkdir -p ~/.local/share/applications
+# Copy the system launcher and insert the flag into every Exec line:
+sed 's|Exec=/usr/bin/brave-browser-stable|Exec=/usr/bin/brave-browser-stable --ozone-platform=x11|' \
+  /usr/share/applications/brave-browser.desktop > ~/.local/share/applications/brave-browser.desktop
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+```
+
+Your dock/menu now launches Brave on X11. For **Chrome/Edge** the idea is identical — same
+flag, their own `*.desktop` file. To revert, delete `~/.local/share/applications/brave-browser.desktop`.
 
 ---
 

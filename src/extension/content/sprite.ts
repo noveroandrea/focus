@@ -1,4 +1,9 @@
-// Pure vanilla TypeScript — no runtime imports. Compiles to a self-contained bundle.
+// Vanilla TypeScript. The only import is ../timings (pure numeric constants,
+// shared with background.ts so the idle timeline can't drift); it inlines away, so
+// the compiled content-script bundle stays self-contained.
+import {
+  IDLE_WARNING_MS, STEP_DELAY_MS, INTERACTION_STEP_MS, GROW_DURATION_MS, ICON_POP_MS,
+} from '../timings';
 
 interface SessionState {
   isHeartbeatActive: boolean;
@@ -84,7 +89,6 @@ let scaleAnimTimer: ReturnType<typeof setInterval> | null = null;
 
 // ── Step-based movement ───────────────────────────────────────────────────────
 const STEP_PX = 18;
-const STEP_DELAY_MS = 130;
 let pendingSteps = 0;
 let stepTimer: ReturnType<typeof setTimeout> | null = null;
 // Last heartbeat count seen from the background. Movement is driven off this so
@@ -122,9 +126,9 @@ function queueSteps(n: number) {
 // Queue a step in response to real page interaction, throttled so a burst of
 // mousemove/scroll events becomes a steady walk rather than a spam of steps.
 // Only walks while active and not being dragged.
-const INTERACTION_STEP_MS = 200;
 let lastInteractionStep = 0;
 function interactionStep() {
+  lastPageActivity = Date.now(); // reset the "I" countdown on any real page activity
   if (stopped || isDragging || !appState?.isHeartbeatActive) return;
   const now = Date.now();
   if (now - lastInteractionStep < INTERACTION_STEP_MS) return;
@@ -138,6 +142,26 @@ let iconEl: HTMLSpanElement;
 let scoreEl: HTMLSpanElement;
 let focusEl: HTMLSpanElement;
 let distractedEl: HTMLSpanElement;
+
+// ── Phase countdown (debug readout under the score) ────────────────────────────
+// A small "I 12s" / "W 4s" line below the points that ticks down the current
+// phase's remaining time, so the idle timeline can be watched live:
+//   • I — time until this page is treated as idle, counted from the last real page
+//         interaction (≈ the idleTime setting). Resets on mouse/key/scroll here.
+//   • W — the face-only warning window before the beep/grow (IDLE_WARNING_MS).
+// It's derived from page-local activity, so if it sits at "I 0s" for a while before
+// "W" appears, that gap is chrome.idle reporting the OS idle late (Linux/Wayland).
+let phaseEl: HTMLSpanElement;
+let phaseTimer: ReturnType<typeof setInterval> | null = null;
+let lastPageActivity = Date.now(); // last real interaction on THIS page
+let warningStartAt = 0;            // when the current idle warning began
+let idleTimeS = 20;                // mirror of the idleTime setting (seconds)
+
+// NOTE: the always-on-top floating companion (video picture-in-picture) is NOT
+// hosted here. Pages can disable PiP via Permissions-Policy (e.g. Overleaf), and a
+// content script is bound by the page's policy — so the PiP lives in an extension
+// page instead (src/extension/pip/pip.ts), which sets its own policy. The popup's
+// Working button opens that window. This file only keeps the in-page sprite.
 
 function setIconText(text: string) {
   iconEl.textContent = text;
@@ -170,6 +194,34 @@ function setScore(focus: number, distracted: number) {
   if (focusEl) focusEl.textContent = String(Math.round(focus));
   // Already negative — String() keeps the minus sign, which is the point.
   if (distractedEl) distractedEl.textContent = String(Math.round(distracted));
+}
+
+// The current idle-timeline phase as a short label + colour, or null when there's
+// nothing to count (disabled, "Not working", or the beep/grow already running).
+// Shared by the in-page readout and the PiP canvas so they never disagree.
+function currentPhase(): { text: string; color: string } | null {
+  const st = appState;
+  if (!st || st.enabled === false || forcedNotWorking) return null;
+  const now = Date.now();
+  if (st.isHeartbeatActive) {
+    const remain = Math.max(0, idleTimeS - (now - lastPageActivity) / 1000);
+    return { text: `I ${Math.ceil(remain)}s`, color: '#93c5fd' }; // blue — working
+  }
+  if (warningTimer) {
+    const remain = Math.max(0, (warningStartAt + IDLE_WARNING_MS - now) / 1000);
+    return { text: `W ${Math.ceil(remain)}s`, color: '#fbbf24' }; // amber — warning
+  }
+  return null;
+}
+
+// Tick the phase countdown under the score. Called ~4×/s so the number is smooth.
+function updatePhaseReadout() {
+  if (!phaseEl) return;
+  const ph = currentPhase();
+  if (!ph) { phaseEl.style.display = 'none'; return; }
+  phaseEl.textContent = ph.text;
+  phaseEl.style.color = ph.color;
+  phaseEl.style.display = 'block';
 }
 
 // ── CSS ───────────────────────────────────────────────────────────────────────
@@ -207,7 +259,7 @@ function startGrowAnimation() {
   counterScaleScore(1);
 
   const maxScale = Math.ceil(Math.max(window.innerWidth, window.innerHeight) / SIZE) + 2;
-  const duration = 20_000;
+  const duration = GROW_DURATION_MS;
   const startTime = Date.now();
 
   scaleAnimTimer = setInterval(() => {
@@ -241,7 +293,9 @@ function applyActiveSize() {
 // Keep the score badge a constant on-screen size regardless of how the sprite is
 // scaled (shrinking while active, growing while idle) by inverting the scale.
 function counterScaleScore(spriteScale: number) {
-  if (scoreEl) scoreEl.style.transform = `translateX(-50%) scale(${1 / spriteScale})`;
+  const t = `translateX(-50%) scale(${1 / spriteScale})`;
+  if (scoreEl) scoreEl.style.transform = t;
+  if (phaseEl) phaseEl.style.transform = t;
 }
 
 // ── Fireworks (icon change celebration) ───────────────────────────────────────
@@ -331,7 +385,7 @@ function triggerIconChange() {
     spriteEl.style.animation = '';
     if (appState?.isHeartbeatActive) applyActiveSize();
     else startGrowAnimation();
-  }, 700);
+  }, ICON_POP_MS);
 }
 
 // ── Idle beep (Web Audio) ───────────────────────────────────────────────────
@@ -468,13 +522,14 @@ function restartBeepIfCrying() {
 // first IDLE_WARNING_MS we only swap the face to the crying icon as a heads-up —
 // no beep, no cry animation, no grow to centre. Come back within the window and
 // none of that ever fires; stay away and it all starts at the end of it. The
-// score's grace period only begins here, once the warning is over — see the phase
-// breakdown above IDLE_WARNING_MS in background.ts, and keep the two in sync.
-const IDLE_WARNING_MS = 5000;
+// score's grace period only begins here, once the warning is over. IDLE_WARNING_MS
+// is imported from ../timings — the SAME constant background.ts uses, so the face
+// warning and the scoring timeline can never drift apart.
 let warningTimer: ReturnType<typeof setTimeout> | null = null;
 
 function startIdleWarning() {
   if (warningTimer || cryTimer) return;
+  warningStartAt = Date.now(); // anchor the "W" countdown
   setIconText(CRYING[0]);
   warningTimer = setTimeout(() => {
     warningTimer = null;
@@ -624,6 +679,28 @@ function buildSprite(): HTMLDivElement {
   focusEl = focus;
   distractedEl = distracted;
 
+  // Phase countdown line, just under the score pill. Counter-scaled alongside it.
+  const phase = document.createElement('span');
+  Object.assign(phase.style, {
+    position: 'absolute',
+    bottom: '-25px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    display: 'none',
+    padding: '0 5px',
+    borderRadius: '7px',
+    background: 'rgba(15,23,42,0.85)',
+    fontSize: '10px',
+    fontWeight: '700',
+    lineHeight: '1.4',
+    fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap',
+    pointerEvents: 'none',
+    color: '#93c5fd',
+  });
+  el.appendChild(phase);
+  phaseEl = phase;
+
   el.addEventListener('pointerdown', (e: PointerEvent) => {
     e.stopPropagation();
     isDragging = false;
@@ -655,7 +732,9 @@ function onSpriteUp(_e: PointerEvent) {
 
 // ── Settings sync ──────────────────────────────────────────────────────────────
 function readSettings(raw: unknown) {
-  const s = raw as { iconChangeHeartbeats?: number; cryBeepVolume?: number; cryBeepDuration?: number; cryBeepStyle?: string; soundEnabled?: boolean; allowedDomains?: unknown; forceActive?: boolean } | undefined;
+  const s = raw as { iconChangeHeartbeats?: number; cryBeepVolume?: number; cryBeepDuration?: number; cryBeepStyle?: string; soundEnabled?: boolean; allowedDomains?: unknown; forceActive?: boolean; idleTime?: number } | undefined;
+  const it = Number(s?.idleTime);
+  if (Number.isFinite(it)) idleTimeS = Math.min(300, Math.max(15, Math.round(it)));
   const h = Number(s?.iconChangeHeartbeats);
   if (Number.isFinite(h)) iconChangeHeartbeats = Math.min(300, Math.max(5, Math.round(h)));
   const v = Number(s?.cryBeepVolume);
@@ -747,6 +826,9 @@ function init() {
     } catch {}
   });
 
+  // Tick the phase countdown under the score (I … / W …).
+  phaseTimer = setInterval(updatePhaseReadout, 250);
+
   (window as any).__ffSpriteCleanup = () => {
     stopped = true;
     stopBeep();
@@ -756,6 +838,7 @@ function init() {
     if (stepTimer)      { clearTimeout(stepTimer);        stepTimer = null; }
     if (scaleAnimTimer) { clearInterval(scaleAnimTimer);  scaleAnimTimer = null; }
     if (changeTimer)    { clearTimeout(changeTimer);      changeTimer = null; }
+    if (phaseTimer)     { clearInterval(phaseTimer);      phaseTimer = null; }
     document.getElementById('focus-flow-root')?.remove();
     document.getElementById('ff-styles')?.remove();
     (window as any).__ffSpriteCleanup = undefined;
