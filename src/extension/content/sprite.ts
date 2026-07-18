@@ -1,4 +1,9 @@
-// Pure vanilla TypeScript — no runtime imports. Compiles to a self-contained bundle.
+// Vanilla TypeScript. The only import is ../timings (pure numeric constants,
+// shared with background.ts so the idle timeline can't drift); it inlines away, so
+// the compiled content-script bundle stays self-contained.
+import {
+  IDLE_WARNING_MS, STEP_DELAY_MS, INTERACTION_STEP_MS, GROW_DURATION_MS, ICON_POP_MS,
+} from '../timings';
 
 interface SessionState {
   isHeartbeatActive: boolean;
@@ -84,7 +89,6 @@ let scaleAnimTimer: ReturnType<typeof setInterval> | null = null;
 
 // ── Step-based movement ───────────────────────────────────────────────────────
 const STEP_PX = 18;
-const STEP_DELAY_MS = 130;
 let pendingSteps = 0;
 let stepTimer: ReturnType<typeof setTimeout> | null = null;
 // Last heartbeat count seen from the background. Movement is driven off this so
@@ -122,7 +126,6 @@ function queueSteps(n: number) {
 // Queue a step in response to real page interaction, throttled so a burst of
 // mousemove/scroll events becomes a steady walk rather than a spam of steps.
 // Only walks while active and not being dragged.
-const INTERACTION_STEP_MS = 200;
 let lastInteractionStep = 0;
 function interactionStep() {
   if (stopped || isDragging || !appState?.isHeartbeatActive) return;
@@ -207,7 +210,7 @@ function startGrowAnimation() {
   counterScaleScore(1);
 
   const maxScale = Math.ceil(Math.max(window.innerWidth, window.innerHeight) / SIZE) + 2;
-  const duration = 20_000;
+  const duration = GROW_DURATION_MS;
   const startTime = Date.now();
 
   scaleAnimTimer = setInterval(() => {
@@ -331,7 +334,7 @@ function triggerIconChange() {
     spriteEl.style.animation = '';
     if (appState?.isHeartbeatActive) applyActiveSize();
     else startGrowAnimation();
-  }, 700);
+  }, ICON_POP_MS);
 }
 
 // ── Idle beep (Web Audio) ───────────────────────────────────────────────────
@@ -468,9 +471,9 @@ function restartBeepIfCrying() {
 // first IDLE_WARNING_MS we only swap the face to the crying icon as a heads-up —
 // no beep, no cry animation, no grow to centre. Come back within the window and
 // none of that ever fires; stay away and it all starts at the end of it. The
-// score's grace period only begins here, once the warning is over — see the phase
-// breakdown above IDLE_WARNING_MS in background.ts, and keep the two in sync.
-const IDLE_WARNING_MS = 5000;
+// score's grace period only begins here, once the warning is over. IDLE_WARNING_MS
+// is imported from ../timings — the SAME constant background.ts uses, so the face
+// warning and the scoring timeline can never drift apart.
 let warningTimer: ReturnType<typeof setTimeout> | null = null;
 
 function startIdleWarning() {
