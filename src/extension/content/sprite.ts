@@ -202,7 +202,8 @@ function setScore(focus: number, distracted: number) {
 
 // The current idle-timeline phase as a short label + colour, or null when there's
 // nothing to count (disabled, "Not working", or the beep/grow already running).
-// Shared by the in-page readout and the PiP canvas so they never disagree.
+// Shared by the in-page readout and the companion window's canvas, which computes
+// it identically from the same broadcast field so the two can never disagree.
 function currentPhase(): { text: string; color: string } | null {
   const st = appState;
   if (!st || st.enabled === false || forcedNotWorking) return null;
