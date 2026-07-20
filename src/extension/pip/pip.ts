@@ -29,6 +29,7 @@ interface State {
   distractedScore: number;
   lastHeartbeat: number;
   enabled: boolean;
+  osHeld: boolean;
 }
 
 const CHARS = [
@@ -137,6 +138,7 @@ function currentPhase(): { text: string; color: string } | null {
   if (!s || s.enabled === false || forceActive) return null;
   const now = Date.now();
   if (s.isHeartbeatActive) {
+    if (s.osHeld) return { text: 'O —', color: '#c4b5fd' }; // held by another app
     const remain = Math.max(0, idleTimeS - (now - s.lastHeartbeat) / 1000);
     return { text: `I ${Math.ceil(remain)}s`, color: '#93c5fd' };
   }
