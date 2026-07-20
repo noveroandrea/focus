@@ -1,7 +1,6 @@
 import { SessionState, MessageType, Settings, DayScore, DEFAULT_SETTINGS, CHARACTER_COUNT, HISTORY_KEY, clampIconChangeHeartbeats, clampIdleTime, clampCryBeepDuration, localDateKey, weekdayName } from '../types';
 import {
   IDLE_POLL_MS, STATUS_LOOP_MS, OS_IDLE_FLOOR_S, HEARTBEAT_THROTTLE_MS, VIEWER_CLASSIFY_DELAY_MS,
-  FOCUS_PING_STALE_MS,
   IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
 } from './timings';
 
@@ -36,9 +35,6 @@ const contentTabs = new Set<number>();
 function markContentAlive(tabId?: number) {
   if (typeof tabId === 'number') contentTabs.add(tabId);
 }
-
-// Last time a focused web page reported in (see FOCUS_PING in the message handler).
-let lastFocusPingAt = 0;
 function hasContentScript(tabId?: number): boolean {
   return typeof tabId === 'number' && contentTabs.has(tabId);
 }
@@ -102,7 +98,8 @@ function updateActionIcon() {
 }
 
 // ── Init from storage ─────────────────────────────────────────────────────────
-chrome.storage.local.get(['focusFlowState', 'focusFlowSettings'], (result) => {
+chrome.storage.local.get(['focusFlowState', 'focusFlowSettings', 'idleApiProven'], (result) => {
+  idleApiProven = result.idleApiProven === true;
   if (result.focusFlowState) {
     state = { ...state, ...(result.focusFlowState as SessionState) };
   }
@@ -402,68 +399,104 @@ let osIdleSince = 0; // 0 = OS reported active on the last poll
 // worker console shows whether the OS signal is arriving at all.
 let lastLoggedIdleState = '';
 
+// Whether chrome.idle has EVER reported a non-active state on this machine. Until
+// it has, its "active" is treated as no information at all (see the poll below).
+// Persisted, because the service worker is suspended constantly and re-learning
+// this every restart would reintroduce the freeze each time.
+let idleApiProven = false;
+
+// Register activity that no content script could report (a focused viewer tab, or
+// OS-wide input while the browser is in the background). Broadcasts only on a real
+// transition; while already Active it just refreshes the timestamp in memory.
+function markActiveNow() {
+  if (state.isHeartbeatActive) {
+    state.lastHeartbeat = Date.now();
+  } else {
+    updateState({ isHeartbeatActive: true, lastHeartbeat: Date.now() });
+  }
+  registerHeartbeat(); // advance the count + step (≤1/s)
+}
+
 setInterval(() => {
   if (!settings.enabled || settings.forceActive) return;
   const idleSec = clampIdleTime(settings.idleTime);
-  chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
-    const now = Date.now();
 
-    if (idleState !== lastLoggedIdleState) {
-      lastLoggedIdleState = idleState;
-      const age = Math.round((now - state.lastHeartbeat) / 1000);
-      console.log(`Focus: chrome.idle(${OS_IDLE_FLOOR_S}s) → "${idleState}" | lastHeartbeat ${age}s ago | active=${state.isHeartbeatActive}`);
-    }
+  chrome.windows.getLastFocused({}, (win) => {
+    if (chrome.runtime.lastError) return;
+    const browserFocused = !!win?.focused;
 
-    if (idleState !== 'active') {
-      // Anchor on the FIRST idle reading only — re-anchoring every poll would keep
-      // pushing the estimate forward and we'd never count down.
-      if (!osIdleSince) {
-        osIdleSince = now - OS_IDLE_FLOOR_S * 1000;
-        console.log(`Focus: anchored last input at ${OS_IDLE_FLOOR_S}s ago — "I" counts down the remaining ${idleSec - OS_IDLE_FLOOR_S}s`);
-      }
-      // Publish the anchor so the countdown readouts can see it tick.
-      if (state.lastHeartbeat > osIdleSince) updateState({ lastHeartbeat: osIdleSince });
-      if (state.isHeartbeatActive && now - osIdleSince >= idleSec * 1000) {
-        // Nothing is holding it up any more — the whole machine is idle.
-        updateState({ isHeartbeatActive: false, osHeld: false }); // → crying/beep
-      }
+    // ── The browser has OS focus ────────────────────────────────────────────
+    // Everything can be answered from inside the browser; chrome.idle isn't
+    // consulted at all, so its reliability doesn't matter here.
+    if (browserFocused) {
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+        const url = tabs[0]?.url;
+        if (!url || !/^(https?|file):/i.test(url) || !isAllowedUrl(url)) return;
+        // A content-script page timestamps every mouse/key/scroll itself — strictly
+        // better than any OS-wide signal. Defer to its HEARTBEATs and let the clock
+        // run down when they stop.
+        if (hasContentScript(tabs[0]?.id)) return;
+        // A viewer tab (PDF/plugin) runs no content script, so nothing can observe
+        // its input. Treat "focused on an authorized viewer" as work — this is what
+        // keeps reading a PDF from going idle.
+        osIdleSince = 0;
+        state.osHeld = false;
+        markActiveNow();
+      });
       return;
     }
 
-    osIdleSince = 0; // real input within the last 15 s
-    chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
-      const url = tabs[0]?.url;
-      if (!url || !/^(https?|file):/i.test(url) || !isAllowedUrl(url)) return;
+    // ── The browser does NOT have focus ─────────────────────────────────────
+    // The user is in another application, and chrome.idle is the only thing that
+    // could say whether they're working there. Trust it ONLY once it has proven
+    // itself by reporting a non-active state at least once.
+    //
+    // On some platforms it never does — Chromium under Wayland can report "active"
+    // forever, whatever the user does. An unproven API must not be allowed to hold
+    // the clock up, because that freezes the countdown and the sprite never goes
+    // idle no matter how long you stay away. Until it proves otherwise we simply
+    // let the clock run down, which is the behaviour with no OS signal at all.
+    chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
+      const now = Date.now();
 
-      // Which clock is authoritative depends on WHERE the user is.
-      //
-      // When a real web page holds keyboard focus, its content script reports
-      // every mouse/key/scroll with an exact timestamp — a far better signal than
-      // chrome.idle, whose "active" is coarse (15 s minimum) and, on some
-      // platforms, reported very late. Letting the OS poll refresh lastHeartbeat
-      // here would pin it to now for as long as that lag lasts, freezing the
-      // countdown and delaying the idle flip. So on a focused content-script page
-      // we defer entirely to HEARTBEAT messages and let the clock run down.
-      //
-      // The OS poll stays the source of truth for the cases the page can't cover:
-      // viewer tabs (PDF/plugin, no content script) and — via a stale FOCUS_PING —
-      // the user working in a different application entirely, where OS activity
-      // must keep the session alive.
-      const pageHasFocus = Date.now() - lastFocusPingAt < FOCUS_PING_STALE_MS;
-      if (pageHasFocus && hasContentScript(tabs[0]?.id)) return;
-
-      // Reaching here means OS activity — not the page — is what's keeping the
-      // session alive. Flag it so the countdown can show that it's being held up
-      // on purpose rather than looking stuck. Set in memory; it rides along on the
-      // next broadcast (registerHeartbeat below fires one about once a second).
-      state.osHeld = true;
-
-      if (state.isHeartbeatActive) {
-        state.lastHeartbeat = Date.now();     // already Active → in-memory refresh only
-      } else {
-        updateState({ isHeartbeatActive: true, lastHeartbeat: Date.now() }); // transition
+      if (idleState !== lastLoggedIdleState) {
+        lastLoggedIdleState = idleState;
+        const age = Math.round((now - state.lastHeartbeat) / 1000);
+        console.log(`Focus: chrome.idle(${OS_IDLE_FLOOR_S}s) → "${idleState}" | lastHeartbeat ${age}s ago | active=${state.isHeartbeatActive}`);
       }
-      registerHeartbeat(); // idle-sourced heartbeat → advance count + step (≤1/s)
+
+      if (idleState !== 'active') {
+        if (!idleApiProven) {
+          idleApiProven = true; // it does work on this machine after all
+          chrome.storage.local.set({ idleApiProven: true });
+          console.log('Focus: chrome.idle reported a non-active state — activity in other apps will now hold the idle clock');
+        }
+        // Anchor on the FIRST idle reading only — re-anchoring every poll would
+        // keep pushing the estimate forward and we'd never count down.
+        if (!osIdleSince) {
+          osIdleSince = now - OS_IDLE_FLOOR_S * 1000;
+          console.log(`Focus: anchored last input at ${OS_IDLE_FLOOR_S}s ago — "I" counts down the remaining ${idleSec - OS_IDLE_FLOOR_S}s`);
+        }
+        // Publish the anchor so the countdown readouts can see it tick.
+        if (state.lastHeartbeat > osIdleSince) updateState({ lastHeartbeat: osIdleSince });
+        if (state.isHeartbeatActive && now - osIdleSince >= idleSec * 1000) {
+          // Nothing is holding it up any more — the whole machine is idle.
+          updateState({ isHeartbeatActive: false, osHeld: false }); // → crying/beep
+        }
+        return;
+      }
+
+      // "active" from an API that has never shown us anything else carries no
+      // information — ignore it and let the countdown fall.
+      if (!idleApiProven) return;
+
+      osIdleSince = 0; // real input somewhere in the last 15 s
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+        const url = tabs[0]?.url;
+        if (!url || !/^(https?|file):/i.test(url) || !isAllowedUrl(url)) return;
+        state.osHeld = true; // another app is what's keeping this alive (violet "I")
+        markActiveNow();
+      });
     });
   });
 }, IDLE_POLL_MS);
@@ -601,9 +634,6 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
 
     case 'FOCUS_PING':
       markContentAlive(sender.tab?.id);    // this tab runs a content script (HTML page)
-      // Sent once a second, but ONLY while document.hasFocus() — so its recency is
-      // our evidence that the user is still in the browser rather than another app.
-      lastFocusPingAt = Date.now();
       break;
 
     case 'ADD_DOMAIN': {
