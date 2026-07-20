@@ -1,6 +1,7 @@
 import { SessionState, MessageType, Settings, DayScore, DEFAULT_SETTINGS, CHARACTER_COUNT, HISTORY_KEY, clampIconChangeHeartbeats, clampIdleTime, clampCryBeepDuration, localDateKey, weekdayName } from '../types';
 import {
   IDLE_POLL_MS, STATUS_LOOP_MS, OS_IDLE_FLOOR_S, HEARTBEAT_THROTTLE_MS, VIEWER_CLASSIFY_DELAY_MS,
+  FOCUS_PING_STALE_MS,
   IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
 } from './timings';
 
@@ -34,6 +35,9 @@ const contentTabs = new Set<number>();
 function markContentAlive(tabId?: number) {
   if (typeof tabId === 'number') contentTabs.add(tabId);
 }
+
+// Last time a focused web page reported in (see FOCUS_PING in the message handler).
+let lastFocusPingAt = 0;
 function hasContentScript(tabId?: number): boolean {
   return typeof tabId === 'number' && contentTabs.has(tabId);
 }
@@ -428,6 +432,24 @@ setInterval(() => {
     chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
       const url = tabs[0]?.url;
       if (!url || !/^(https?|file):/i.test(url) || !isAllowedUrl(url)) return;
+
+      // Which clock is authoritative depends on WHERE the user is.
+      //
+      // When a real web page holds keyboard focus, its content script reports
+      // every mouse/key/scroll with an exact timestamp — a far better signal than
+      // chrome.idle, whose "active" is coarse (15 s minimum) and, on some
+      // platforms, reported very late. Letting the OS poll refresh lastHeartbeat
+      // here would pin it to now for as long as that lag lasts, freezing the
+      // countdown and delaying the idle flip. So on a focused content-script page
+      // we defer entirely to HEARTBEAT messages and let the clock run down.
+      //
+      // The OS poll stays the source of truth for the cases the page can't cover:
+      // viewer tabs (PDF/plugin, no content script) and — via a stale FOCUS_PING —
+      // the user working in a different application entirely, where OS activity
+      // must keep the session alive.
+      const pageHasFocus = Date.now() - lastFocusPingAt < FOCUS_PING_STALE_MS;
+      if (pageHasFocus && hasContentScript(tabs[0]?.id)) return;
+
       if (state.isHeartbeatActive) {
         state.lastHeartbeat = Date.now();     // already Active → in-memory refresh only
       } else {
@@ -570,6 +592,9 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
 
     case 'FOCUS_PING':
       markContentAlive(sender.tab?.id);    // this tab runs a content script (HTML page)
+      // Sent once a second, but ONLY while document.hasFocus() — so its recency is
+      // our evidence that the user is still in the browser rather than another app.
+      lastFocusPingAt = Date.now();
       break;
 
     case 'ADD_DOMAIN': {
