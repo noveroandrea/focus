@@ -812,9 +812,9 @@ const SettingsTab = ({ settings, onChange }: {
 function openCompanionWindow() {
   const url = chrome.runtime.getURL('pip.html');
   const create = () => chrome.windows.create(
-    // Sized to the companion's 480×240 canvas plus the hint footer. It's a normal
-    // window now (no picture-in-picture), so pin it with the WM's "Always on Top".
-    { url, type: 'popup', width: 520, height: 330 },
+    // Deliberately small — this sits in a screen corner while you work elsewhere.
+    // The canvas scales with the window, so it survives being shrunk further.
+    { url, type: 'popup', width: 300, height: 210 },
     (w) => { if (w?.id != null) chrome.storage.local.set({ pipWindowId: w.id }); },
   );
   chrome.storage.local.get(['pipWindowId'], ({ pipWindowId }) => {

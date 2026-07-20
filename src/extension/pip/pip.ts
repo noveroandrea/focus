@@ -63,27 +63,41 @@ let lastHb = -1;
 // ── DOM ────────────────────────────────────────────────────────────────────────
 const root = document.getElementById('root')!;
 
+// The canvas is a fixed 480×240 drawing that SCALES to whatever size the window
+// is dragged to: object-fit keeps its 2:1 aspect inside the stage, so every
+// element stays in proportion instead of the layout rearranging itself. The window
+// is meant to be shrunk down to a corner of the screen, so the stage takes all
+// remaining space and nothing else competes for height.
 const stage = document.createElement('div');
 Object.assign(stage.style, {
-  flex: '1', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '0',
+  flex: '1', display: 'flex', alignItems: 'center', justifyContent: 'center',
+  minHeight: '0', minWidth: '0', padding: '6px',
 });
 const canvas = document.createElement('canvas');
 canvas.width = PIP_W; canvas.height = PIP_H;
 Object.assign(canvas.style, {
-  maxWidth: '100%', maxHeight: '100%', borderRadius: '14px',
-  boxShadow: '0 8px 30px rgba(0,0,0,0.45)',
+  width: '100%', height: '100%', objectFit: 'contain',
+  borderRadius: '12px',
 });
 stage.appendChild(canvas);
 
+// One-time instruction. It's advice for the first few seconds, not a permanent
+// part of the UI — at the small sizes this window is meant to be used at, leaving
+// it on screen wraps to three lines and squeezes the companion into nothing. So it
+// fades out and is removed from the layout, handing its space back to the canvas.
 const footer = document.createElement('div');
 Object.assign(footer.style, {
-  padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: '8px',
-  alignItems: 'center', borderTop: '1px solid rgba(148,163,184,0.18)',
+  padding: '7px 10px', textAlign: 'center', flexShrink: '0',
+  borderTop: '1px solid rgba(148,163,184,0.18)',
+  fontSize: '10px', color: '#94a3b8', lineHeight: '1.35',
+  transition: 'opacity 0.6s ease',
 });
-const hint = document.createElement('div');
-Object.assign(hint.style, { fontSize: '11px', color: '#94a3b8', textAlign: 'center', lineHeight: '1.4' });
-hint.textContent = 'Right-click the title bar → “Always on Top” to keep this above other apps.';
-footer.append(hint);
+footer.textContent = 'Right-click the title bar → “Always on Top”';
+footer.title = 'Right-click this window’s title bar and enable “Always on Top” to keep it above other applications.';
+setTimeout(() => {
+  footer.style.opacity = '0';
+  setTimeout(() => { footer.style.display = 'none'; }, 700);
+}, 8000);
 
 root.append(stage, footer);
 
