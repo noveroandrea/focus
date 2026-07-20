@@ -24,6 +24,20 @@ export const IDLE_POLL_MS = 500;
  *  the BACKUP idle expiry if the idle poll never reports Idle. */
 export const STATUS_LOOP_MS = 1000;
 
+/** Threshold we hand to chrome.idle.queryState — Chrome's MINIMUM (15 s), not the
+ *  user's idleTime. queryState(N) is binary: "input within the last N s" or not,
+ *  with no sub-threshold detail. Polling at the user's idleTime therefore yields
+ *  no countdown at all — it reads "active" (so lastHeartbeat is refreshed to now,
+ *  pinning any countdown at its maximum) right up until the instant it flips.
+ *
+ *  Polling at the floor instead gives us an ANCHOR: the first "idle" reading means
+ *  input stopped ≥15 s ago, so we can date the last input to now−15 s and count the
+ *  remaining `idleTime − 15` s down ourselves. The idle flip still lands at
+ *  idleTime after the last input; we just gain a real, ticking countdown for the
+ *  tail of the wait instead of a cliff. The first 15 s remain genuinely unknowable
+ *  — the OS simply doesn't expose them. */
+export const OS_IDLE_FLOOR_S = 15;
+
 /** registerHeartbeat() advances the count at most once per this window, so the
  *  count tracks ≈one heartbeat per real second no matter how many sources fire. */
 export const HEARTBEAT_THROTTLE_MS = 1000;
