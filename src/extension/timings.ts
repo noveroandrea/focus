@@ -46,6 +46,13 @@ export const HEARTBEAT_THROTTLE_MS = 1000;
  *  the focused tab as a viewer (PDF/plugin) and classifies it itself. */
 export const VIEWER_CLASSIFY_DELAY_MS = 2500;
 
+/** How stale the last FOCUS_PING may be before we stop believing a real web page
+ *  has keyboard focus. heartbeat.ts pings once a second and ONLY while
+ *  document.hasFocus(), so a gap wider than this means the user has left the
+ *  browser for another application — which is precisely when the OS-wide
+ *  chrome.idle signal has to take over as the activity source. */
+export const FOCUS_PING_STALE_MS = 3000;
+
 // ── Idle escalation timeline ───────────────────────────────────────────────────
 //  Shared by background.ts (scoring / auto-pause) and sprite.ts (face / beep /
 //  grow). An idle lapse, measured from the moment the sprite goes Idle, runs:
