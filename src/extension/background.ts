@@ -417,6 +417,37 @@ function markActiveNow() {
   registerHeartbeat(); // advance the count + step (≤1/s)
 }
 
+function logIdleState(idleState: string) {
+  if (idleState === lastLoggedIdleState) return;
+  lastLoggedIdleState = idleState;
+  const age = Math.round((Date.now() - state.lastHeartbeat) / 1000);
+  console.log(`Focus: chrome.idle(${OS_IDLE_FLOOR_S}s) → "${idleState}" | lastHeartbeat ${age}s ago | active=${state.isHeartbeatActive}`);
+}
+
+// Apply a NON-ACTIVE chrome.idle reading: date the last input to the 15 s floor,
+// let the countdown tick down from there, and flip to Idle once the gap reaches
+// idleTime. Shared by both branches of the poll — a "the OS saw no input" reading
+// means the same thing wherever the user happens to be.
+function applyOsIdleReading(idleSec: number) {
+  const now = Date.now();
+  if (!idleApiProven) {
+    idleApiProven = true; // it does work on this machine after all
+    chrome.storage.local.set({ idleApiProven: true });
+    console.log('Focus: chrome.idle reported a non-active state — activity in other apps will now hold the idle clock');
+  }
+  // Anchor on the FIRST idle reading only — re-anchoring every poll would keep
+  // pushing the estimate forward and we'd never count down.
+  if (!osIdleSince) {
+    osIdleSince = now - OS_IDLE_FLOOR_S * 1000;
+    console.log(`Focus: anchored last input at ${OS_IDLE_FLOOR_S}s ago — "I" counts down the remaining ${idleSec - OS_IDLE_FLOOR_S}s`);
+  }
+  // Publish the anchor so the countdown readouts can see it tick.
+  if (state.lastHeartbeat > osIdleSince) updateState({ lastHeartbeat: osIdleSince });
+  if (state.isHeartbeatActive && now - osIdleSince >= idleSec * 1000) {
+    updateState({ isHeartbeatActive: false, osHeld: false }); // → crying/beep
+  }
+}
+
 setInterval(() => {
   if (!settings.enabled || settings.forceActive) return;
   const idleSec = clampIdleTime(settings.idleTime);
@@ -436,12 +467,24 @@ setInterval(() => {
         // better than any OS-wide signal. Defer to its HEARTBEATs and let the clock
         // run down when they stop.
         if (hasContentScript(tabs[0]?.id)) return;
-        // A viewer tab (PDF/plugin) runs no content script, so nothing can observe
-        // its input. Treat "focused on an authorized viewer" as work — this is what
-        // keeps reading a PDF from going idle.
-        osIdleSince = 0;
-        state.osHeld = false;
-        markActiveNow();
+
+        // A viewer tab (PDF/plugin) runs no content script, so nothing inside the
+        // browser can observe its input: being focused on it is our only positive
+        // evidence of work. chrome.idle can still VETO that, though — a non-active
+        // reading is a positive assertion that the OS saw no input, so acting on it
+        // can only ever end a session EARLIER, and a broken API (stuck on "active")
+        // simply never triggers it. That asymmetry is why it's safe to use here
+        // unproven, while its "active" is not: "active" would hold the clock up
+        // forever, which is exactly the freeze this poll was restructured to avoid.
+        // Net effect: you can read a PDF indefinitely, but walking away from one
+        // still goes idle wherever the OS signal actually works.
+        chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
+          logIdleState(idleState);
+          if (idleState !== 'active') { applyOsIdleReading(idleSec); return; }
+          osIdleSince = 0;
+          state.osHeld = false;
+          markActiveNow();
+        });
       });
       return;
     }
@@ -457,34 +500,9 @@ setInterval(() => {
     // idle no matter how long you stay away. Until it proves otherwise we simply
     // let the clock run down, which is the behaviour with no OS signal at all.
     chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
-      const now = Date.now();
+      logIdleState(idleState);
 
-      if (idleState !== lastLoggedIdleState) {
-        lastLoggedIdleState = idleState;
-        const age = Math.round((now - state.lastHeartbeat) / 1000);
-        console.log(`Focus: chrome.idle(${OS_IDLE_FLOOR_S}s) → "${idleState}" | lastHeartbeat ${age}s ago | active=${state.isHeartbeatActive}`);
-      }
-
-      if (idleState !== 'active') {
-        if (!idleApiProven) {
-          idleApiProven = true; // it does work on this machine after all
-          chrome.storage.local.set({ idleApiProven: true });
-          console.log('Focus: chrome.idle reported a non-active state — activity in other apps will now hold the idle clock');
-        }
-        // Anchor on the FIRST idle reading only — re-anchoring every poll would
-        // keep pushing the estimate forward and we'd never count down.
-        if (!osIdleSince) {
-          osIdleSince = now - OS_IDLE_FLOOR_S * 1000;
-          console.log(`Focus: anchored last input at ${OS_IDLE_FLOOR_S}s ago — "I" counts down the remaining ${idleSec - OS_IDLE_FLOOR_S}s`);
-        }
-        // Publish the anchor so the countdown readouts can see it tick.
-        if (state.lastHeartbeat > osIdleSince) updateState({ lastHeartbeat: osIdleSince });
-        if (state.isHeartbeatActive && now - osIdleSince >= idleSec * 1000) {
-          // Nothing is holding it up any more — the whole machine is idle.
-          updateState({ isHeartbeatActive: false, osHeld: false }); // → crying/beep
-        }
-        return;
-      }
+      if (idleState !== 'active') { applyOsIdleReading(idleSec); return; }
 
       // "active" from an API that has never shown us anything else carries no
       // information — ignore it and let the countdown fall.
