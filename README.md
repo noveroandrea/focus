@@ -24,7 +24,7 @@ on your machine. An **optional** local AI helper (Ollama) can auto-detect study 
 - [How it works](#how-it-works)
 - [The sprite](#the-sprite)
 - [The popup menu](#the-popup-menu)
-- [Floating companion (picture-in-picture)](#floating-companion-picture-in-picture)
+- [Floating companion](#floating-companion)
 - [Optional: Ollama AI auto-classify](#optional-ollama-ai-auto-classify)
   - [Working without Ollama](#working-without-ollama)
   - [Limiting Ollama CPU usage](#limiting-ollama-cpu-usage)
@@ -186,7 +186,7 @@ Click the Focus icon in the toolbar.
 
 | Element | What it does |
 |---|---|
-| **Force-active toggle** (top-right) | When ON, the sprite is pinned to the **Active** state on every page regardless of real input — useful to keep the companion alive while reading something it can't "see" (e.g. a video lecture). When OFF, activity is detected normally. Clicking it also opens the **floating companion** helper window — see [Floating companion](#floating-companion-picture-in-picture). |
+| **Force-active toggle** (top-right) | When ON, the sprite is pinned to the **Active** state on every page regardless of real input — useful to keep the companion alive while reading something it can't "see" (e.g. a video lecture). When OFF, activity is detected normally. Clicking it also opens the **floating companion** helper window — see [Floating companion](#floating-companion). |
 
 ### Main tab
 
@@ -234,70 +234,46 @@ with **✕**. Newly added pages need a tab reload to start tracking.
 
 ---
 
-## Floating companion (picture-in-picture)
+## Floating companion
 
-You can pop the companion out into a small **always-on-top window** that stays visible
-over other apps, so you keep an eye on it while you work in another program.
+A small **companion window** mirroring the sprite — the character, the focus/distracted
+score and the phase countdown — so you can keep an eye on it while working in another
+program that covers the browser.
 
-**How to open it:** click the **Working** button in the popup header. That opens a small
-**helper window** showing the companion and a **Pop out ⤢** button. Click **Pop out** and
-the companion moves into an always-on-top picture-in-picture (PiP) overlay. Keep the helper
-window open (behind other windows is fine) — closing it closes the overlay.
+**How to open it:** click the **Working** button in the popup header.
+
+**How to keep it on top:** it is an ordinary browser window, so pin it with your window
+manager — on GNOME/KDE right-click its title bar and choose **Always on Top**; macOS and
+Windows have equivalent options or third-party/WM rules. Close it like any window.
 
 ### Why it's a separate extension window
 
-The obvious approach — pop out from the content script running on the page — does **not**
-work on every site. Picture-in-picture is governed by the page's **Permissions-Policy**, and
-some sites (for example many Overleaf deployments) send `picture-in-picture=()`, which
-disables PiP for the whole document. A content script runs *inside that page* and inherits
-its policy, so it simply cannot open PiP there.
+A content script can only draw *inside its page*, so it disappears the moment another app
+covers Chrome — exactly when you want the companion. The companion is therefore a dedicated
+**extension page** (`pip.html` / `src/extension/pip/pip.ts`) opened as its own window. It
+mirrors the live state broadcast by `background.ts` and renders the character to a `<canvas>`.
 
-To sidestep this, the companion PiP is hosted in a dedicated **extension page**
-(`pip.html` / `src/extension/pip/pip.ts`, opened as its own window). That page has the
-extension's origin and its **own** permissions policy, so PiP is always allowed regardless of
-what the visited site sends. It mirrors the live state and renders the character to a
-`<canvas>`, which is captured to a `<video>` and shown as **video PiP** (the OS overlay that
-can float above every app).
+### Why it no longer uses picture-in-picture
 
-### Linux / Wayland: making the overlay actually stay on top
+An earlier version popped the canvas out as **video picture-in-picture** to get an
+OS-level always-on-top overlay. That was removed, for two independent reasons:
 
-Whether a PiP window floats **above all other windows** is decided by your desktop
-**compositor**, not by the browser or this extension — the web APIs can only *request* PiP,
-never force OS window stacking.
+1. **It broke idle detection.** Video PiP requires a continuously *playing* `<video>`, and
+   the browser holds a **screen wake lock** while video plays. On Linux that can stop the
+   session from ever being reported as idle, so `chrome.idle` stayed `"active"` forever —
+   the countdown froze at its maximum and the crying/beep never fired. The companion was
+   silently disabling the very idle timeline it was displaying.
+2. **On Wayland it didn't stay on top anyway.** Whether a PiP window floats above others is
+   decided by the **compositor**, not the browser. Wayland's core protocol does not let a
+   client mark its own window always-on-top, so Chromium browsers (Chrome, Edge, **Brave** —
+   all of them) let the overlay drop behind the next window you focus. It was a
+   Chromium-on-Wayland limitation, not a Brave or extension bug. Working around it needed
+   the X11 backend (`--ozone-platform=x11`), i.e. asking every Linux user to relaunch their
+   whole browser differently.
 
-On **Wayland** (e.g. GNOME's default session), the core protocol does **not** let a browser
-mark its own window always-on-top, so Chromium browsers (Chrome, Edge, **Brave** — they all
-share this) let the PiP drop behind whatever window you focus next. This is not Brave- or
-extension-specific; it is a Chromium-on-Wayland limitation. On **macOS/Windows** PiP is
-always-on-top natively, so none of this applies there.
-
-**The fix is to run the browser on the X11 backend**, where always-on-top works. Recent
-Chromium removed the `chrome://flags` → *Preferred Ozone platform* entry, so pass the launch
-flag instead:
-
-```bash
-# Fully quit the browser first (a second launch reuses the running process and
-# ignores the flag), then:
-brave-browser --ozone-platform=x11
-```
-
-Verify with a **YouTube** native PiP or the companion overlay: focus another window and it
-should stay on top.
-
-**Make it permanent (Brave, native `.deb` on Linux).** The launcher is a plain binary, so
-there is no flags file — add the flag to a **user-level** desktop override (fully reversible;
-just delete the file):
-
-```bash
-mkdir -p ~/.local/share/applications
-# Copy the system launcher and insert the flag into every Exec line:
-sed 's|Exec=/usr/bin/brave-browser-stable|Exec=/usr/bin/brave-browser-stable --ozone-platform=x11|' \
-  /usr/share/applications/brave-browser.desktop > ~/.local/share/applications/brave-browser.desktop
-update-desktop-database ~/.local/share/applications 2>/dev/null || true
-```
-
-Your dock/menu now launches Brave on X11. For **Chrome/Edge** the idea is identical — same
-flag, their own `*.desktop` file. To revert, delete `~/.local/share/applications/brave-browser.desktop`.
+A normal window pinned by the window manager gives the same result with neither problem, and
+behaves consistently across platforms. Sites that disable PiP via `Permissions-Policy` (many
+Overleaf deployments send `picture-in-picture=()`) are likewise no longer a concern.
 
 ---
 

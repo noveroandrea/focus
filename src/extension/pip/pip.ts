@@ -1,16 +1,22 @@
 // Focus companion — helper window.
 //
-// Renders the companion onto a <canvas> and pops it out as an always-on-top VIDEO
-// picture-in-picture. This deliberately lives in an EXTENSION page
-// (chrome-extension:// origin) rather than a content script: some sites (e.g.
-// Overleaf) send a `Permissions-Policy` header that disables picture-in-picture
-// for their whole document, and a content script is bound by the page's policy —
-// but this extension document sets its own policy, so PiP is always allowed here.
+// A small always-visible window that mirrors the sprite, for when Chrome is
+// covered by another app. It's a plain extension window (chrome-extension://
+// origin) drawing to a <canvas> — keep it on top with your window manager's
+// "Always on Top" (right-click the title bar on GNOME/KDE; macOS and Windows have
+// equivalents or use a tiling/WM rule).
+//
+// It deliberately does NOT use picture-in-picture any more. PiP needs a playing
+// <video>, and Chrome holds a screen wake lock while video plays — on Linux that
+// can stop the session from ever registering as idle, so the companion silently
+// broke the very idle detection it was displaying. A WM-pinned normal window gives
+// the same always-on-top result with none of that (and none of Wayland's inability
+// to let Chromium raise its own PiP window).
 //
 // It mirrors the live SessionState (broadcast by background.ts) and settings
 // (chrome.storage.local). The <canvas> drawing is a standalone copy of the sprite's
-// PiP renderer — the two documents can't share a runtime, so the character roster
-// and draw code are duplicated here on purpose.
+// renderer — the two documents can't share a runtime, so the character roster and
+// draw code are duplicated here on purpose.
 
 import { clampIdleTime } from '../../types';
 import { IDLE_WARNING_MS } from '../timings';
@@ -71,62 +77,21 @@ stage.appendChild(canvas);
 
 const footer = document.createElement('div');
 Object.assign(footer.style, {
-  padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '8px',
+  padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: '8px',
   alignItems: 'center', borderTop: '1px solid rgba(148,163,184,0.18)',
-});
-const button = document.createElement('button');
-button.textContent = 'Pop out ⤢';
-Object.assign(button.style, {
-  width: '100%', padding: '10px 14px', border: 'none', borderRadius: '10px',
-  background: '#22c55e', color: '#fff', fontSize: '14px', fontWeight: '800',
-  cursor: 'pointer', fontFamily: 'system-ui, sans-serif',
 });
 const hint = document.createElement('div');
 Object.assign(hint.style, { fontSize: '11px', color: '#94a3b8', textAlign: 'center', lineHeight: '1.4' });
-hint.textContent = 'Opens a floating window that stays on top of every app.';
-footer.append(button, hint);
+hint.textContent = 'Right-click the title bar → “Always on Top” to keep this above other apps.';
+footer.append(hint);
 
 root.append(stage, footer);
-
-// ── Video PiP ────────────────────────────────────────────────────────────────
-// Whether the overlay actually floats ABOVE other apps is decided by the desktop
-// compositor, not by us — the API only requests PiP. On Linux/Wayland (e.g. GNOME)
-// Chromium can't mark its window always-on-top, so the overlay drops behind the
-// focused window; running the browser on X11 (`--ozone-platform=x11`) fixes it.
-// macOS/Windows are always-on-top natively. See the README "Floating companion".
-const stream = canvas.captureStream(15);
-const video = document.createElement('video');
-video.muted = true;
-(video as HTMLVideoElement & { playsInline: boolean }).playsInline = true;
-Object.assign(video.style, { position: 'fixed', left: '-9999px', width: '1px', height: '1px', opacity: '0' });
-video.srcObject = stream;
-document.body.appendChild(video);
-video.play().catch(() => { /* muted canvas stream — should not be blocked */ });
-
-video.addEventListener('enterpictureinpicture', () => {
-  button.textContent = 'Bring companion back';
-  button.style.background = '#3b82f6';
-  hint.textContent = 'Floating and on top. Keep this window open (behind others is fine) — closing it closes the overlay.';
-});
-video.addEventListener('leavepictureinpicture', () => {
-  button.textContent = 'Pop out ⤢';
-  button.style.background = '#22c55e';
-  hint.textContent = 'Opens a floating window that stays on top of every app.';
-});
-
-button.addEventListener('click', () => {
-  if (document.pictureInPictureElement) { document.exitPictureInPicture().catch(() => {}); return; }
-  video.requestPictureInPicture().catch((err: unknown) => {
-    const name = (err as { name?: string })?.name || 'Error';
-    hint.textContent = `Couldn't open the floating window (${name}).`;
-    console.warn('Focus: picture-in-picture failed', err);
-  });
-});
 
 // ── State / settings ─────────────────────────────────────────────────────────
 function applyState(s: State) {
   if (!s) return;
-  if (wasActive && !s.isHeartbeatActive) idleSince = Date.now(); // just went idle
+  // wasActive starts true, so an already-idle first state anchors the W countdown.
+  if (wasActive && !s.isHeartbeatActive) idleSince = Date.now();
   wasActive = s.isHeartbeatActive;
   state = s;
 }
@@ -149,12 +114,15 @@ chrome.storage.onChanged.addListener((c, area) => {
 });
 
 // ── Phase (I / W countdown) ────────────────────────────────────────────────────
+// Deliberately the same formula sprite.ts uses, over the same broadcast field
+// (state.lastHeartbeat = background's best estimate of the last input). That's the
+// only way the two readouts can agree: this window can't see page input directly,
+// so anything computed locally here would drift from the in-page sprite.
 function currentPhase(): { text: string; color: string } | null {
   const s = state;
   if (!s || s.enabled === false || forceActive) return null;
   const now = Date.now();
   if (s.isHeartbeatActive) {
-    // Best-effort from the broadcast lastHeartbeat (the helper can't see page input).
     const remain = Math.max(0, idleTimeS - (now - s.lastHeartbeat) / 1000);
     return { text: `I ${Math.ceil(remain)}s`, color: '#93c5fd' };
   }

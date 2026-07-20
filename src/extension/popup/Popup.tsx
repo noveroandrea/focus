@@ -812,7 +812,9 @@ const SettingsTab = ({ settings, onChange }: {
 function openCompanionWindow() {
   const url = chrome.runtime.getURL('pip.html');
   const create = () => chrome.windows.create(
-    { url, type: 'popup', width: 380, height: 320 },
+    // Sized to the companion's 480×240 canvas plus the hint footer. It's a normal
+    // window now (no picture-in-picture), so pin it with the WM's "Always on Top".
+    { url, type: 'popup', width: 520, height: 330 },
     (w) => { if (w?.id != null) chrome.storage.local.set({ pipWindowId: w.id }); },
   );
   chrome.storage.local.get(['pipWindowId'], ({ pipWindowId }) => {
@@ -946,8 +948,8 @@ const Popup = () => {
                 : 'bg-green-500 text-white hover:bg-green-600'
             }`}
             title={settings.forceActive
-              ? 'Not working — click to resume (and pop out the floating companion)'
-              : 'Working — click to pause (and pop out the floating companion)'}
+              ? 'Not working — click to resume (and open the companion window)'
+              : 'Working — click to pause (and open the companion window)'}
           >
             {settings.forceActive ? <ZapOff size={13} /> : <Zap size={13} />}
             {settings.forceActive ? 'Not working' : 'Working'}

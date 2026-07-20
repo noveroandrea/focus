@@ -1,6 +1,6 @@
 import { SessionState, MessageType, Settings, DayScore, DEFAULT_SETTINGS, CHARACTER_COUNT, HISTORY_KEY, clampIconChangeHeartbeats, clampIdleTime, clampCryBeepDuration, localDateKey, weekdayName } from '../types';
 import {
-  IDLE_POLL_MS, STATUS_LOOP_MS, HEARTBEAT_THROTTLE_MS, VIEWER_CLASSIFY_DELAY_MS,
+  IDLE_POLL_MS, STATUS_LOOP_MS, OS_IDLE_FLOOR_S, HEARTBEAT_THROTTLE_MS, VIEWER_CLASSIFY_DELAY_MS,
   IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
 } from './timings';
 
@@ -127,6 +127,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
     // Force-active toggled: snap the sprite into (or out of) the active state
     if (prev.forceActive !== settings.forceActive) {
+      osIdleSince = 0; // stale anchor would immediately re-idle on the way back
       updateState({ isHeartbeatActive: settings.forceActive, lastHeartbeat: Date.now() });
     }
     // Recolour the toolbar icon whenever the working state OR the whitelist changed
@@ -371,22 +372,59 @@ setInterval(() => {
   trackIdlePenalty(); // dock points for an idle lapse longer than 5 s
 }, STATUS_LOOP_MS);
 
-// (2) OS idle poll — twice per second. queryState(idleTime) already means "no input
-// for idleTime s", so it maps straight onto the status — we do NOT stack another
-// idleTime recency on top (that would double the time-to-idle):
-//   • system idle      → go Idle now (this is what fires the crying/beep).
-//   • system active    → on an authorized focused tab, stay/become Active.
-// queryState is a cheap native read; to keep the fast poll cheap we only broadcast
-// on a real transition — while already Active we just refresh lastHeartbeat in
-// memory (no storage write, no fan-out to tabs).
+// (2) OS idle poll — twice per second, at chrome.idle's 15 s FLOOR (not the user's
+// idleTime). See OS_IDLE_FLOOR_S in ./timings for why: querying at idleTime gives
+// a binary flip with no countdown, because "active" refreshes lastHeartbeat to now
+// right up until the instant it isn't.
+//
+//   • system active → no input gap yet. On an authorized focused tab, stay/become
+//                     Active and date the last input to now.
+//   • system idle   → input stopped ≥15 s ago. ANCHOR that estimate once
+//                     (osIdleSince = now − 15 s) and hold it, so lastHeartbeat
+//                     stops advancing and every countdown derived from it ticks
+//                     down for real. Go Idle only once the gap reaches idleTime —
+//                     the floor is our sampling resolution, NOT the threshold.
+//
+// lastHeartbeat therefore means "best known time of the last input", which is
+// exactly what both the idle rule and the sprite/PiP "I" readout want. To keep the
+// fast poll cheap we only broadcast on a real transition — while already Active we
+// just refresh lastHeartbeat in memory (no storage write, no fan-out to tabs).
+let osIdleSince = 0; // 0 = OS reported active on the last poll
+
+// The whole idle timeline hangs off what chrome.idle reports, and when that never
+// says "idle" every countdown silently pins at its maximum with no other symptom.
+// Log each transition (not each poll — that would be 2 lines/s) so the service
+// worker console shows whether the OS signal is arriving at all.
+let lastLoggedIdleState = '';
+
 setInterval(() => {
   if (!settings.enabled || settings.forceActive) return;
   const idleSec = clampIdleTime(settings.idleTime);
-  chrome.idle.queryState(idleSec, (idleState) => {
+  chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
+    const now = Date.now();
+
+    if (idleState !== lastLoggedIdleState) {
+      lastLoggedIdleState = idleState;
+      const age = Math.round((now - state.lastHeartbeat) / 1000);
+      console.log(`Focus: chrome.idle(${OS_IDLE_FLOOR_S}s) → "${idleState}" | lastHeartbeat ${age}s ago | active=${state.isHeartbeatActive}`);
+    }
+
     if (idleState !== 'active') {
-      if (state.isHeartbeatActive) updateState({ isHeartbeatActive: false }); // → Idle
+      // Anchor on the FIRST idle reading only — re-anchoring every poll would keep
+      // pushing the estimate forward and we'd never count down.
+      if (!osIdleSince) {
+        osIdleSince = now - OS_IDLE_FLOOR_S * 1000;
+        console.log(`Focus: anchored last input at ${OS_IDLE_FLOOR_S}s ago — "I" counts down the remaining ${idleSec - OS_IDLE_FLOOR_S}s`);
+      }
+      // Publish the anchor so the countdown readouts can see it tick.
+      if (state.lastHeartbeat > osIdleSince) updateState({ lastHeartbeat: osIdleSince });
+      if (state.isHeartbeatActive && now - osIdleSince >= idleSec * 1000) {
+        updateState({ isHeartbeatActive: false }); // → Idle (fires the crying/beep)
+      }
       return;
     }
+
+    osIdleSince = 0; // real input within the last 15 s
     chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
       const url = tabs[0]?.url;
       if (!url || !/^(https?|file):/i.test(url) || !isAllowedUrl(url)) return;
@@ -518,6 +556,9 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
     case 'HEARTBEAT':
       markContentAlive(sender.tab?.id);
       if (settings.enabled && !settings.forceActive) {
+        // Real page input is exact and beats the coarse OS anchor: drop it so the
+        // "I" countdown restarts from a known-good timestamp rather than now−15 s.
+        osIdleSince = 0;
         if (state.isHeartbeatActive) {
           state.lastHeartbeat = Date.now();   // already Active → in-memory refresh only
         } else {

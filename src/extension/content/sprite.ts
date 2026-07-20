@@ -128,7 +128,6 @@ function queueSteps(n: number) {
 // Only walks while active and not being dragged.
 let lastInteractionStep = 0;
 function interactionStep() {
-  lastPageActivity = Date.now(); // reset the "I" countdown on any real page activity
   if (stopped || isDragging || !appState?.isHeartbeatActive) return;
   const now = Date.now();
   if (now - lastInteractionStep < INTERACTION_STEP_MS) return;
@@ -146,22 +145,27 @@ let distractedEl: HTMLSpanElement;
 // ── Phase countdown (debug readout under the score) ────────────────────────────
 // A small "I 12s" / "W 4s" line below the points that ticks down the current
 // phase's remaining time, so the idle timeline can be watched live:
-//   • I — time until this page is treated as idle, counted from the last real page
-//         interaction (≈ the idleTime setting). Resets on mouse/key/scroll here.
+//   • I — time until the session is treated as idle (≈ the idleTime setting).
 //   • W — the face-only warning window before the beep/grow (IDLE_WARNING_MS).
-// It's derived from page-local activity, so if it sits at "I 0s" for a while before
-// "W" appears, that gap is chrome.idle reporting the OS idle late (Linux/Wayland).
+//
+// "I" counts down from state.lastHeartbeat — the SAME clock background.ts uses to
+// decide when to flip to Idle — NOT from page-local input. That's deliberate: a
+// heartbeat comes from either page activity here OR the chrome.idle poll (any
+// window, PDF viewers, other apps), so working in another window keeps the
+// countdown topped up exactly as it keeps the session active. Deriving it from
+// page-local input instead made the readout lie in both directions — it ran down
+// to "I 0s" with nothing happening while the user was busy elsewhere, and it
+// disagreed with the helper window's copy of the same number.
 let phaseEl: HTMLSpanElement;
 let phaseTimer: ReturnType<typeof setInterval> | null = null;
-let lastPageActivity = Date.now(); // last real interaction on THIS page
 let warningStartAt = 0;            // when the current idle warning began
 let idleTimeS = 20;                // mirror of the idleTime setting (seconds)
 
-// NOTE: the always-on-top floating companion (video picture-in-picture) is NOT
-// hosted here. Pages can disable PiP via Permissions-Policy (e.g. Overleaf), and a
-// content script is bound by the page's policy — so the PiP lives in an extension
-// page instead (src/extension/pip/pip.ts), which sets its own policy. The popup's
-// Working button opens that window. This file only keeps the in-page sprite.
+// NOTE: the floating companion is NOT hosted here. A content script can only draw
+// inside its page, so it vanishes the moment another app covers Chrome — the whole
+// point of the companion. It lives in a separate extension window instead
+// (src/extension/pip/pip.ts), opened by the popup's Working button. This file only
+// keeps the in-page sprite.
 
 function setIconText(text: string) {
   iconEl.textContent = text;
@@ -204,7 +208,7 @@ function currentPhase(): { text: string; color: string } | null {
   if (!st || st.enabled === false || forcedNotWorking) return null;
   const now = Date.now();
   if (st.isHeartbeatActive) {
-    const remain = Math.max(0, idleTimeS - (now - lastPageActivity) / 1000);
+    const remain = Math.max(0, idleTimeS - (now - st.lastHeartbeat) / 1000);
     return { text: `I ${Math.ceil(remain)}s`, color: '#93c5fd' }; // blue — working
   }
   if (warningTimer) {
