@@ -386,7 +386,7 @@ setInterval(() => {
 //                     the floor is our sampling resolution, NOT the threshold.
 //
 // lastHeartbeat therefore means "best known time of the last input", which is
-// exactly what both the idle rule and the sprite/PiP "I" readout want. To keep the
+// exactly what both the idle rule and the "I" countdown readouts want. To keep the
 // fast poll cheap we only broadcast on a real transition — while already Active we
 // just refresh lastHeartbeat in memory (no storage write, no fan-out to tabs).
 let osIdleSince = 0; // 0 = OS reported active on the last poll
