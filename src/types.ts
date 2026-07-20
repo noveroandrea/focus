@@ -21,6 +21,12 @@ export interface SessionState {
   scoreDate: string;
   /** Timestamp nonce bumped each time an idle penalty is applied — triggers the "−10" sprite animation */
   penaltyAt: number;
+  /** True while the session is being kept alive by OS-wide activity (you're working
+   *  in another application) rather than by input on the page itself. Activity
+   *  anywhere counts as working, so the idle countdown legitimately stops falling —
+   *  but a number frozen at its maximum is indistinguishable from a broken timer, so
+   *  the readouts use this to say WHY it isn't moving. */
+  osHeld: boolean;
 }
 
 /** One archived day of scores, kept in chrome.storage.local under HISTORY_KEY.

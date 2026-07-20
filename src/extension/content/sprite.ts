@@ -16,6 +16,7 @@ interface SessionState {
   focusScore: number;
   distractedScore: number;
   penaltyAt: number;
+  osHeld: boolean;
 }
 
 const CHARS = [
@@ -201,6 +202,10 @@ function currentPhase(): { text: string; color: string } | null {
   if (!st || st.enabled === false || forcedNotWorking) return null;
   const now = Date.now();
   if (st.isHeartbeatActive) {
+    // Held up by activity in another application: the countdown is SUPPOSED to stop
+    // falling (any activity counts as working), so label it differently rather than
+    // showing a frozen "I 20s" that reads as a broken timer.
+    if (st.osHeld) return { text: 'O —', color: '#c4b5fd' }; // violet — other app
     const remain = Math.max(0, idleTimeS - (now - st.lastHeartbeat) / 1000);
     return { text: `I ${Math.ceil(remain)}s`, color: '#93c5fd' }; // blue — working
   }

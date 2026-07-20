@@ -821,7 +821,7 @@ const Popup = () => {
         const empty: SessionState = {
           isHeartbeatActive: false, lastHeartbeat: 0, activeWindowId: null, enabled: true,
           currentIconId: 0, heartbeatCount: 0, iconChangeAt: 0, focusScore: 0, distractedScore: 0,
-          scoreDate: localDateKey(), penaltyAt: 0,
+          scoreDate: localDateKey(), penaltyAt: 0, osHeld: false,
         };
         if (chrome.runtime.lastError) { setState(empty); return; }
         setState(res ?? empty);

@@ -17,6 +17,7 @@ let state: SessionState = {
   distractedScore: 0,
   scoreDate: '',
   penaltyAt: 0,
+  osHeld: false,
 };
 
 // Tabs whose CURRENT page has run our content script. Our content script runs on
@@ -423,7 +424,8 @@ setInterval(() => {
       // Publish the anchor so the countdown readouts can see it tick.
       if (state.lastHeartbeat > osIdleSince) updateState({ lastHeartbeat: osIdleSince });
       if (state.isHeartbeatActive && now - osIdleSince >= idleSec * 1000) {
-        updateState({ isHeartbeatActive: false }); // → Idle (fires the crying/beep)
+        // Nothing is holding it up any more — the whole machine is idle.
+        updateState({ isHeartbeatActive: false, osHeld: false }); // → crying/beep
       }
       return;
     }
@@ -449,6 +451,12 @@ setInterval(() => {
       // must keep the session alive.
       const pageHasFocus = Date.now() - lastFocusPingAt < FOCUS_PING_STALE_MS;
       if (pageHasFocus && hasContentScript(tabs[0]?.id)) return;
+
+      // Reaching here means OS activity — not the page — is what's keeping the
+      // session alive. Flag it so the countdown can show that it's being held up
+      // on purpose rather than looking stuck. Set in memory; it rides along on the
+      // next broadcast (registerHeartbeat below fires one about once a second).
+      state.osHeld = true;
 
       if (state.isHeartbeatActive) {
         state.lastHeartbeat = Date.now();     // already Active → in-memory refresh only
@@ -581,6 +589,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
         // Real page input is exact and beats the coarse OS anchor: drop it so the
         // "I" countdown restarts from a known-good timestamp rather than now−15 s.
         osIdleSince = 0;
+        state.osHeld = false; // input is on the page again, not in another app
         if (state.isHeartbeatActive) {
           state.lastHeartbeat = Date.now();   // already Active → in-memory refresh only
         } else {
