@@ -202,12 +202,12 @@ function currentPhase(): { text: string; color: string } | null {
   if (!st || st.enabled === false || forcedNotWorking) return null;
   const now = Date.now();
   if (st.isHeartbeatActive) {
-    // Held up by activity in another application: the countdown is SUPPOSED to stop
-    // falling (any activity counts as working), so label it differently rather than
-    // showing a frozen "I 20s" that reads as a broken timer.
-    if (st.osHeld) return { text: 'O —', color: '#c4b5fd' }; // violet — other app
+    // One countdown and one escalation, whatever the activity source: stopping work
+    // in another app must go idle exactly like stopping on the page does. Only the
+    // COLOUR distinguishes them — violet while another app is keeping the session
+    // alive, blue while this page is.
     const remain = Math.max(0, idleTimeS - (now - st.lastHeartbeat) / 1000);
-    return { text: `I ${Math.ceil(remain)}s`, color: '#93c5fd' }; // blue — working
+    return { text: `I ${Math.ceil(remain)}s`, color: st.osHeld ? '#c4b5fd' : '#93c5fd' };
   }
   if (warningTimer) {
     const remain = Math.max(0, (warningStartAt + IDLE_WARNING_MS - now) / 1000);
