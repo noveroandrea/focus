@@ -138,9 +138,9 @@ function currentPhase(): { text: string; color: string } | null {
   if (!s || s.enabled === false || forceActive) return null;
   const now = Date.now();
   if (s.isHeartbeatActive) {
-    if (s.osHeld) return { text: 'O —', color: '#c4b5fd' }; // held by another app
+    // Violet = another app is keeping it alive, blue = this page is. Same countdown.
     const remain = Math.max(0, idleTimeS - (now - s.lastHeartbeat) / 1000);
-    return { text: `I ${Math.ceil(remain)}s`, color: '#93c5fd' };
+    return { text: `I ${Math.ceil(remain)}s`, color: s.osHeld ? '#c4b5fd' : '#93c5fd' };
   }
   if (idleSince && now - idleSince < IDLE_WARNING_MS) {
     const remain = Math.max(0, (idleSince + IDLE_WARNING_MS - now) / 1000);
