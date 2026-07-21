@@ -2,16 +2,19 @@
 //
 // A small always-visible window that mirrors the sprite, for when Chrome is
 // covered by another app. It's a plain extension window (chrome-extension://
-// origin) drawing to a <canvas> — keep it on top with your window manager's
-// "Always on Top" (right-click the title bar on GNOME/KDE; macOS and Windows have
-// equivalents or use a tiling/WM rule).
+// origin) drawing to a <canvas> — keep it on top with your window manager
+// (Windows: PowerToys "Always On Top"; macOS: a helper like Rectangle; GNOME:
+// bind toggle-above to a key; KDE: "Keep Above Others"). See the README
+// "Floating companion" section for exact per-OS steps.
 //
-// It deliberately does NOT use picture-in-picture any more. PiP needs a playing
-// <video>, and Chrome holds a screen wake lock while video plays — on Linux that
-// can stop the session from ever registering as idle, so the companion silently
-// broke the very idle detection it was displaying. A WM-pinned normal window gives
-// the same always-on-top result with none of that (and none of Wayland's inability
-// to let Chromium raise its own PiP window).
+// It deliberately does NOT use picture-in-picture any more. On Wayland a browser
+// cannot raise its own window above others (the compositor decides), so a PiP
+// overlay dropped behind the next window anyway; the only browser-side workaround
+// was to run the whole browser on the X11 backend (--ozone-platform=x11), and THAT
+// breaks chrome.idle under Xwayland (its idle counter never advances), freezing the
+// idle timeline this window exists to display. A normal window left on native
+// Wayland keeps idle working and is pinned on top by the WM instead. See the README
+// "Floating companion" section for the per-OS way to keep it on top.
 //
 // It mirrors the live SessionState (broadcast by background.ts) and settings
 // (chrome.storage.local). The <canvas> drawing is a standalone copy of the sprite's
@@ -93,8 +96,8 @@ Object.assign(footer.style, {
   fontSize: '10px', color: '#94a3b8', lineHeight: '1.35',
   transition: 'opacity 0.6s ease',
 });
-footer.textContent = 'Right-click the title bar → “Always on Top”';
-footer.title = 'Right-click this window’s title bar and enable “Always on Top” to keep it above other applications.';
+footer.textContent = 'Pin me on top — see the README “Floating companion” section';
+footer.title = 'Keep this window above other apps with your OS: Windows PowerToys “Always On Top”, macOS Rectangle, GNOME toggle-above keybinding, KDE “Keep Above Others”.';
 setTimeout(() => {
   footer.style.opacity = '0';
   setTimeout(() => { footer.style.display = 'none'; }, 700);

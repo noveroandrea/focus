@@ -242,9 +242,29 @@ program that covers the browser.
 
 **How to open it:** click the **Working** button in the popup header.
 
-**How to keep it on top:** it is an ordinary browser window, so pin it with your window
-manager — on GNOME/KDE right-click its title bar and choose **Always on Top**; macOS and
-Windows have equivalent options or third-party/WM rules. Close it like any window.
+**How to keep it on top:** it is an ordinary browser window, so pinning it above other
+apps is your window manager's job, not the extension's. Close it like any window.
+
+- **Windows** — right-click the companion in the taskbar; if "Always on top" isn't
+  offered, use a free utility such as [Microsoft PowerToys](https://learn.microsoft.com/windows/powertoys/)
+  ("Always On Top", default shortcut **Win+Ctrl+T**) or AutoHotkey.
+- **macOS** — the system has no built-in per-window always-on-top. Use a helper such as
+  [Rectangle](https://rectangleapp.com/), Amethyst, or the paid *Afloat*/*Ontop* utilities,
+  and pin the companion window through it.
+- **Linux / GNOME (X11 or Wayland)** — GNOME no longer shows "Always on Top" in the
+  title-bar menu, so bind the built-in action to a key once:
+  ```bash
+  gsettings set org.gnome.desktop.wm.keybindings toggle-above "['<Super><Shift>a']"
+  ```
+  Then click the companion window and press **Super+Shift+A** to pin it (press again to
+  unpin). Undo the binding with `gsettings reset org.gnome.desktop.wm.keybindings toggle-above`.
+- **Linux / KDE** — right-click the title bar → **More Actions → Keep Above Others**, or
+  set a permanent Window Rule matching the companion window.
+
+> **Note for Chromium-on-Wayland users:** a browser window cannot raise *itself* above
+> others on Wayland — the compositor decides — which is why this is handled by the WM
+> keybinding above rather than by the extension. See [Why it no longer uses
+> picture-in-picture](#why-it-no-longer-uses-picture-in-picture).
 
 ### Why it's a separate extension window
 
@@ -256,24 +276,27 @@ mirrors the live state broadcast by `background.ts` and renders the character to
 ### Why it no longer uses picture-in-picture
 
 An earlier version popped the canvas out as **video picture-in-picture** to get an
-OS-level always-on-top overlay. That was removed, for two independent reasons:
+OS-level always-on-top overlay. That was removed because it didn't actually deliver
+always-on-top where it mattered, and it dragged in extra fragility for nothing:
 
-1. **It broke idle detection.** Video PiP requires a continuously *playing* `<video>`, and
-   the browser holds a **screen wake lock** while video plays. On Linux that can stop the
-   session from ever being reported as idle, so `chrome.idle` stayed `"active"` forever —
-   the countdown froze at its maximum and the crying/beep never fired. The companion was
-   silently disabling the very idle timeline it was displaying.
-2. **On Wayland it didn't stay on top anyway.** Whether a PiP window floats above others is
+1. **On Wayland it didn't stay on top anyway.** Whether a PiP window floats above others is
    decided by the **compositor**, not the browser. Wayland's core protocol does not let a
    client mark its own window always-on-top, so Chromium browsers (Chrome, Edge, **Brave** —
    all of them) let the overlay drop behind the next window you focus. It was a
-   Chromium-on-Wayland limitation, not a Brave or extension bug. Working around it needed
-   the X11 backend (`--ozone-platform=x11`), i.e. asking every Linux user to relaunch their
-   whole browser differently.
+   Chromium-on-Wayland limitation, not a Brave or extension bug — and the only browser-side
+   workaround was to run the whole browser on the X11 backend (`--ozone-platform=x11`).
+2. **That X11 workaround silently broke idle detection.** Under `--ozone-platform=x11` on a
+   Wayland session the browser runs through Xwayland, whose XScreenSaver idle counter never
+   advances (the Wayland compositor handles input), so `chrome.idle.queryState` answers
+   `"active"` forever — the countdown freezes at its maximum and the crying/beep never fire.
+   So the two "fixes" were mutually exclusive: the flag that pinned the PiP window on top was
+   the same flag that disabled the idle timeline the window existed to display.
 
-A normal window pinned by the window manager gives the same result with neither problem, and
-behaves consistently across platforms. Sites that disable PiP via `Permissions-Policy` (many
-Overleaf deployments send `picture-in-picture=()`) are likewise no longer a concern.
+A normal window left on the native Wayland backend keeps idle detection working, and is
+pinned above other apps by the window manager instead (see **How to keep it on top** above) —
+the same result with none of the coupling, and consistent across platforms. Sites that
+disable PiP via `Permissions-Policy` (many Overleaf deployments send `picture-in-picture=()`)
+are likewise no longer a concern.
 
 ---
 
