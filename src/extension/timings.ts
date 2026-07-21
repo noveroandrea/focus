@@ -38,6 +38,20 @@ export const STATUS_LOOP_MS = 1000;
  *  — the OS simply doesn't expose them. */
 export const OS_IDLE_FLOOR_S = 15;
 
+/** How many seconds the "I" countdown shows when chrome.idle is what's driving it.
+ *  A FIXED warning, deliberately not derived from idleTime: by the time the OS says
+ *  "idle" you have already been away ≥15 s, so re-running the user's full idleTime
+ *  from there would make a long idleTime feel broken (nothing visibly happens for
+ *  ages). Once the OS says you've stopped, you get exactly this long to come back. */
+export const OS_IDLE_COUNTDOWN_S = 5;
+
+/** How long a FOCUS_PING stays fresh. heartbeat.ts pings once a second and ONLY
+ *  when document.hasFocus(), so a stale ping from a page that is still the front
+ *  tab means the user is in another application. This is the page reporting its own
+ *  focus — deliberately not chrome.windows' `focused`, which can report the browser
+ *  focused on every poll regardless of where the user actually is. */
+export const FOCUS_PING_STALE_MS = 3000;
+
 /** registerHeartbeat() advances the count at most once per this window, so the
  *  count tracks ≈one heartbeat per real second no matter how many sources fire. */
 export const HEARTBEAT_THROTTLE_MS = 1000;

@@ -12,13 +12,13 @@
 //
 //    1. PAGE INPUT     heartbeat.ts sends HEARTBEAT on mouse/key/scroll on an
 //                      authorized page. Exact: the page timestamps its own input.
-//    2. FOCUSED VIEWER a PDF/plugin tab runs no content script, so nothing inside
-//                      the browser can observe its input. Having OS focus on one
-//                      is the only positive evidence of work available — with
+//    2. FRONT VIEWER   a PDF/plugin tab runs no content script, so nothing inside
+//                      the browser can observe its input. Having one in front is
+//                      the only positive evidence of work available — with
 //                      chrome.idle allowed to VETO it (see below).
-//    3. OS-WIDE INPUT  chrome.idle says input happened somewhere while the
-//                      browser was in the background (you're working in another
-//                      app). Only trusted once the API has proven it works here.
+//    3. OS-WIDE INPUT  chrome.idle says input happened somewhere while the front
+//                      page reported no focus (you're working in another app).
+//                      Only trusted once the API has proven it works here.
 //
 //  Plus one non-source: forceActive ("Not working" pinned on) ticks the count so
 //  the sprite keeps moving, but earns no points.
@@ -30,7 +30,9 @@
 import {
   SessionState, Settings, CHARACTER_COUNT, clampIconChangeHeartbeats, clampIdleTime, round2,
 } from '../types';
-import { IDLE_POLL_MS, OS_IDLE_FLOOR_S, HEARTBEAT_THROTTLE_MS } from './timings';
+import {
+  IDLE_POLL_MS, OS_IDLE_FLOOR_S, OS_IDLE_COUNTDOWN_S, HEARTBEAT_THROTTLE_MS, FOCUS_PING_STALE_MS,
+} from './timings';
 
 /** What this module needs from background.ts, which still owns the state itself. */
 export interface HeartbeatHost {
@@ -73,6 +75,24 @@ export function markContentAlive(tabId?: number) {
 
 export function hasContentScript(tabId?: number): boolean {
   return typeof tabId === 'number' && contentTabs.has(tabId);
+}
+
+// When the focused page last said it had focus. heartbeat.ts pings once a second
+// and ONLY while document.hasFocus(), so this is the browser's focus state as
+// reported by the page itself — the one thing that can tell us "the user is in
+// another application" now that chrome.windows' `focused` is out (it reported the
+// browser focused on every single poll, which is why nothing ever counted down).
+let lastFocusPingAt = 0;
+
+/** The FOCUS_PING message from heartbeat.ts. */
+export function onFocusPing(tabId?: number) {
+  markContentAlive(tabId); // this tab runs a content script (HTML page)
+  lastFocusPingAt = Date.now();
+}
+
+/** True while the front page is actively reporting focus. */
+function pageHasFocus(): boolean {
+  return Date.now() - lastFocusPingAt < FOCUS_PING_STALE_MS;
 }
 
 // ── What counts as a page we track ────────────────────────────────────────────
@@ -262,9 +282,15 @@ function applyOsIdleReading(idleSec: number) {
   }
   // Anchor on the FIRST idle reading only — re-anchoring every poll would keep
   // pushing the estimate forward and we'd never count down.
+  //
+  // The anchor is placed so exactly OS_IDLE_COUNTDOWN_S remain, whatever idleTime
+  // is. It is NOT the true "last input was 15 s ago" estimate: the OS only tells us
+  // input stopped at least 15 s back, and replaying the user's full idleTime from
+  // there would stall a long idleTime for a minute or more with nothing visibly
+  // happening. Once the OS says you've stopped, you get a fixed short warning.
   if (!osIdleSince) {
-    osIdleSince = now - OS_IDLE_FLOOR_S * 1000;
-    console.log(`Focus: anchored last input at ${OS_IDLE_FLOOR_S}s ago — "I" counts down the remaining ${idleSec - OS_IDLE_FLOOR_S}s`);
+    osIdleSince = now - (idleSec - OS_IDLE_COUNTDOWN_S) * 1000;
+    console.log(`Focus: OS reports no input — "I" counts down ${OS_IDLE_COUNTDOWN_S}s`);
   }
   // Publish the anchor so the countdown readouts can see it tick.
   const state = host.getState();
@@ -279,70 +305,58 @@ function pollOsIdle() {
   if (!settings.enabled || settings.forceActive) return;
   const idleSec = clampIdleTime(settings.idleTime);
 
-  chrome.windows.getLastFocused({}, (win) => {
-    if (chrome.runtime.lastError) return;
-    const browserFocused = !!win?.focused;
+  // No chrome.windows focus check any more. `win.focused` came back true on every
+  // poll on at least one platform, so "the browser has focus" was a constant and
+  // the whole branch it guarded was dead weight. Everything is now decided from the
+  // front tab plus the page's own focus report.
+  withTrackedActiveTab((tab) => {
+    const observable = hasContentScript(tab.id); // can this page see its own input?
 
-    // ── The browser has OS focus ──────────────────────────────────────────────
-    if (browserFocused) {
-      withTrackedActiveTab((tab) => {
-        // The ONE place a source deliberately stands down. A content-script page
-        // timestamps every mouse/key/scroll itself, so its HEARTBEATs are strictly
-        // better than "the window is focused" — and if focus alone also counted,
-        // staring at a whitelisted page without touching it would generate
-        // heartbeats forever and the countdown could never fall. So: defer to its
-        // HEARTBEATs and let the clock run down when they stop.
-        //
-        // This is safe only because a tab that CANNOT observe its own input never
-        // gets in here (see the contentTabs note above) — that asymmetry is what
-        // broke PDFs, where both sources stood down and nothing counted at all.
-        if (hasContentScript(tab.id)) return;
-
-        // Source 2 — a viewer tab (PDF/plugin). Nothing inside the browser can
-        // observe its input, so being focused on it is our only positive evidence
-        // of work. chrome.idle can still VETO that, though: a non-active reading
-        // is a positive assertion that the OS saw no input, so acting on it can
-        // only ever end a session EARLIER, and a broken API (stuck on "active")
-        // simply never triggers it. That asymmetry is why it's safe to use here
-        // unproven, while its "active" is not — "active" would hold the clock up
-        // forever, the exact freeze this poll was restructured to avoid. Net
-        // effect: you can read a PDF indefinitely, but walking away from one still
-        // goes idle wherever the OS signal actually works.
-        chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
-          logIdleState(idleState);
-          if (idleState !== 'active') { applyOsIdleReading(idleSec); return; }
-          osIdleSince = 0;
-          host.touchState({ osHeld: false });
-          markActiveNow();
-        });
-      });
-      return;
-    }
-
-    // ── The browser does NOT have focus ───────────────────────────────────────
-    // Source 3. The user is in another application, and chrome.idle is the only
-    // thing that could say whether they're working there. Trust it ONLY once it
-    // has proven itself by reporting a non-active state at least once.
+    // The ONE place a source deliberately stands down. A focused content-script
+    // page timestamps every mouse/key/scroll itself, so its HEARTBEATs are strictly
+    // better than any OS-wide signal — and if merely being in front also counted,
+    // staring at a whitelisted page without touching it would generate heartbeats
+    // forever and the countdown could never fall.
     //
-    // On some platforms it never does — Chromium under Wayland can report "active"
-    // forever, whatever the user does. An unproven API must not be allowed to hold
-    // the clock up, because that freezes the countdown and the sprite never goes
-    // idle no matter how long you stay away. Until it proves otherwise we simply
-    // let the clock run down, which is the behaviour with no OS signal at all.
+    // Safe only because a tab that CANNOT observe its own input never gets here
+    // (see the contentTabs note above). That asymmetry is what broke PDFs, where
+    // both sources stood down and nothing counted at all.
+    if (observable && pageHasFocus()) return;
+
+    // Everything else falls through to chrome.idle, in one of two situations:
+    //
+    //   • a whitelisted VIEWER tab (PDF/plugin) — nothing in the browser can watch
+    //     its input, so the OS is the only witness there is.
+    //   • a page that IS observable but has stopped reporting focus — the user is
+    //     in another application, and only the OS knows if they're working there.
+    //
+    // They differ in how far chrome.idle is trusted, which is the whole reason the
+    // distinction survives at all (see below).
+    const inAnotherApp = observable;
+
     chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
       logIdleState(idleState);
 
+      // A non-active reading is a positive assertion that the OS saw no input, so
+      // acting on it can only ever end a session EARLIER — and an API stuck on
+      // "active" simply never triggers it. That makes it safe to honour
+      // unconditionally, whichever situation we're in.
       if (idleState !== 'active') { applyOsIdleReading(idleSec); return; }
 
-      // "active" from an API that has never shown us anything else carries no
-      // information — ignore it and let the countdown fall.
-      if (!idleApiProven) return;
+      // "active" is the dangerous direction: it HOLDS the clock up, so a broken API
+      // freezes the countdown forever. Trust it to keep a session alive only once
+      // it has proven itself by reporting a non-active state at least once —
+      // Chromium under Wayland reports "active" no matter what the user does.
+      //
+      // The viewer case is exempt: there is no other evidence available for a PDF,
+      // and refusing it would put us straight back to a PDF counting nothing at
+      // all. The cost is that on a machine where chrome.idle is broken, a PDF left
+      // in front never goes idle.
+      if (inAnotherApp && !idleApiProven) return;
 
-      osIdleSince = 0; // real input somewhere in the last 15 s
-      withTrackedActiveTab(() => {
-        host.touchState({ osHeld: true }); // another app is keeping this alive (violet "I")
-        markActiveNow();
-      });
+      osIdleSince = 0;
+      host.touchState({ osHeld: inAnotherApp }); // another app holding it → violet "I"
+      markActiveNow();
     });
   });
 }
