@@ -254,10 +254,12 @@ apps is your window manager's job, not the extension's. Close it like any window
 - **Linux / GNOME (X11 or Wayland)** — GNOME no longer shows "Always on Top" in the
   title-bar menu, so bind the built-in action to a key once:
   ```bash
-  gsettings set org.gnome.desktop.wm.keybindings toggle-above "['<Super><Shift>a']"
+  gsettings set org.gnome.desktop.wm.keybindings toggle-above "['<Primary>backslash']"
   ```
-  Then click the companion window and press **Super+Shift+A** to pin it (press again to
-  unpin). Undo the binding with `gsettings reset org.gnome.desktop.wm.keybindings toggle-above`.
+  Then click the companion window and press **Ctrl+\\** to pin it (press again to unpin).
+  Pick any free combo you like — but because `toggle-above` is a *global* shortcut, avoid
+  keys apps rely on (`Ctrl+T`, `Ctrl+W`, …), or you'll shadow them everywhere. Undo with
+  `gsettings reset org.gnome.desktop.wm.keybindings toggle-above`.
 - **Linux / KDE** — right-click the title bar → **More Actions → Keep Above Others**, or
   set a permanent Window Rule matching the companion window.
 
