@@ -406,7 +406,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       break;
 
     case 'FOCUS_PING':
-      onFocusPing(sender.tab?.id);
+      onFocusPing(sender.tab?.id, message.viewer === true);
       break;
 
     case 'ADD_DOMAIN': {

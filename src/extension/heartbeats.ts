@@ -84,9 +84,16 @@ export function hasContentScript(tabId?: number): boolean {
 // browser focused on every single poll, which is why nothing ever counted down).
 let lastFocusPingAt = 0;
 
-/** The FOCUS_PING message from heartbeat.ts. */
-export function onFocusPing(tabId?: number) {
-  markContentAlive(tabId); // this tab runs a content script (HTML page)
+/** The FOCUS_PING message from heartbeat.ts.
+ *
+ *  A plugin wrapper (`viewer`) pings too, because document.hasFocus() genuinely
+ *  knows whether you're looking at the PDF or have switched to another app. It
+ *  must NOT join contentTabs though: it can report focus but can see no input, and
+ *  treating it as an observable page makes the poll wait for HEARTBEATs that never
+ *  arrive. Focus and input-observability are separate facts — conflating them is
+ *  what made PDFs count nothing. */
+export function onFocusPing(tabId?: number, viewer = false) {
+  if (!viewer) markContentAlive(tabId);
   lastFocusPingAt = Date.now();
 }
 
@@ -325,14 +332,16 @@ function pollOsIdle() {
 
     // Everything else falls through to chrome.idle, in one of two situations:
     //
-    //   • a whitelisted VIEWER tab (PDF/plugin) — nothing in the browser can watch
-    //     its input, so the OS is the only witness there is.
-    //   • a page that IS observable but has stopped reporting focus — the user is
-    //     in another application, and only the OS knows if they're working there.
+    //   • a whitelisted VIEWER tab you are LOOKING AT — nothing in the browser can
+    //     watch its input, so the OS is the only witness there is.
+    //   • nothing is reporting focus at all — you are in another application, and
+    //     only the OS knows whether you're working there.
     //
     // They differ in how far chrome.idle is trusted, which is the whole reason the
-    // distinction survives at all (see below).
-    const inAnotherApp = observable;
+    // distinction survives at all (see below). Note this keys off the page's own
+    // focus report, so a PDF left in a background window is correctly treated as
+    // "another app" rather than as work — it used to count either way.
+    const inAnotherApp = !pageHasFocus();
 
     chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
       logIdleState(idleState);
