@@ -6,7 +6,7 @@ import {
 // Every heartbeat source — page input, focused PDF/viewer tabs, OS-wide activity —
 // lives in ./heartbeats. This file owns the state; that one decides when it beats.
 import {
-  initHeartbeats, setIdleApiProven, onPageHeartbeat, onFocusPing, hasContentScript,
+  initHeartbeats, onPageHeartbeat, onFocusPing, hasContentScript,
   forceActiveTick, expireStaleHeartbeat, resetOsAnchor,
 } from './heartbeats';
 
@@ -80,8 +80,9 @@ function updateActionIcon() {
 }
 
 // ── Init from storage ─────────────────────────────────────────────────────────
-chrome.storage.local.get(['focusFlowState', 'focusFlowSettings', 'idleApiProven'], (result) => {
-  setIdleApiProven(result.idleApiProven === true);
+chrome.storage.local.get(['focusFlowState', 'focusFlowSettings'], (result) => {
+  // Left behind by a version that tried to detect a broken chrome.idle at runtime.
+  chrome.storage.local.remove('idleApiProven');
   if (result.focusFlowState) {
     state = { ...state, ...(result.focusFlowState as SessionState) };
   }
@@ -406,7 +407,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       break;
 
     case 'FOCUS_PING':
-      onFocusPing(sender.tab?.id, message.viewer === true);
+      onFocusPing(sender.tab?.id);
       break;
 
     case 'ADD_DOMAIN': {

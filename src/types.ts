@@ -169,7 +169,7 @@ export const DEFAULT_SETTINGS: Settings = {
 
 export type MessageType =
   | { type: 'HEARTBEAT'; tabId: number }
-  | { type: 'FOCUS_PING'; viewer?: boolean }
+  | { type: 'FOCUS_PING' }
   | { type: 'GET_STATE' }
   | { type: 'STATE_UPDATE'; state: SessionState }
   | { type: 'ADD_DOMAIN'; domain: string }
