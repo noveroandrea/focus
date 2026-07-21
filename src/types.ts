@@ -85,6 +85,8 @@ export interface Settings {
   soundEnabled: boolean;
   /** When true, unknown pages are sent to the AI classifier; when false they just stay inactive */
   aiRequestEnabled: boolean;
+  /** When true, resuming work opens the floating companion window; when false it never opens */
+  companionEnabled: boolean;
   /** Full list of allowed domain strings — pre-populated with defaults, fully editable */
   allowedDomains: string[];
   /** Base address of the AI backend (Ollama-compatible HTTP API).
@@ -155,6 +157,7 @@ export const DEFAULT_SETTINGS: Settings = {
   cryBeepStyle: 'ramp',
   soundEnabled: true,
   aiRequestEnabled: true,
+  companionEnabled: true,
   allowedDomains: [
     'overleaf.com', 'arxiv.org', 'nature.com', 'ieee.org', 'claude.ai',
     'mail.google.com', 'outlook.live.com', 'outlook.office.com',
