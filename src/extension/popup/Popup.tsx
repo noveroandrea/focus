@@ -515,8 +515,9 @@ const SettingsTab = ({ settings, onChange }: {
         {companionInfoOpen && (
           <div className="rounded-xl bg-slate-50 p-2.5 text-[10px] leading-snug text-slate-600 space-y-1.5">
             <p>
-              It opens when you resume <strong>Working</strong>. It's an ordinary window, so keeping
-              it above other apps is your OS's job:
+              This window is meant to float <strong>above all your other apps</strong> so you can
+              keep an eye on the sprite while working elsewhere. Browsers can't pin their own
+              windows on top, so it's set per machine — here's how:
             </p>
             <ul className="space-y-1">
               <li>
