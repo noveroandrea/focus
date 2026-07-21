@@ -6,7 +6,7 @@ import {
 // Every heartbeat source — page input, focused PDF/viewer tabs, OS-wide activity —
 // lives in ./heartbeats. This file owns the state; that one decides when it beats.
 import {
-  initHeartbeats, setIdleApiProven, onPageHeartbeat, markContentAlive, hasContentScript,
+  initHeartbeats, setIdleApiProven, onPageHeartbeat, onFocusPing, hasContentScript,
   forceActiveTick, expireStaleHeartbeat, resetOsAnchor,
 } from './heartbeats';
 
@@ -406,7 +406,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       break;
 
     case 'FOCUS_PING':
-      markContentAlive(sender.tab?.id);    // this tab runs a content script (HTML page)
+      onFocusPing(sender.tab?.id);
       break;
 
     case 'ADD_DOMAIN': {
