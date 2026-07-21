@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SessionState, Settings, DayScore, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
-import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX } from 'lucide-react';
+import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info } from 'lucide-react';
 import '../../index.css';
 
 
@@ -444,6 +444,7 @@ const SettingsTab = ({ settings, onChange }: {
   const [domainPasteOpen, setDomainPasteOpen] = useState(false);
   const [domainPasteText, setDomainPasteText] = useState('');
   const [domainMsg, setDomainMsg] = useState('');
+  const [companionInfoOpen, setCompanionInfoOpen] = useState(false);
 
   const set = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
 
@@ -489,6 +490,54 @@ const SettingsTab = ({ settings, onChange }: {
           one-click mute, not a setting you come in here to change. */}
       <section className="space-y-2">
         <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Features</h3>
+
+        {/* Floating companion */}
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-1 text-[11px] text-slate-600 leading-tight">
+            Floating companion
+            <button
+              onClick={() => setCompanionInfoOpen(v => !v)}
+              title="How to keep the companion window on top"
+              aria-label="Floating companion info"
+              className={`flex-shrink-0 transition-colors cursor-pointer ${companionInfoOpen ? 'text-blue-500' : 'text-slate-300 hover:text-slate-500'}`}
+            >
+              <Info size={12} />
+            </button>
+            <span className="text-[10px] text-slate-400">— pop-out window mirroring the sprite while you work elsewhere</span>
+          </span>
+          <div
+            onClick={() => set({ companionEnabled: !settings.companionEnabled })}
+            className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.companionEnabled ? 'bg-blue-500' : 'bg-slate-300'}`}
+          >
+            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.companionEnabled ? 'translate-x-5' : ''}`} />
+          </div>
+        </div>
+        {companionInfoOpen && (
+          <div className="rounded-xl bg-slate-50 p-2.5 text-[10px] leading-snug text-slate-600 space-y-1.5">
+            <p>
+              This window is meant to float <strong>above all your other apps</strong> so you can
+              keep an eye on the sprite while working elsewhere. Browsers can't pin their own
+              windows on top, so it's set per machine — here's how:
+            </p>
+            <ul className="space-y-1">
+              <li>
+                <strong>Windows</strong> — install <a href="https://learn.microsoft.com/windows/powertoys/" target="_blank" rel="noreferrer" className="text-blue-600 underline">PowerToys</a>,
+                focus the window and press <code className="rounded bg-slate-200 px-1">Win+Ctrl+T</code>.
+              </li>
+              <li>
+                <strong>macOS</strong> — no built-in option; use a helper such as <a href="https://rectangleapp.com/" target="_blank" rel="noreferrer" className="text-blue-600 underline">Rectangle</a> or Amethyst to pin it.
+              </li>
+              <li>
+                <strong>Linux / GNOME</strong> — run once:<br />
+                <code className="mt-0.5 inline-block break-all rounded bg-slate-200 px-1">gsettings set org.gnome.desktop.wm.keybindings toggle-above "['&lt;Primary&gt;backslash']"</code><br />
+                then focus the window and press <code className="rounded bg-slate-200 px-1">Ctrl+\</code>.
+              </li>
+              <li>
+                <strong>Linux / KDE</strong> — right-click the title bar → <em>More Actions → Keep Above Others</em>.
+              </li>
+            </ul>
+          </div>
+        )}
 
         <div className="flex items-center justify-between">
           <span className="text-[11px] text-slate-600">AI request</span>
@@ -805,6 +854,30 @@ const SettingsTab = ({ settings, onChange }: {
   );
 };
 
+// Open (or focus) the floating-companion helper window — a small extension window
+// that mirrors the sprite while you work in another app. Deduped via a stored
+// window id so a repeat click focuses the existing window instead of stacking a
+// new one. Keep it above other apps with your window manager (see the README
+// "Floating companion" section).
+function openCompanionWindow() {
+  const url = chrome.runtime.getURL('pip.html');
+  const create = () => chrome.windows.create(
+    // Deliberately small — this sits in a screen corner while you work elsewhere.
+    // The canvas scales with the window, so it survives being shrunk further.
+    { url, type: 'popup', width: 300, height: 210 },
+    (w) => { if (w?.id != null) chrome.storage.local.set({ pipWindowId: w.id }); },
+  );
+  chrome.storage.local.get(['pipWindowId'], ({ pipWindowId }) => {
+    if (typeof pipWindowId === 'number') {
+      chrome.windows.update(pipWindowId, { focused: true, drawAttention: true }, () => {
+        if (chrome.runtime.lastError) create(); // stored window gone → make a new one
+      });
+    } else {
+      create();
+    }
+  });
+}
+
 // ── Root ──────────────────────────────────────────────────────────────────────
 const Popup = () => {
   const [activeTab, setActiveTab] = useState<'main' | 'settings'>('main');
@@ -915,15 +988,30 @@ const Popup = () => {
             {settings.soundEnabled ? <Volume2 size={13} /> : <VolumeX size={13} />}
           </button>
           <button
-            onClick={() => saveSettings({ ...settings, forceActive: !settings.forceActive })}
+            onClick={() => {
+              // Toggle "Working" (forceActive === false) ↔ "Not working".
+              const next = { ...settings, forceActive: !settings.forceActive };
+              setSettings(next);
+              // Persist FIRST, then open the companion from the write callback.
+              // Opening it steals focus and closes this popup, and doing that before
+              // the write commits used to lose the toggle — hence the "took two
+              // clicks to turn green" bug. Only open it when RESUMING work, never
+              // when pausing.
+              chrome.storage.local.set({ focusFlowSettings: next }, () => {
+                void chrome.runtime.lastError;
+                if (!next.forceActive && next.companionEnabled) openCompanionWindow();
+              });
+            }}
             className={`flex items-center gap-1.5 flex-shrink-0 px-3 py-1.5 rounded-full text-[11px] font-bold transition-colors cursor-pointer ${
               settings.forceActive
                 ? 'bg-slate-200 text-slate-500 hover:bg-slate-300'
                 : 'bg-green-500 text-white hover:bg-green-600'
             }`}
             title={settings.forceActive
-              ? 'Not working — sprite kept active on every page'
-              : 'Working — only active on authorized pages with real activity'}
+              ? (settings.companionEnabled
+                  ? 'Not working — click to resume (and open the companion window)'
+                  : 'Not working — click to resume')
+              : 'Working — click to pause'}
           >
             {settings.forceActive ? <ZapOff size={13} /> : <Zap size={13} />}
             {settings.forceActive ? 'Not working' : 'Working'}

@@ -154,12 +154,19 @@ let distractedEl: HTMLSpanElement;
 // heartbeat comes from either page activity here OR the chrome.idle poll (any
 // window, PDF viewers, other apps), so working in another window keeps the
 // countdown topped up exactly as it keeps the session active. Deriving it from
-// page-local input instead made the readout lie: it ran down to "I 0s" with
-// nothing happening, because the user was busy in another window the whole time.
+// page-local input instead made the readout lie in both directions — it ran down
+// to "I 0s" with nothing happening while the user was busy elsewhere, and it
+// disagreed with the helper window's copy of the same number.
 let phaseEl: HTMLSpanElement;
 let phaseTimer: ReturnType<typeof setInterval> | null = null;
 let warningStartAt = 0;            // when the current idle warning began
 let idleTimeS = 20;                // mirror of the idleTime setting (seconds)
+
+// NOTE: the floating companion is NOT hosted here. A content script can only draw
+// inside its page, so it vanishes the moment another app covers Chrome — the whole
+// point of the companion. It lives in a separate extension window instead
+// (src/extension/pip/pip.ts), opened by the popup's Working button. This file only
+// keeps the in-page sprite.
 
 function setIconText(text: string) {
   iconEl.textContent = text;
@@ -196,7 +203,8 @@ function setScore(focus: number, distracted: number) {
 
 // The current idle-timeline phase as a short label + colour, or null when there's
 // nothing to count (disabled, "Not working", or the beep/grow already running).
-// Feeds the in-page phase readout below the score.
+// Shared by the in-page readout and the companion window's canvas, which computes
+// it identically from the same broadcast field so the two can never disagree.
 function currentPhase(): { text: string; color: string } | null {
   const st = appState;
   if (!st || st.enabled === false || forcedNotWorking) return null;

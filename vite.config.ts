@@ -94,6 +94,7 @@ export default defineConfig(() => {
           heartbeat:  path.resolve(__dirname, 'src/extension/content/heartbeat.ts'),
           sprite:     path.resolve(__dirname, 'src/extension/content/sprite.ts'),
           popup:      path.resolve(__dirname, 'popup.html'),
+          pip:        path.resolve(__dirname, 'pip.html'),
         },
         output: {
           entryFileNames: (chunkInfo) => {
