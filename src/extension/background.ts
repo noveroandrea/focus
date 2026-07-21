@@ -1,8 +1,14 @@
-import { SessionState, MessageType, Settings, DayScore, DEFAULT_SETTINGS, CHARACTER_COUNT, HISTORY_KEY, clampIconChangeHeartbeats, clampIdleTime, clampCryBeepDuration, localDateKey, weekdayName } from '../types';
+import { SessionState, MessageType, Settings, DayScore, DEFAULT_SETTINGS, CHARACTER_COUNT, HISTORY_KEY, clampCryBeepDuration, localDateKey, weekdayName, round2 } from '../types';
 import {
-  IDLE_POLL_MS, STATUS_LOOP_MS, OS_IDLE_FLOOR_S, HEARTBEAT_THROTTLE_MS, VIEWER_CLASSIFY_DELAY_MS,
+  STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS,
   IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
 } from './timings';
+// Every heartbeat source — page input, focused PDF/viewer tabs, OS-wide activity —
+// lives in ./heartbeats. This file owns the state; that one decides when it beats.
+import {
+  initHeartbeats, setIdleApiProven, onPageHeartbeat, markContentAlive, hasContentScript,
+  forceActiveTick, expireStaleHeartbeat, resetOsAnchor,
+} from './heartbeats';
 
 let state: SessionState = {
   isHeartbeatActive: false,
@@ -18,30 +24,6 @@ let state: SessionState = {
   penaltyAt: 0,
   osHeld: false,
 };
-
-// Tabs whose CURRENT page has run our content script. Our content script runs on
-// every normal HTML page and pings (FOCUS_PING/HEARTBEAT). PDFs and other
-// plugin-rendered documents open in Chrome's built-in viewer, where content
-// scripts never run — so a loaded tab that has NEVER reported in (despite a real
-// http/file URL) is how we recognise a "viewer" tab without depending on its URL.
-//
-// This is membership, not recency: once a page has shown a content script it is
-// an HTML page for good. A quiet/blurred tab (e.g. after you switch windows, when
-// FOCUS_PING pauses) must NOT suddenly look like a viewer — otherwise the OS-idle
-// fallback would pin it active and it would never go idle. Cleared on navigation
-// so a tab that later loads a PDF is re-evaluated.
-const contentTabs = new Set<number>();
-
-function markContentAlive(tabId?: number) {
-  if (typeof tabId === 'number') contentTabs.add(tabId);
-}
-function hasContentScript(tabId?: number): boolean {
-  return typeof tabId === 'number' && contentTabs.has(tabId);
-}
-chrome.tabs.onRemoved.addListener((tabId) => contentTabs.delete(tabId));
-chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === 'loading') contentTabs.delete(tabId); // new page → re-detect
-});
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
 
@@ -99,7 +81,7 @@ function updateActionIcon() {
 
 // ── Init from storage ─────────────────────────────────────────────────────────
 chrome.storage.local.get(['focusFlowState', 'focusFlowSettings', 'idleApiProven'], (result) => {
-  idleApiProven = result.idleApiProven === true;
+  setIdleApiProven(result.idleApiProven === true);
   if (result.focusFlowState) {
     state = { ...state, ...(result.focusFlowState as SessionState) };
   }
@@ -129,7 +111,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
     // Force-active toggled: snap the sprite into (or out of) the active state
     if (prev.forceActive !== settings.forceActive) {
-      osIdleSince = 0; // stale anchor would immediately re-idle on the way back
+      resetOsAnchor(); // stale anchor would immediately re-idle on the way back
       updateState({ isHeartbeatActive: settings.forceActive, lastHeartbeat: Date.now() });
     }
     // Recolour the toolbar icon whenever the working state OR the whitelist changed
@@ -148,6 +130,12 @@ function updateState(newState: Partial<SessionState>) {
   broadcastState();
 }
 
+// In-memory only: no storage write, no fan-out to tabs. Used for the "still
+// active" refreshes the 2 Hz poll makes, which change nothing anyone can see.
+function touchState(newState: Partial<SessionState>) {
+  state = { ...state, ...newState };
+}
+
 function broadcastState() {
   chrome.tabs.query({}, (tabs) => {
     tabs.forEach((tab) => {
@@ -157,69 +145,6 @@ function broadcastState() {
     });
   });
   chrome.runtime.sendMessage({ type: 'STATE_UPDATE', state }).catch(() => {});
-}
-
-// ── Heartbeat accumulation (drives icon change AND the sprite's step) ─────────
-// One heartbeat is counted per *active* second. The sprite shrinks as the count
-// rises and takes one step on each change; once the count reaches
-// `iconChangeHeartbeats` the sprite has hit its minimum size, so the character
-// advances, the count resets to 0 (new icon back at full size) and `iconChangeAt`
-// is bumped to trigger the celebratory fireworks.
-//
-// This is EVENT-DRIVEN, called at every heartbeat *source* — the page's HEARTBEAT
-// message (mouse/keyboard) AND the chrome.idle poll (PDFs/other windows). We do
-// NOT rely on the 1s setInterval to count, because an MV3 service worker is
-// suspended between events and its timers don't fire reliably while asleep; an
-// incoming heartbeat, by contrast, always wakes the worker and lands here. The
-// 1s throttle (`lastCountAt`) keeps accumulation at ≈one per real second no
-// matter how fast (or from how many sources) heartbeats arrive.
-let lastCountAt = 0;
-let lastCountWeight = 0; // the heaviest weight already applied in the current 1s window
-
-// Advance the count by `amount`, handling the character change + score reward
-// when it reaches the threshold.
-function applyCount(amount: number) {
-  const threshold = clampIconChangeHeartbeats(settings.iconChangeHeartbeats);
-  const next = state.heartbeatCount + amount;
-  if (next >= threshold) {
-    // Reward a completed character: +30/x points (x = threshold), so a shorter
-    // interval is worth more per change and a full 30-heartbeat run is worth 1.
-    // Only real "Working" activity scores — forceActive ("Not working") pins the
-    // sprite active without genuine work, so it earns nothing (and the idle
-    // penalty is likewise skipped while forced).
-    const gained = settings.forceActive ? 0 : 30 / threshold;
-    updateState({
-      currentIconId: (state.currentIconId + 1) % CHARACTER_COUNT,
-      heartbeatCount: 0,
-      iconChangeAt: Date.now(),
-      focusScore: round2(state.focusScore + gained),
-    });
-  } else {
-    updateState({ heartbeatCount: next });
-  }
-}
-
-// `weight` is how much this heartbeat advances the count. Direct page input
-// (mouse/keyboard/scroll → the HEARTBEAT message) counts DOUBLE (weight 2) —
-// real interaction is worth more than the OS-idle poll's passive "still active"
-// signal (weight 1). The count still advances at most once per real second, but
-// within that second we keep the HEAVIEST weight seen: if the 0.5s idle poll got
-// here first with weight 1 and a page heartbeat (weight 2) then arrives, we top
-// up the +1 difference so direct input reliably counts double.
-function registerHeartbeat(weight = 1) {
-  if (!state.isHeartbeatActive && !settings.forceActive) return;
-  const now = Date.now();
-  if (now - lastCountAt < HEARTBEAT_THROTTLE_MS) {
-    if (weight > lastCountWeight) {   // heavier source this second → top up the gap
-      const extra = weight - lastCountWeight;
-      lastCountWeight = weight;
-      applyCount(extra);
-    }
-    return;
-  }
-  lastCountAt = now;
-  lastCountWeight = weight;
-  applyCount(weight);
 }
 
 // ── Score ──────────────────────────────────────────────────────────────────────
@@ -245,12 +170,6 @@ let idleWasActive = state.isHeartbeatActive; // tracks the active→idle edge
 let idleSince = 0;              // when the current idle lapse began
 let idlePenaltyApplied = false; // one penalty per idle lapse
 let autoPauseApplied = false;   // one auto "Not working" switch per idle lapse
-
-// No max(0) here: focusScore only ever rises from 0 and distractedScore is meant
-// to run negative, so clamping either would be wrong.
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
-}
 
 // ── Daily rollover ─────────────────────────────────────────────────────────────
 // The two counters belong to one local calendar day (state.scoreDate) and survive
@@ -334,190 +253,38 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 });
 
 // ── Activity monitor ──────────────────────────────────────────────────────────
-// One simple model: heartbeats drive the status, and the OS idle state is just
-// another source of heartbeats.
+// One simple model: heartbeats drive the status, and every source of them lives
+// in ./heartbeats — page input, focused viewer tabs, and OS-wide activity. Status
+// depends ONLY on heartbeat recency: if nothing has refreshed the heartbeat within
+// `idleTime` s, the sprite goes Idle.
 //
-//   • Every 2s we poll chrome.idle.queryState. If the user is active anywhere
-//     (mouse/keyboard in any window) and the focused tab is authorized, we
-//     "generate a heartbeat" (refresh lastHeartbeat, mark Active). This covers
-//     PDFs/viewers (no content script) and other windows uniformly. If the OS
-//     reports idle, no heartbeat is generated.
-//   • Content scripts also send HEARTBEAT messages on real page activity.
-//   • Status depends ONLY on heartbeat recency: if nothing has refreshed the
-//     heartbeat within `idleTime` s, the sprite goes Idle.
-//
-// chrome.idle is *polled* rather than event-based because idle transitions can be
-// missed/late on some platforms (notably Linux/Wayland). queryState(N) reports
-// "active" whenever there was any input in the last N seconds.
-
-// (1) Status loop — once per second. Counting is now event-driven (see
-// registerHeartbeat, called from the heartbeat sources), so this loop only:
-//   • keeps the count moving in forceActive mode (no external heartbeats there),
-//   • acts as a backup Idle expiry if nothing refreshed the heartbeat within
-//     `idleTime` (the idle poll is the primary path to Idle).
+// Counting is event-driven (see registerHeartbeat), so this once-per-second loop
+// only handles the day rollover, the forceActive tick, the backup Idle expiry and
+// the idle-lapse scoring.
 setInterval(() => {
   // Before any early return: the day must roll over even while disabled or forced.
   maybeRollover();
   if (!settings.enabled) return;
 
   if (settings.forceActive) {
-    if (!state.isHeartbeatActive) updateState({ isHeartbeatActive: true });
-    registerHeartbeat(); // forced mode still accumulates + steps
+    forceActiveTick(); // forced mode still accumulates + steps
     return;
   }
 
-  const now = Date.now();
-  const idleSec = clampIdleTime(settings.idleTime);
-  if (state.isHeartbeatActive && now - state.lastHeartbeat > idleSec * 1000) {
-    updateState({ isHeartbeatActive: false });
-  }
+  expireStaleHeartbeat();
   trackIdlePenalty(); // dock points for an idle lapse longer than 5 s
 }, STATUS_LOOP_MS);
 
-// (2) OS idle poll — twice per second, at chrome.idle's 15 s FLOOR (not the user's
-// idleTime). See OS_IDLE_FLOOR_S in ./timings for why: querying at idleTime gives
-// a binary flip with no countdown, because "active" refreshes lastHeartbeat to now
-// right up until the instant it isn't.
-//
-//   • system active → no input gap yet. On an authorized focused tab, stay/become
-//                     Active and date the last input to now.
-//   • system idle   → input stopped ≥15 s ago. ANCHOR that estimate once
-//                     (osIdleSince = now − 15 s) and hold it, so lastHeartbeat
-//                     stops advancing and every countdown derived from it ticks
-//                     down for real. Go Idle only once the gap reaches idleTime —
-//                     the floor is our sampling resolution, NOT the threshold.
-//
-// lastHeartbeat therefore means "best known time of the last input", which is
-// exactly what both the idle rule and the "I" countdown readouts want. To keep the
-// fast poll cheap we only broadcast on a real transition — while already Active we
-// just refresh lastHeartbeat in memory (no storage write, no fan-out to tabs).
-let osIdleSince = 0; // 0 = OS reported active on the last poll
-
-// The whole idle timeline hangs off what chrome.idle reports, and when that never
-// says "idle" every countdown silently pins at its maximum with no other symptom.
-// Log each transition (not each poll — that would be 2 lines/s) so the service
-// worker console shows whether the OS signal is arriving at all.
-let lastLoggedIdleState = '';
-
-// Whether chrome.idle has EVER reported a non-active state on this machine. Until
-// it has, its "active" is treated as no information at all (see the poll below).
-// Persisted, because the service worker is suspended constantly and re-learning
-// this every restart would reintroduce the freeze each time.
-let idleApiProven = false;
-
-// Register activity that no content script could report (a focused viewer tab, or
-// OS-wide input while the browser is in the background). Broadcasts only on a real
-// transition; while already Active it just refreshes the timestamp in memory.
-function markActiveNow() {
-  if (state.isHeartbeatActive) {
-    state.lastHeartbeat = Date.now();
-  } else {
-    updateState({ isHeartbeatActive: true, lastHeartbeat: Date.now() });
-  }
-  registerHeartbeat(); // advance the count + step (≤1/s)
-}
-
-function logIdleState(idleState: string) {
-  if (idleState === lastLoggedIdleState) return;
-  lastLoggedIdleState = idleState;
-  const age = Math.round((Date.now() - state.lastHeartbeat) / 1000);
-  console.log(`Focus: chrome.idle(${OS_IDLE_FLOOR_S}s) → "${idleState}" | lastHeartbeat ${age}s ago | active=${state.isHeartbeatActive}`);
-}
-
-// Apply a NON-ACTIVE chrome.idle reading: date the last input to the 15 s floor,
-// let the countdown tick down from there, and flip to Idle once the gap reaches
-// idleTime. Shared by both branches of the poll — a "the OS saw no input" reading
-// means the same thing wherever the user happens to be.
-function applyOsIdleReading(idleSec: number) {
-  const now = Date.now();
-  if (!idleApiProven) {
-    idleApiProven = true; // it does work on this machine after all
-    chrome.storage.local.set({ idleApiProven: true });
-    console.log('Focus: chrome.idle reported a non-active state — activity in other apps will now hold the idle clock');
-  }
-  // Anchor on the FIRST idle reading only — re-anchoring every poll would keep
-  // pushing the estimate forward and we'd never count down.
-  if (!osIdleSince) {
-    osIdleSince = now - OS_IDLE_FLOOR_S * 1000;
-    console.log(`Focus: anchored last input at ${OS_IDLE_FLOOR_S}s ago — "I" counts down the remaining ${idleSec - OS_IDLE_FLOOR_S}s`);
-  }
-  // Publish the anchor so the countdown readouts can see it tick.
-  if (state.lastHeartbeat > osIdleSince) updateState({ lastHeartbeat: osIdleSince });
-  if (state.isHeartbeatActive && now - osIdleSince >= idleSec * 1000) {
-    updateState({ isHeartbeatActive: false, osHeld: false }); // → crying/beep
-  }
-}
-
-setInterval(() => {
-  if (!settings.enabled || settings.forceActive) return;
-  const idleSec = clampIdleTime(settings.idleTime);
-
-  chrome.windows.getLastFocused({}, (win) => {
-    if (chrome.runtime.lastError) return;
-    const browserFocused = !!win?.focused;
-
-    // ── The browser has OS focus ────────────────────────────────────────────
-    // Everything can be answered from inside the browser; chrome.idle isn't
-    // consulted at all, so its reliability doesn't matter here.
-    if (browserFocused) {
-      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
-        const url = tabs[0]?.url;
-        if (!url || !/^(https?|file):/i.test(url) || !isAllowedUrl(url)) return;
-        // A content-script page timestamps every mouse/key/scroll itself — strictly
-        // better than any OS-wide signal. Defer to its HEARTBEATs and let the clock
-        // run down when they stop.
-        if (hasContentScript(tabs[0]?.id)) return;
-
-        // A viewer tab (PDF/plugin) runs no content script, so nothing inside the
-        // browser can observe its input: being focused on it is our only positive
-        // evidence of work. chrome.idle can still VETO that, though — a non-active
-        // reading is a positive assertion that the OS saw no input, so acting on it
-        // can only ever end a session EARLIER, and a broken API (stuck on "active")
-        // simply never triggers it. That asymmetry is why it's safe to use here
-        // unproven, while its "active" is not: "active" would hold the clock up
-        // forever, which is exactly the freeze this poll was restructured to avoid.
-        // Net effect: you can read a PDF indefinitely, but walking away from one
-        // still goes idle wherever the OS signal actually works.
-        chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
-          logIdleState(idleState);
-          if (idleState !== 'active') { applyOsIdleReading(idleSec); return; }
-          osIdleSince = 0;
-          state.osHeld = false;
-          markActiveNow();
-        });
-      });
-      return;
-    }
-
-    // ── The browser does NOT have focus ─────────────────────────────────────
-    // The user is in another application, and chrome.idle is the only thing that
-    // could say whether they're working there. Trust it ONLY once it has proven
-    // itself by reporting a non-active state at least once.
-    //
-    // On some platforms it never does — Chromium under Wayland can report "active"
-    // forever, whatever the user does. An unproven API must not be allowed to hold
-    // the clock up, because that freezes the countdown and the sprite never goes
-    // idle no matter how long you stay away. Until it proves otherwise we simply
-    // let the clock run down, which is the behaviour with no OS signal at all.
-    chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
-      logIdleState(idleState);
-
-      if (idleState !== 'active') { applyOsIdleReading(idleSec); return; }
-
-      // "active" from an API that has never shown us anything else carries no
-      // information — ignore it and let the countdown fall.
-      if (!idleApiProven) return;
-
-      osIdleSince = 0; // real input somewhere in the last 15 s
-      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
-        const url = tabs[0]?.url;
-        if (!url || !/^(https?|file):/i.test(url) || !isAllowedUrl(url)) return;
-        state.osHeld = true; // another app is what's keeping this alive (violet "I")
-        markActiveNow();
-      });
-    });
-  });
-}, IDLE_POLL_MS);
+// Start every heartbeat source. This file stays the owner of SessionState; the
+// heartbeats module reads it through these accessors and only ever writes back
+// through updateState/touchState, so there's still exactly one writer.
+initHeartbeats({
+  getState: () => state,
+  getSettings: () => settings,
+  updateState,
+  touchState,
+  isAllowedUrl,
+});
 
 // Mirrors heartbeat.ts: a URL is authorized when it matches a whitelisted domain.
 function isAllowedUrl(url: string): boolean {
@@ -635,19 +402,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse) => {
   switch (message.type) {
     case 'HEARTBEAT':
-      markContentAlive(sender.tab?.id);
-      if (settings.enabled && !settings.forceActive) {
-        // Real page input is exact and beats the coarse OS anchor: drop it so the
-        // "I" countdown restarts from a known-good timestamp rather than now−15 s.
-        osIdleSince = 0;
-        state.osHeld = false; // input is on the page again, not in another app
-        if (state.isHeartbeatActive) {
-          state.lastHeartbeat = Date.now();   // already Active → in-memory refresh only
-        } else {
-          updateState({ isHeartbeatActive: true, lastHeartbeat: Date.now() }); // transition
-        }
-        registerHeartbeat(1); // page-sourced heartbeat (mouse/keyboard) → counts SINGLE
-      }
+      onPageHeartbeat(sender.tab?.id);
       break;
 
     case 'FOCUS_PING':
