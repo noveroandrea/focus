@@ -48,16 +48,13 @@
     if (now - lastSent >= 1000) { lastSent = now; sendHeartbeat(); }
   }
 
-  // `viewer` marks a ping as coming from a plugin wrapper: it reports focus but
-  // can see no input, and the background must not mistake it for a page whose
-  // HEARTBEATs can be waited on.
-  function startFocusPing(viewer = false) {
+  function startFocusPing() {
     if (focusPingInterval !== null) return;
     focusPingInterval = setInterval(() => {
       if (stopped || !isContextValid()) { stop(); return; }
       if (!document.hasFocus()) return;
       try {
-        chrome.runtime.sendMessage({ type: 'FOCUS_PING', viewer }, () => {
+        chrome.runtime.sendMessage({ type: 'FOCUS_PING' }, () => {
           try { void chrome.runtime.lastError; } catch { /* ignore */ }
         });
       } catch { /* ignore */ }
@@ -224,28 +221,19 @@
   // key event goes to the viewer's own inner frame, which we can't reach. The
   // wrapper can therefore see the page and never see a single input.
   //
-  // So the wrapper can report exactly ONE useful thing, and must not claim the
-  // other. document.hasFocus() is true when any descendant browsing context has
-  // focus, so the wrapper DOES know whether you are looking at this PDF or have
-  // switched to another application — that's real, and it's the only way the
-  // background can tell those apart for a viewer tab. What it must NOT do is
-  // register as a page whose HEARTBEATs can be waited on, because none will ever
-  // come; that mistake made both heartbeat sources stand down and an arxiv PDF
-  // count nothing at all while being read.
-  //
-  // Hence: keep pinging focus, flagged as a viewer, and attach no input listeners.
+  // So staying silent is the honest answer. Pinging would register the tab as an
+  // HTML page, which the background uses to decide a tab is NOT a viewer — and
+  // that would break its PDF classify flow as well as its idea of what this tab
+  // is. There is no input to listen for either. Say nothing and let the OS idle
+  // poll cover the tab, which it does exactly as well as it covers anything else.
   function isPluginDocument(): boolean {
     if (document.contentType && document.contentType !== 'text/html') return true;
     return !!document.querySelector('embed[type="application/pdf"]');
   }
-  const viewer = isPluginDocument();
+  if (isPluginDocument()) return;
 
   // Always start the focus-ping loop regardless of authorization
-  try { startFocusPing(viewer); } catch { /* extension context unavailable */ }
-
-  // A viewer has no input to listen for, and nothing to classify (the background
-  // runs its own classify flow for viewer tabs).
-  if (viewer) return;
+  try { startFocusPing(); } catch { /* extension context unavailable */ }
 
   try {
     chrome.storage.local.get(['focusFlowSettings'], (result) => {

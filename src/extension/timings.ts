@@ -45,12 +45,12 @@ export const OS_IDLE_FLOOR_S = 15;
  *  ages). Once the OS says you've stopped, you get exactly this long to come back. */
 export const OS_IDLE_COUNTDOWN_S = 5;
 
-/** How long a FOCUS_PING stays fresh. heartbeat.ts pings once a second and ONLY
- *  when document.hasFocus(), so a stale ping from a page that is still the front
- *  tab means the user is in another application. This is the page reporting its own
- *  focus — deliberately not chrome.windows' `focused`, which can report the browser
- *  focused on every poll regardless of where the user actually is. */
-export const FOCUS_PING_STALE_MS = 3000;
+/** How long a page HEARTBEAT stays fresh. Purely cosmetic: when the idle poll sees
+ *  input but no page heartbeat has arrived within this window, the activity is
+ *  happening somewhere we can't see (another app, or inside a PDF viewer), and the
+ *  "I" countdown turns violet to say so. Must exceed heartbeat.ts's own 1 s send
+ *  throttle, or a steadily-used page would flicker. */
+export const PAGE_INPUT_FRESH_MS = 2000;
 
 /** registerHeartbeat() advances the count at most once per this window, so the
  *  count tracks ≈one heartbeat per real second no matter how many sources fire. */
