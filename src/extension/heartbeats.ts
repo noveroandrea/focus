@@ -60,6 +60,11 @@ let host: HeartbeatHost;
 // FOCUS_PING pauses) must NOT suddenly look like a viewer — otherwise the OS-idle
 // fallback would pin it active and it would never go idle. Cleared on navigation
 // so a tab that later loads a PDF is re-evaluated.
+//
+// Chrome wraps a PDF in a real HTML document, so our script technically runs there
+// and this test used to misfire — the tab claimed to be a content page while being
+// structurally unable to observe input. heartbeat.ts now stays silent on plugin
+// documents precisely so this stays true: reporting in means "I can see input".
 const contentTabs = new Set<number>();
 
 export function markContentAlive(tabId?: number) {
@@ -281,9 +286,16 @@ function pollOsIdle() {
     // ── The browser has OS focus ──────────────────────────────────────────────
     if (browserFocused) {
       withTrackedActiveTab((tab) => {
-        // A content-script page timestamps every mouse/key/scroll itself —
-        // strictly better than any OS-wide signal. Defer to its HEARTBEATs and let
-        // the clock run down when they stop.
+        // The ONE place a source deliberately stands down. A content-script page
+        // timestamps every mouse/key/scroll itself, so its HEARTBEATs are strictly
+        // better than "the window is focused" — and if focus alone also counted,
+        // staring at a whitelisted page without touching it would generate
+        // heartbeats forever and the countdown could never fall. So: defer to its
+        // HEARTBEATs and let the clock run down when they stop.
+        //
+        // This is safe only because a tab that CANNOT observe its own input never
+        // gets in here (see the contentTabs note above) — that asymmetry is what
+        // broke PDFs, where both sources stood down and nothing counted at all.
         if (hasContentScript(tab.id)) return;
 
         // Source 2 — a viewer tab (PDF/plugin). Nothing inside the browser can

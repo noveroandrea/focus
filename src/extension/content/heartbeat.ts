@@ -215,6 +215,26 @@
 
   // ── Main init ─────────────────────────────────────────────────────────────────
 
+  // ── Plugin-rendered documents (PDFs) ────────────────────────────────────────
+  // Chrome serves a PDF as a tiny HTML wrapper hosting <embed type="application/
+  // pdf">, and our content script DOES run in that wrapper — but every mouse and
+  // key event goes to the viewer's own inner frame, which we can't reach. The
+  // wrapper can therefore see the page and never see a single input.
+  //
+  // That combination is the worst case, because the two heartbeat sources cancel
+  // each other out: pinging from here marks the tab "has a content script", so
+  // the background stands its viewer source down and defers to HEARTBEATs that
+  // can never arrive. Nothing counts, and the sprite sits idle while you read.
+  // (This is exactly what happened on an arxiv PDF.)
+  //
+  // Staying silent is the honest answer — the tab really IS a viewer, so let the
+  // background treat it as one and drive it from window focus instead.
+  function isPluginDocument(): boolean {
+    if (document.contentType && document.contentType !== 'text/html') return true;
+    return !!document.querySelector('embed[type="application/pdf"]');
+  }
+  if (isPluginDocument()) return;
+
   // Always start the focus-ping loop regardless of authorization
   try { startFocusPing(); } catch { /* extension context unavailable */ }
 
