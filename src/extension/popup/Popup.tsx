@@ -805,10 +805,11 @@ const SettingsTab = ({ settings, onChange }: {
   );
 };
 
-// Open (or focus) the floating-companion helper window. It's an extension page, so
-// it can pop out an always-on-top video PiP even on sites that block PiP for their
-// own document (e.g. Overleaf). Deduped via a stored window id so repeated clicks
-// don't stack windows.
+// Open (or focus) the floating-companion helper window — a small extension window
+// that mirrors the sprite while you work in another app. Deduped via a stored
+// window id so a repeat click focuses the existing window instead of stacking a
+// new one. Keep it above other apps with your window manager (see the README
+// "Floating companion" section).
 function openCompanionWindow() {
   const url = chrome.runtime.getURL('pip.html');
   const create = () => chrome.windows.create(
@@ -939,8 +940,18 @@ const Popup = () => {
           </button>
           <button
             onClick={() => {
-              saveSettings({ ...settings, forceActive: !settings.forceActive });
-              openCompanionWindow();
+              // Toggle "Working" (forceActive === false) ↔ "Not working".
+              const next = { ...settings, forceActive: !settings.forceActive };
+              setSettings(next);
+              // Persist FIRST, then open the companion from the write callback.
+              // Opening it steals focus and closes this popup, and doing that before
+              // the write commits used to lose the toggle — hence the "took two
+              // clicks to turn green" bug. Only open it when RESUMING work, never
+              // when pausing.
+              chrome.storage.local.set({ focusFlowSettings: next }, () => {
+                void chrome.runtime.lastError;
+                if (!next.forceActive) openCompanionWindow();
+              });
             }}
             className={`flex items-center gap-1.5 flex-shrink-0 px-3 py-1.5 rounded-full text-[11px] font-bold transition-colors cursor-pointer ${
               settings.forceActive
@@ -949,7 +960,7 @@ const Popup = () => {
             }`}
             title={settings.forceActive
               ? 'Not working — click to resume (and open the companion window)'
-              : 'Working — click to pause (and open the companion window)'}
+              : 'Working — click to pause'}
           >
             {settings.forceActive ? <ZapOff size={13} /> : <Zap size={13} />}
             {settings.forceActive ? 'Not working' : 'Working'}
