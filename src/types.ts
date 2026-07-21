@@ -29,6 +29,12 @@ export interface SessionState {
   osHeld: boolean;
 }
 
+/** Round a score to 2 decimals. No max(0): focusScore only ever rises from 0 and
+ *  distractedScore is meant to run negative, so clamping either would be wrong. */
+export function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 /** One archived day of scores, kept in chrome.storage.local under HISTORY_KEY.
  *  Written once, when the day rolls over — never edited afterwards. */
 export interface DayScore {
