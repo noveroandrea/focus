@@ -46,7 +46,7 @@ import {
 } from './config';
 import { getAccessToken, isSignedIn } from './auth';
 
-/** Mirrors the `summary` view in supabase/migrations/0002_functions.sql. */
+/** Mirrors the `summary` view in the functions migration in supabase/migrations/. */
 export interface ServerSummary {
   user_id: string;
   live_focus: number;

@@ -23,7 +23,7 @@
 --  reflects the write that just happened.
 --
 --  apply_score_delta is the only writer of live scores, and it only ever ADDS to
---  them. Ending a day is the cron job's business alone (0003_cron.sql), so there is
+--  them. Ending a day is the cron job's business alone (the cron migration), so there is
 --  exactly one place that decides when a day is over, and the client knows nothing
 --  about it. A delta of (0, 0) is therefore also the "just tell me the current
 --  numbers" call, so one endpoint serves all three moments the client checks in:
@@ -335,7 +335,7 @@ begin
   values (v_user, focus_day(now(), v_tz), v_tz)
   on conflict (user_id) do update set timezone = excluded.timezone;
 
-  -- NO rollover here. Rolling over is the cron job's job alone (0003_cron.sql):
+  -- NO rollover here. Ending a day belongs to the cron job alone:
   -- this function only ever adds to the live score. Keeping the two apart means
   -- there is exactly one place that decides when a day ends, so there is nothing
   -- to reason about when a POST and the schedule land at the same moment.
@@ -343,7 +343,7 @@ begin
   -- The cost is a small attribution window: a delta arriving between the user's
   -- local 01:00 and the next cron pass is added to the day being closed rather
   -- than the new one. That is why the schedule runs every few minutes instead of
-  -- once an hour — see 0003_cron.sql.
+  -- once an hour — see the cron migration.
   update user_summary set
     live_focus      = live_focus      + greatest(coalesce(p_focus_delta, 0), 0),
     live_distracted = live_distracted + least(coalesce(p_distracted_delta, 0), 0),

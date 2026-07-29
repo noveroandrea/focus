@@ -126,8 +126,8 @@ so being offline delays a post but never drops it.
 
 A **focus-day runs 01:00 → 01:00 local time**, defined once in `focus_day()`.
 
-Ending a day happens **only on the server**, in the `pg_cron` job
-(`0003_cron.sql`). The extension never triggers a rollover and doesn't need to: the
+Ending a day happens **only on the server**, in the `pg_cron` job set up by the cron
+migration. The extension never triggers a rollover and doesn't need to: the
 job runs inside the database, so a user's day rolls over at their 01:00 whether
 their browser is open, shut, or the laptop is in a bag.
 
@@ -165,18 +165,30 @@ recorded.
 
 ### 2. Apply the migrations
 
-Either paste each file into **SQL Editor** in order, or use the CLI:
+```
+supabase/migrations/
+  20260729183000_schema.sql      tables, RLS, the focus_day() boundary
+  20260729183100_functions.sql   apply_score_delta, get_state, build_state, rollover
+  20260729183200_cron.sql        the 01:00 rollover schedule + researcher export views
+```
+
+Filenames use the Supabase `<timestamp>_<name>.sql` convention, so they apply in
+order and register correctly in the migration history. Three ways to apply them:
+
+**a. GitHub integration** — if the repo is connected to the project under
+**Project Settings → Integrations → GitHub**, migrations deploy on push to the
+configured production branch. Nothing to run by hand; watch the deploy under the
+integration's activity log. Note it deploys **only** SQL: `config.ts`, the Google
+OAuth client and the provider settings are all still manual (steps 3–5).
+
+**b. CLI**
 
 ```bash
 npx supabase link --project-ref <your-project-ref>
 npx supabase db push
 ```
 
-```
-supabase/migrations/0001_schema.sql      tables, RLS, the focus_day() boundary
-supabase/migrations/0002_functions.sql   apply_score_delta, rollover, summary view
-supabase/migrations/0003_cron.sql        the 01:00 rollover schedule + researcher export views
-```
+**c. SQL Editor** — paste each file's contents and Run, in filename order.
 
 **`0003` is required, not optional.** It installs `pg_cron`, which is the only thing
 that ends a day: without it the live score grows forever and `daily_scores` stays

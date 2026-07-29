@@ -1,0 +1,23 @@
+# Supabase project config.
+#
+# Present so this directory is a valid Supabase project, which is what the CLI
+# (`supabase db push`) and the GitHub integration both require before they will
+# look at supabase/migrations/.
+#
+# This is a MINIMAL config, hand-written for a project whose only server-side
+# artefacts are SQL migrations. If the CLI or the GitHub integration complains
+# about a missing key, run `supabase init` in a scratch directory and copy the
+# generated config.toml over this one — that produces the canonical full file for
+# your CLI version, with every section populated.
+#
+# `project_id` names the LOCAL project (it labels local dev containers). It does
+# not have to match the remote project ref; `supabase link --project-ref <ref>`
+# and the dashboard's GitHub integration handle that pairing.
+
+project_id = "focus"
+
+[db]
+# Postgres major version. Check yours under Project Settings → Infrastructure and
+# change this if it differs — a mismatch only affects local `supabase start`,
+# never what gets deployed, but it should be honest.
+major_version = 15

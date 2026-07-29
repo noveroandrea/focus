@@ -17,7 +17,7 @@
 --  everything else derives from it, so the rollover and every read agree by
 --  construction about which day a score belongs to.
 --
---  Ending a day is the cron job's business ALONE (0003_cron.sql). Nothing in the
+--  Ending a day is the cron job's business ALONE (the cron migration). Nothing in the
 --  extension, and no other function here, moves a score between days:
 --  apply_score_delta only ever adds to the live score. One writer, one scheduler.
 -- ─────────────────────────────────────────────────────────────────────────────
