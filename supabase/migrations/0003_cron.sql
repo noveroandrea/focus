@@ -1,16 +1,33 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 --  Focus — the 01:00 rollover schedule
 -- ─────────────────────────────────────────────────────────────────────────────
---  Runs HOURLY, not once a day at 01:00 UTC. Users are in different timezones, so
---  there is no single wall-clock minute at which everyone's day ends; the hourly
---  pass asks each user's own row whether their focus-day is over (focus_day()
---  encodes the 01:00 boundary) and rolls over only those that are.
+--  This is the ONLY thing that ends a day. The extension never triggers a rollover
+--  and does not need to — this runs inside the database, so a user's day rolls over
+--  at their 01:00 whether their browser is open, shut, or the laptop is in a bag.
 --
---  The cron job is a convenience, NOT the guarantee. apply_score_delta() performs
---  the same check on every call, so a user is rolled over correctly even if cron
---  is unavailable, the project is paused, or they were offline at 01:00. Both paths
---  call the same idempotent roll_forward(), so a race just makes one of them a
---  no-op. Deleting this file's schedule degrades timeliness, never correctness.
+--  WHY NOT '0 1 * * *'. A cron schedule is a single wall-clock time on the SERVER,
+--  and pg_cron's clock is UTC. `0 1 * * *` would mean 01:00 UTC — which is 02:00 in
+--  Rome, 20:00 the previous day in New York, and 06:30 in Delhi. There is no single
+--  minute at which every user's day ends.
+--
+--  So instead the job runs FREQUENTLY and asks each user's own row whether their
+--  focus-day is over, using their stored timezone. focus_day() encodes the 01:00
+--  boundary, so "over" is just live_day < focus_day(now(), timezone). Every 5
+--  minutes covers every real-world UTC offset (they are all multiples of 15 min,
+--  including the :30 and :45 ones like Delhi and Kathmandu) and bounds how long a
+--  finished day stays open.
+--
+--  That window matters because apply_score_delta only ever adds to the live score:
+--  a delta arriving between a user's 01:00 and the next pass is attributed to the
+--  day being closed. Five minutes of misattribution at 1 a.m. is a fair price for
+--  having exactly one place that ends a day.
+--
+--  The query behind this is a single indexed scan that returns no rows almost every
+--  time, so a 5-minute cadence is cheap.
+--
+--  pg_cron is therefore REQUIRED, not optional: without it days never roll over,
+--  the live score grows forever and daily_scores stays empty. Verify it is enabled
+--  before collecting data (see supabase/README.md).
 -- ─────────────────────────────────────────────────────────────────────────────
 
 create extension if not exists pg_cron;
@@ -24,13 +41,15 @@ begin
 end;
 $$;
 
--- At minute 5 of every hour: a few minutes' slack past the hour boundary so a user
--- whose clock is slightly ahead of the server's is not banked a minute early.
 select cron.schedule(
   'focus-rollover',
-  '5 * * * *',
+  '*/5 * * * *',   -- every 5 minutes; see the note above on why not '0 1 * * *'
   $$ select public.roll_forward_due(); $$
 );
+
+-- Check it registered, and watch it run:
+--   select jobname, schedule, active from cron.job;
+--   select * from cron.job_run_details order by start_time desc limit 20;
 
 -- ── Researcher export ─────────────────────────────────────────────────────────
 -- Deliberately NOT granted to `authenticated`: nothing reachable from the

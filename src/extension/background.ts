@@ -149,6 +149,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (prev.forceActive !== settings.forceActive) {
       resetOsAnchor(); // stale anchor would immediately re-idle on the way back
       updateState({ isHeartbeatActive: settings.forceActive, lastHeartbeat: Date.now() });
+      // The Working / Not-working button was clicked — one of the three moments the
+      // client checks in. Hooked here rather than in the popup so it fires however
+      // the toggle was flipped (the button, or the auto-pause after a long idle).
+      void flush();
     }
     // Recolour the toolbar icon whenever the working state OR the whitelist changed
     // (whitelisting the current page flips its icon green↔yellow).
@@ -242,10 +246,10 @@ function maybeRollover() {
   // previous day to bank, so just claim today.
   if (state.scoreDate) archiveDay(state.scoreDate, state.focusScore, state.distractedScore);
   updateState({ scoreDate: today, focusScore: 0, distractedScore: 0 });
-  // A new local day has begun — one of the two moments the spec asks the extension
-  // to check in. Sends any still-pending delta and pulls back the fresh averages,
-  // which the server has just recomputed at its own 01:00 rollover.
-  void flush();
+  // Deliberately NO server call here. This is the extension's own local history
+  // rolling over; the server runs its own rollover on its own schedule and the
+  // client knows nothing about it. Mixing the two would make the client's idea of
+  // "a day" leak into the sync protocol, which is exactly what it must not do.
 }
 
 function archiveDay(date: string, focusScore: number, distractedScore: number) {

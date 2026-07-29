@@ -6,16 +6,24 @@
 --    POST /rest/v1/rpc/apply_score_delta   send a score delta, get everything back
 --    GET  /rest/v1/summary                 read-only: the same payload, no write
 --
---  apply_score_delta is the only writer of live scores. It is one round trip and
---  atomic: the row is locked, any overdue day is banked, the delta is applied, and
---  the refreshed summary is returned. A delta of (0, 0) is therefore also the
---  "just tell me the current numbers" call the extension makes at browser start
---  and at the start of a day — no special endpoint needed.
+--  apply_score_delta is the only writer of live scores, and it only ever ADDS to
+--  them. Ending a day is the cron job's business alone (0003_cron.sql), so there is
+--  exactly one place that decides when a day is over, and the client knows nothing
+--  about it. A delta of (0, 0) is therefore also the "just tell me the current
+--  numbers" call, so one endpoint serves all three moments the client checks in:
+--  a score update, the browser opening, and the Working button being clicked.
 --
---  Deltas, not absolutes, on purpose: two devices can both post +1 without either
---  overwriting the other, and a retry that arrives late still lands correctly. The
---  cost is that a duplicate POST double-counts, so the client must only retry a
---  request it knows did not land (see sync.ts).
+--  WHY DELTAS AND NOT ABSOLUTE SCORES. Each device sends only what it earned since
+--  its last successful post, and gets back the running total across ALL devices:
+--
+--    server total 10.  laptop posts +1  -> server 11, laptop shown 11
+--                      phone  posts +1  -> server 12, phone  shown 12
+--                      laptop posts +0  -> server 12, laptop shown 12
+--
+--  Every device converges on the same total without needing to know what the others
+--  did. Sending absolutes instead would lose points: the laptop would say "my total
+--  is 11" and the phone "my total is 11", and the server would end at 11 rather
+--  than 12 — the slower device silently overwriting the faster one.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- ── refresh_rollup ────────────────────────────────────────────────────────────
@@ -94,12 +102,14 @@ $$;
 -- ── roll_forward ──────────────────────────────────────────────────────────────
 -- Bank the live score into daily_scores and reset it, if its focus-day is over.
 --
--- Idempotent and date-driven, NOT a timer: it asks "is live_day still today?" and
--- does nothing if so. That is what lets the same function serve both the 01:00
--- cron job and the lazy check inside apply_score_delta — whichever runs first wins
--- and the other becomes a no-op. It also means a user whose browser was closed at
--- 01:00 is rolled over correctly the moment they come back, and a machine left off
--- for a week banks one day rather than seven empty ones.
+-- Called ONLY from the cron job (via roll_forward_due). The extension never
+-- triggers a rollover, and does not need to: this runs inside the database, so it
+-- works while the user's browser is shut, their laptop is closed, or they are on
+-- holiday. A machine left off for a week banks one real day rather than seven
+-- empty ones, because an absent day is simply never written.
+--
+-- Still written to be idempotent — it asks "is live_day still today?" and does
+-- nothing if so — so a retried or overlapping cron pass cannot double-bank a day.
 create or replace function public.roll_forward(p_user uuid)
 returns boolean
 language plpgsql
@@ -110,7 +120,9 @@ declare
   v_row   user_summary;
   v_today date;
 begin
-  -- FOR UPDATE: the cron job and a concurrent POST must not both bank the same day.
+  -- FOR UPDATE so two overlapping cron passes (a slow run still going when the next
+  -- fires) cannot both bank the same day, and so a delta arriving mid-rollover is
+  -- serialised against it rather than landing on a score about to be zeroed.
   select * into v_row from user_summary where user_id = p_user for update;
   if not found then
     return false;
@@ -145,7 +157,7 @@ $$;
 -- The cron entry point: roll over every user whose focus-day has ended. Because
 -- focus_day() already encodes the 01:00 boundary, "ended" is simply live_day <
 -- today-in-their-timezone — no hour arithmetic here, and users in every timezone
--- are handled by the same hourly pass.
+-- are handled by the same pass, whatever their offset.
 create or replace function public.roll_forward_due()
 returns integer
 language plpgsql
@@ -169,11 +181,13 @@ end;
 $$;
 
 -- ── summary (read API) ────────────────────────────────────────────────────────
--- What the extension GETs. A view rather than the raw table so the wire format is
--- stable if the storage layout changes, and so `stale` can be derived: it is true
--- when the live score belongs to a focus-day that has already ended, i.e. the
--- numbers are pre-rollover. The client uses that to know a (0,0) POST is needed
--- before trusting the live figure.
+-- What the extension GETs, and what apply_score_delta returns. A view rather than
+-- the raw table so the wire format stays stable if the storage layout changes.
+--
+-- It deliberately exposes NOTHING about rollover — no "is this day over" flag. The
+-- client is not a participant in day boundaries: it posts deltas and renders
+-- whatever live score comes back. If a rollover happens between two posts, the
+-- client simply shows the previous figure until its next post returns 0.
 create or replace view public.summary
 with (security_invoker = true) as
 select
@@ -187,12 +201,11 @@ select
   s.avg7_focus,  s.avg7_distracted,
   s.avg30_focus, s.avg30_distracted,
   s.timezone,
-  s.updated_at,
-  (s.live_day < public.focus_day(now(), s.timezone)) as stale
+  s.updated_at
 from public.user_summary s;
 
 comment on view public.summary is
-  'Read API for the extension: live score, last 3 days, 7d/30d averages, plus a stale flag.';
+  'Read API for the extension: live score, last 3 completed days, 7d/30d averages.';
 
 grant select on public.summary to authenticated;
 revoke all on public.summary from anon;
@@ -240,10 +253,15 @@ begin
   values (v_user, focus_day(now(), v_tz), v_tz)
   on conflict (user_id) do update set timezone = excluded.timezone;
 
-  -- Bank an overdue day BEFORE applying the delta, so points earned after 01:00
-  -- land on the new day rather than being added to the day being closed.
-  perform roll_forward(v_user);
-
+  -- NO rollover here. Rolling over is the cron job's job alone (0003_cron.sql):
+  -- this function only ever adds to the live score. Keeping the two apart means
+  -- there is exactly one place that decides when a day ends, so there is nothing
+  -- to reason about when a POST and the schedule land at the same moment.
+  --
+  -- The cost is a small attribution window: a delta arriving between the user's
+  -- local 01:00 and the next cron pass is added to the day being closed rather
+  -- than the new one. That is why the schedule runs every few minutes instead of
+  -- once an hour — see 0003_cron.sql.
   update user_summary set
     live_focus      = live_focus      + greatest(coalesce(p_focus_delta, 0), 0),
     live_distracted = live_distracted + least(coalesce(p_distracted_delta, 0), 0),

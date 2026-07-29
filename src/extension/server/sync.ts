@@ -4,20 +4,39 @@
 //  One endpoint does the work: rpc/apply_score_delta. It takes a DELTA (+focus /
 //  −distracted) and returns the whole summary, so "push my points" and "tell me
 //  where I stand" are the same round trip. A (0, 0) delta is therefore a pure read,
-//  which is what runs at browser start and at the start of a day.
+//  and one endpoint covers all three moments the client checks in:
 //
-//  WHY DELTAS AND NOT ABSOLUTE SCORES: two browsers signed into the same account
-//  can both post +1 and both land. Sending absolutes would make the slower device
-//  silently overwrite the faster one, and a stale service worker waking up after a
-//  suspension would undo real progress.
+//    • a score change            (queueDelta, debounced)
+//    • the browser opening       (background init + onStartup)
+//    • the Working button        (the forceActive toggle in background.ts)
 //
-//  The cost of deltas is that a duplicate post double-counts, so retries have to be
-//  careful. Pending deltas are held in chrome.storage.local (not memory — an MV3
-//  worker is suspended constantly) and are only cleared once the server has
-//  confirmed them. The one case that can still double-count is a request that
-//  reached the database but whose response was lost in transit; we accept that,
-//  because the alternative — dropping the delta — loses real work, and a rare
-//  extra point matters less than a missing one. Nothing here is billing.
+//  THE CLIENT KNOWS NOTHING ABOUT ROLLOVER. Days are ended by the server's cron job
+//  on its own schedule; nothing here tracks, triggers or even asks about it. The
+//  live score is the server's value, rendered as received. So just after a rollover
+//  the client may still show the previous day's figure until its next post returns
+//  the reset one — which is fine, and much cheaper than teaching both sides the same
+//  calendar and keeping them agreeing.
+//
+//  WHY DELTAS AND NOT ABSOLUTE SCORES. A device sends only what it earned since its
+//  own last successful post, and gets back the running total across ALL devices:
+//
+//    server total 10.  laptop posts +1  ->  server 11,  laptop sees 11
+//                      phone  posts +1  ->  server 12,  phone  sees 12
+//                      laptop posts +0  ->  server 12,  laptop sees 12
+//
+//  so every device converges on the same total without knowing what the others did.
+//  Sending absolutes would lose points instead: the laptop would claim "total 11"
+//  and the phone "total 11", and the server would settle on 11 rather than 12.
+//
+//  Pending deltas are held in chrome.storage.local rather than memory, because an
+//  MV3 worker is suspended between events and would otherwise forget them. They are
+//  cleared only once the server has confirmed them, so being offline delays a post
+//  but never drops it.
+//
+//  The one case that can double-count is a request that reached the database but
+//  whose response was lost in transit: we retry, and the delta lands twice. That is
+//  deliberate — the alternative is dropping work the user really did, and one
+//  spurious point matters less than a missing one. Nothing here is billing.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY, isServerConfigured } from './config';
@@ -36,16 +55,12 @@ export interface ServerSummary {
   avg30_focus: number; avg30_distracted: number;
   timezone: string;
   updated_at: string;
-  /** True when live_day is already over, i.e. these numbers predate a rollover. */
-  stale: boolean;
 }
 
 interface Pending {
   focus: number;
   distracted: number;
 }
-
-const EMPTY: Pending = { focus: 0, distracted: 0 };
 
 /** Coalesce a burst of score changes into one request instead of one per point. */
 const FLUSH_DEBOUNCE_MS = 4000;
@@ -171,9 +186,9 @@ export async function flush(): Promise<ServerSummary | null> {
 /** Record a score change for the next flush.
  *
  *  Signs are enforced here as well as in SQL: focus only ever rises and distracted
- *  only ever falls, so anything else is a reset (the daily rollover zeroing the
- *  local counters) rather than real activity — and the server does its own
- *  rollover, so those must not be forwarded as a giant negative delta. */
+ *  only ever falls, so anything else is the extension's own local history resetting
+ *  its counters, not real activity. Those must never be forwarded — the server ends
+ *  its own days, and a giant negative delta would wipe out a real score. */
 export async function queueDelta(focusDelta: number, distractedDelta: number): Promise<void> {
   if (!isServerConfigured()) return;
   const focus = Number.isFinite(focusDelta) ? Math.max(0, focusDelta) : 0;
@@ -193,10 +208,9 @@ export async function queueDelta(focusDelta: number, distractedDelta: number): P
 
 /** Read-only fetch of the summary — no delta, no write.
  *
- *  Present because the spec asks for a GET read path, and it is the right call
- *  when something merely wants to display the numbers (the popup opening). Note it
- *  cannot trigger a rollover, so a `stale: true` result means "call flush() to get
- *  today's real figures". */
+ *  The right call when something merely wants to display the numbers (the popup
+ *  opening) without counting as a check-in. flush() is what the three client
+ *  triggers use, since it both pushes and reads. */
 export async function fetchSummary(): Promise<ServerSummary | null> {
   if (!isServerConfigured()) return null;
   if (!(await isSignedIn())) return null;

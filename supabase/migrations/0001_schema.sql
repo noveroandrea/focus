@@ -14,9 +14,12 @@
 --
 --  THE FOCUS DAY. Scores roll over at 01:00 local time, not midnight, so a "focus
 --  day" runs 01:00 → 01:00. That boundary is expressed once, in focus_day(), and
---  every other piece of logic derives from it — the lazy rollover in
---  apply_score_delta() and the hourly cron job can therefore never disagree about
---  which day a score belongs to.
+--  everything else derives from it, so the rollover and every read agree by
+--  construction about which day a score belongs to.
+--
+--  Ending a day is the cron job's business ALONE (0003_cron.sql). Nothing in the
+--  extension, and no other function here, moves a score between days:
+--  apply_score_delta only ever adds to the live score. One writer, one scheduler.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- ── The focus-day boundary ────────────────────────────────────────────────────

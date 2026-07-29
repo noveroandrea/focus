@@ -28,32 +28,64 @@ GET  /rest/v1/summary?select=*        (read-only; cannot trigger a rollover)
 ```
 
 `apply_score_delta` sends a **delta** (`+focus` / `−distracted`), not an absolute
-score, and returns the refreshed summary in the same round trip. So:
+score, and returns the refreshed summary in the same round trip. Because a `(0, 0)`
+delta is just a read, that one endpoint covers all three moments the client checks
+in:
 
-- **a score change** posts its delta and gets the new standing back;
-- **browser start** and **the start of a day** post `(0, 0)` — a pure read.
+| Trigger | Delta sent |
+|---|---|
+| a score change | the points earned/lost |
+| the browser opening | `(0, 0)` unless something is pending |
+| the **Working** button clicked | `(0, 0)` unless something is pending |
 
-Deltas rather than absolutes because two devices signed into one account can both
-post `+1` and both land; absolutes would let the slower device silently overwrite
-the faster one. The trade-off is that a duplicate post double-counts, so the
-extension only ever retries a request it knows didn't land, and holds unsent deltas
-in `chrome.storage.local` so a suspended service worker doesn't lose them.
+**The client knows nothing about rollover.** It posts deltas and renders whatever
+live score comes back. Days are ended by the server, on the server's schedule —
+nothing in the extension tracks, triggers, or asks about it. Just after a rollover
+the client may still show the previous day's figure until its next post returns the
+reset one. That is by design: teaching both sides the same calendar, and keeping them
+agreeing, costs far more than a briefly stale number.
+
+### Why deltas and not absolute scores
+
+Each device sends only what **it** earned since its own last successful post, and
+gets back the running total across **all** devices:
+
+| | server total | that device shows |
+|---|---|---|
+| starting point | 10 | |
+| laptop posts `+1` | 11 | 11 |
+| phone posts `+1` | 12 | 12 |
+| laptop posts `+0` | 12 | 12 |
+
+Every device converges on the same total without needing to know what the others
+did. Sending absolutes would *lose* points: the laptop would claim "my total is 11"
+and the phone "my total is 11", and the server would settle on 11 instead of 12 —
+the slower device silently overwriting the faster.
+
+Unsent deltas live in `chrome.storage.local`, not memory, because an MV3 service
+worker is suspended between events. They clear only once the server confirms them,
+so being offline delays a post but never drops it.
 
 ### The 01:00 rollover
 
-A **focus-day runs 01:00 → 01:00 local time.** That boundary is defined once, in
-`focus_day()`, and both rollover paths derive from it:
+A **focus-day runs 01:00 → 01:00 local time**, defined once in `focus_day()`.
 
-1. **`pg_cron`, hourly** (`0003_cron.sql`) — rolls over every user whose local
-   focus-day has ended. Hourly rather than daily because users are in different
-   timezones, so there is no single minute at which everyone's day ends.
-2. **Lazily, inside `apply_score_delta`** — the same check on every call.
+Ending a day happens **only on the server**, in the `pg_cron` job
+(`0003_cron.sql`). The extension never triggers a rollover and doesn't need to: the
+job runs inside the database, so a user's day rolls over at their 01:00 whether
+their browser is open, shut, or the laptop is in a bag.
 
-Both call the same idempotent `roll_forward()`, so whichever runs first wins and the
-other becomes a no-op. That means the cron job is a *convenience, not the
-guarantee*: a user whose browser was shut at 01:00 is rolled over correctly the
-moment they come back, and if `pg_cron` is unavailable nothing is lost — only
-timeliness.
+**Why the schedule isn't `0 1 * * *`.** A cron schedule is one wall-clock time on
+the server, and pg_cron's clock is UTC. `0 1 * * *` means 01:00 UTC — which is 02:00
+in Rome, 20:00 the previous day in New York, 06:30 in Delhi. There is no single
+minute at which everyone's day ends. So the job instead runs **every 5 minutes** and
+asks each user's row whether *their* focus-day is over, using their stored timezone.
+Five minutes covers every real-world UTC offset, including the `:30`/`:45` ones.
+
+Because `apply_score_delta` only ever adds to the live score, a delta arriving
+between a user's 01:00 and the next pass is attributed to the day being closed —
+at most 5 minutes of misattribution, at 1 a.m., in exchange for having exactly one
+place that ends a day.
 
 Rolling over banks the live score into `daily_scores`, resets it to 0, and
 recomputes `d1..d3` + both averages. Recomputing only at rollover is correct rather
@@ -87,13 +119,20 @@ npx supabase db push
 ```
 supabase/migrations/0001_schema.sql      tables, RLS, the focus_day() boundary
 supabase/migrations/0002_functions.sql   apply_score_delta, rollover, summary view
-supabase/migrations/0003_cron.sql        the hourly rollover + researcher export views
+supabase/migrations/0003_cron.sql        the 01:00 rollover schedule + researcher export views
 ```
 
-`0003` needs the `pg_cron` extension. It is available on all paid plans and on the
-free plan in most regions; if `create extension pg_cron` fails, **skip that file** —
-the lazy rollover in `apply_score_delta` keeps everything correct, days just get
-banked when the user next opens their browser instead of at 01:00 sharp.
+**`0003` is required, not optional.** It installs `pg_cron`, which is the only thing
+that ends a day: without it the live score grows forever and `daily_scores` stays
+empty. Confirm it registered before collecting any data:
+
+```sql
+select jobname, schedule, active from cron.job;
+select * from cron.job_run_details order by start_time desc limit 20;
+```
+
+If `create extension pg_cron` fails, enable it under **Database → Extensions** and
+re-run the file.
 
 ### 3. Google sign-in
 
