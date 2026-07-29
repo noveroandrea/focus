@@ -30,45 +30,49 @@ To load the extension in Chrome after building: go to `chrome://extensions`, ena
 
 ## Architecture
 
-The extension uses a **message-passing architecture** where `background.ts` is the single source of truth for all state:
+The extension uses a **message-passing architecture** where `background.ts` is the single source of truth for all state, but heartbeat *generation* lives in its own module:
 
 ```
-User activity (mouse/keyboard/scroll)           OS-level activity (any window / PDF viewer)
+User activity (mouse/keyboard/scroll)           OS-wide activity (any window / PDF viewer)
     ↓                                                ↓
-heartbeat.ts (content script)                    chrome.idle poll (in background.ts)
+heartbeat.ts (content script)                    chrome.idle poll (in heartbeats.ts)
   sends HEARTBEAT on real page activity            queried every 0.5s
     └───────────────┬───────────────────────────────┘
                     ↓
+heartbeats.ts — the two heartbeat sources + accumulation + the idle countdown anchor
+    ↓ (via a small host interface: getState/getSettings/updateState/touchState/isAllowedUrl)
 background.ts (service worker) — owns SessionState, persists to chrome.storage.local
-  • registerHeartbeat(): advances the heartbeat count (≈1/s) on EACH source above
   • broadcasts STATE_UPDATE to all tabs + popup on any change
                     ↓
-sprite.ts (injected UI) + popup/Popup.tsx — pure renderers of the received state
+sprite.ts (injected UI) + popup/Popup.tsx + pip.ts (floating companion) — pure renderers of the received state
 ```
 
 ### Activity & counting model (important)
 
-State is driven by **heartbeats**, and there are two heartbeat sources, unified in the background:
+State is driven by **heartbeats**, generated entirely in `src/extension/heartbeats.ts` (not `background.ts` — that file only owns the state and reacts to it). There are exactly two heartbeat sources:
 
 1. **Page activity** — `heartbeat.ts` sends a `HEARTBEAT` message on mouse/keyboard/scroll on an authorized page.
-2. **OS activity** — a `chrome.idle.queryState(idleTime)` poll (every **0.5s**) covers PDFs, plugin viewers, and other windows where no content script runs.
+2. **OS activity** — a `chrome.idle.queryState(15)` poll (every **0.5s**) covers PDFs, plugin viewers, and other windows where no content script runs. Always queried at the **15s floor** (Chrome's minimum), never at the user's `idleTime` — querying at `idleTime` gives a binary flip with no visible countdown, because "active" refreshes `lastHeartbeat` to now right up until the instant it isn't. The first "idle" reading anchors the last input at `now − 15s` and the readout counts down a fixed `OS_IDLE_COUNTDOWN_S` (5s) from there, regardless of `idleTime`.
 
-Two intervals live in `background.ts`:
-
-- **Idle poll (every 0.5s)** — `queryState(idleTime)` already means "no input for `idleTime` seconds", so it maps straight onto status: **idle → go Idle now** (fires the crying/beep); **active on an authorized focused tab → stay/become Active**. While already Active it only refreshes `lastHeartbeat` in memory (no storage write / no broadcast) to stay cheap.
-- **Status loop (every 1s)** — keeps counting alive in `forceActive` mode and provides a **backup Idle expiry** if nothing refreshed the heartbeat within `idleTime`.
-
-**Counting is event-driven, NOT timer-driven.** `registerHeartbeat()` is called from every heartbeat source (the `HEARTBEAT` message, the idle-poll active branch, and the `forceActive` 1s tick). It advances `heartbeatCount` by one, **throttled to ≈once per real second** via `lastCountAt`. This matters because an MV3 service worker is suspended between events and its `setInterval` timers don't fire reliably while asleep — but an incoming heartbeat always wakes the worker and lands in `registerHeartbeat`. When the count hits `iconChangeHeartbeats` it advances `currentIconId`, resets the count to 0, and bumps `iconChangeAt`.
+**Counting is event-driven, NOT timer-driven.** `registerHeartbeat()` (in `heartbeats.ts`) is called from every heartbeat source. It advances `heartbeatCount` by one, **throttled to ≈once per real second**. This matters because an MV3 service worker is suspended between events and its `setInterval` timers don't fire reliably while asleep — but an incoming heartbeat always wakes the worker and lands in `registerHeartbeat`. When the count hits `iconChangeHeartbeats` it advances `currentIconId`, resets the count to 0, and bumps `iconChangeAt`.
 
 **One step per heartbeat.** `sprite.ts` moves one step on every change of `heartbeatCount`, so the sprite steps exactly once per heartbeat regardless of source (page interaction OR idle poll). There is no separate per-DOM-event movement path.
 
+**PDF/plugin viewer tabs are a special case.** Chrome serves a PDF as an HTML wrapper around `<embed type="application/pdf">`, so `heartbeat.ts` technically runs there — but real input goes to the viewer's inner frame, which the wrapper can never observe. `heartbeat.ts` therefore detects this (`document.contentType !== 'text/html'` or an `embed[type="application/pdf"]`) and **stays completely silent** rather than pinging: pinging would register the tab as an observable HTML page and make the background wait forever for HEARTBEATs that can never arrive. A silent tab is picked up correctly by the OS idle poll instead, exactly like any other viewer.
+
+**`osHeld` (violet countdown).** When the OS poll sees input but no page heartbeat arrived recently (`PAGE_INPUT_FRESH_MS`), the work is happening somewhere the page can't see — another app, or inside a PDF viewer — and `SessionState.osHeld` is set so the sprite's "I ⋯s" countdown renders violet instead of blue. Same countdown either way; only the colour differs.
+
+> **Platform gotcha (do not re-litigate):** if `chrome.idle.queryState` reports `"active"` forever and the idle countdown never falls, **check how the browser is launched before touching this code.** Running Chromium/Brave with `--ozone-platform=x11` on a Wayland session routes it through Xwayland, whose XScreenSaver idle counter never advances (the Wayland compositor handles input) — `chrome.idle` will report `"active"` permanently no matter what the extension does. This is a browser-launch problem, not an extension bug; an earlier version of this codebase built a large amount of `idleApiProven`-style workaround machinery around this exact symptom, all of which was later deleted once the real cause (a stray `--ozone-platform=x11` flag in a `.desktop` file, left over from a picture-in-picture experiment) was found and removed.
+
 ### Key Files
 
-- **`src/types.ts`** — Shared types: `SessionState`, `Settings`, `MessageType`, `CryBeepStyle`. Exports `CHARACTER_COUNT` (15), `DEFAULT_SETTINGS`, and clamps: `clampIconChangeHeartbeats` (5–300), `clampIdleTime` (15–300, default 20; 15 is Chrome's idle floor), `clampCryBeepVolume/Duration/Style`.
-- **`src/extension/background.ts`** — Service worker. Owns `SessionState`, runs the 0.5s idle poll + 1s status loop, `registerHeartbeat()` counting, the AI classify proxy, the PDF/viewer classification flow, and draws the toolbar icon (green "Working" / grey "forceActive") with OffscreenCanvas.
-- **`src/extension/content/heartbeat.ts`** — Content script that detects activity on authorized domains and sends `HEARTBEAT` / `FOCUS_PING` / `CLASSIFY_PAGE`. Domain defaults: Overleaf, arXiv, Nature, IEEE, Claude AI, Google Scholar, Wikipedia, UNIPD, mail (Gmail/Outlook) — all editable.
-- **`src/extension/content/sprite.ts`** — Vanilla-TS sprite injected into all pages. Renders the 15 characters, shrinks as `heartbeatCount` rises, steps once per heartbeat, cries + beeps when idle (beep styles: **`ramp`** rising volume, **`pulse`** steady beeps every 5s, **`siren`**), plays fireworks on `iconChangeAt` change, and is draggable. Uses inline styles (not Tailwind) to survive host-page CSS. Audio uses the Web Audio API with **capture-phase** unlock listeners (`pointerdown`/`keydown`/`touchstart`/`click`) so it works even on SPAs that `stopPropagation` input events.
-- **`src/extension/popup/Popup.tsx`** — 320px popup: activity status, per-page whitelist toggle, and Settings (idle time, icon-change heartbeats, beep volume/duration/style, AI classifier fields, allowed-domain editor).
+- **`src/types.ts`** — Shared types: `SessionState`, `Settings`, `MessageType`, `CryBeepStyle`. Exports `CHARACTER_COUNT` (15), `DEFAULT_SETTINGS`, `round2`, and clamps: `clampIconChangeHeartbeats` (5–300), `clampIdleTime` (15–300, default 20; 15 is Chrome's idle floor), `clampCryBeepVolume/Duration/Style`.
+- **`src/extension/heartbeats.ts`** — **All heartbeat generation**, isolated from state ownership. Both sources (page `HEARTBEAT`, the `chrome.idle` poll), the throttled accumulation (`registerHeartbeat`), the OS-idle countdown anchor, and the viewer-tab bookkeeping (`contentTabs`) live here. Talks to `background.ts` only through a small `HeartbeatHost` interface (`getState`/`getSettings`/`updateState`/`touchState`/`isAllowedUrl`) — `background.ts` remains the only writer of `SessionState`.
+- **`src/extension/background.ts`** — Service worker. Owns `SessionState`, wires up `heartbeats.ts` via `initHeartbeats()`, runs the 1s status loop (day rollover, `forceActive` tick, backup idle expiry, idle-penalty scoring), the AI classify proxy, the PDF/viewer classification flow, and draws the toolbar icon (green "Working" / grey "forceActive") with OffscreenCanvas.
+- **`src/extension/content/heartbeat.ts`** — Content script that detects activity on authorized domains and sends `HEARTBEAT` / `FOCUS_PING` / `CLASSIFY_PAGE`. Domain defaults: Overleaf, arXiv, Nature, IEEE, Claude AI, Google Scholar, Wikipedia, UNIPD, mail (Gmail/Outlook) — all editable. **Detects and stays silent on PDF/plugin-viewer documents** (see below) rather than pinging from a wrapper that can't see input.
+- **`src/extension/content/sprite.ts`** — Vanilla-TS sprite injected into all pages. Renders the 15 characters, shrinks as `heartbeatCount` rises, steps once per heartbeat, cries + beeps when idle (beep styles: **`ramp`** rising volume, **`pulse`** steady beeps every 5s, **`siren`**), plays fireworks on `iconChangeAt` change, and is draggable. Uses inline styles (not Tailwind) to survive host-page CSS. Audio uses the Web Audio API with **capture-phase** unlock listeners (`pointerdown`/`keydown`/`touchstart`/`click`) so it works even on SPAs that `stopPropagation` input events. Shows an "I ⋯s" / "W ⋯s" phase countdown (violet when `osHeld`).
+- **`src/extension/pip/pip.ts`** — The **floating companion**: a small standalone `chrome-extension://` window (`pip.html`) mirroring the sprite's character, score, and phase countdown, meant to float above other apps while you work outside the browser. Not video picture-in-picture (removed — see the README's "Floating companion" section for why) and not raised on top by the extension itself; the window manager does that (per-OS instructions live in both the README and the Settings → Features → Floating companion (i) panel). Opened from the popup's Working button only when *resuming* work, gated on `Settings.companionEnabled`.
+- **`src/extension/popup/Popup.tsx`** — 320px popup: activity status, per-page whitelist toggle, and Settings (idle time, icon-change heartbeats, beep volume/duration/style, AI classifier fields, allowed-domain editor, floating-companion toggle + always-on-top help).
 - **`src/components/SpriteSimulation.tsx`** — Standalone demo used by `index.html` (`npm run dev`) to develop the sprite without Chrome APIs (shortened interval).
 
 ### AI auto-classify (configurable backend)
@@ -85,7 +89,7 @@ The code speaks Ollama's request/response shape (`/api/generate` warm-up + `/api
 ### Build Entries (vite.config.ts)
 
 Vite compiles multiple entry points into separate `dist/` bundles:
-- `main` → index.html (demo) · `background` → service worker · `heartbeat`, `sprite` → content scripts · `popup` → popup panel. Content-script bundles are wrapped in IIFEs so re-injection after reload doesn't throw "Identifier already declared".
+- `main` → index.html (demo) · `background` → service worker · `heartbeat`, `sprite` → content scripts · `popup` → popup panel · `pip` → the floating companion window. Content-script bundles are wrapped in IIFEs so re-injection after reload doesn't throw "Identifier already declared".
 
 ### State Shape
 
@@ -98,6 +102,11 @@ SessionState {
   currentIconId: number         // Active character index (0..CHARACTER_COUNT-1)
   heartbeatCount: number        // Active heartbeats toward the next change (drives shrink + steps)
   iconChangeAt: number          // Timestamp nonce; bumped on each character change (triggers fireworks)
+  focusScore: number            // Points earned by focusing; only ever rises
+  distractedScore: number       // Points lost to distraction; only ever falls (runs negative)
+  scoreDate: string             // Local YYYY-MM-DD the two scores above belong to
+  penaltyAt: number             // Timestamp nonce; bumped when an idle penalty lands (triggers "−10" animation)
+  osHeld: boolean                // True when the OS poll (not a page heartbeat) is keeping the session alive — colours the "I" countdown violet
 }
 ```
 
