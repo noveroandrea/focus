@@ -39,7 +39,7 @@
 //  spurious point matters less than a missing one. Nothing here is billing.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { DayScore, HISTORY_KEY, Settings, DEFAULT_SETTINGS, weekdayName } from '../../types';
+import { DayScore, HISTORY_KEY, Settings, DEFAULT_SETTINGS, weekdayName, round2 } from '../../types';
 import {
   SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY,
   PENDING_DOMAINS_KEY, SERVER_DOMAINS_KEY, isServerConfigured,
@@ -81,8 +81,32 @@ interface Pending {
   distracted: number;
 }
 
-/** Coalesce a burst of score changes into one request instead of one per point. */
-const FLUSH_DEBOUNCE_MS = 4000;
+/** What sync needs from background.ts, which owns SessionState. Same shape of
+ *  arrangement as initHeartbeats() — this module never imports the state. */
+export interface SyncHost {
+  /** Replace the local live score with the server's authoritative figure. Must NOT
+   *  route back through the delta hook, or reconciliation would post the difference
+   *  it just received and run away. */
+  onServerScores(focus: number, distracted: number): void;
+}
+
+let syncHost: SyncHost | null = null;
+
+/** Wire up reconciliation. Call once from the service worker's top level. */
+export function initSync(h: SyncHost) {
+  syncHost = h;
+}
+
+/** Every score change posts, so the reply can reconcile the displayed live score
+ *  promptly. Not zero, though: a focus point and an idle penalty can land in the same
+ *  instant, and a character change at the minimum interval (5 heartbeats) fires every
+ *  few seconds. One second collapses those genuine bursts into a single request while
+ *  keeping convergence effectively immediate.
+ *
+ *  Raise this if a study with many participants starts straining request limits — the
+ *  optimistic local update means the user sees their points immediately either way,
+ *  and only the reconciliation is delayed. */
+const FLUSH_DEBOUNCE_MS = 1000;
 
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let inFlight: Promise<ServerState | null> | null = null;
@@ -229,6 +253,31 @@ function readPendingDomains(): Promise<string[] | null> {
   });
 }
 
+// ── Reconciling the displayed score with the server ───────────────────────────
+// The local score is updated OPTIMISTICALLY the moment a point is earned, so the
+// sprite's +1 and the −10 fly-up fire immediately rather than after a round trip.
+// This is the other half of that: once the server answers, its live score becomes
+// the displayed one.
+//
+// The `+ pending` is not optional. Deltas queued while the request was in flight are
+// by definition not in the figure the server just sent, so setting the display to the
+// bare server value would visibly undo points the user has already been shown
+// earning — and the next post would then re-add them, making the number jump twice.
+// Adding what is still pending keeps the display equal to "everything the server
+// knows, plus everything on its way there".
+//
+// Note this is also what makes a server-side rollover show up on screen: after it the
+// server reports 0, so the display drops to 0 (plus anything pending) on the next
+// post. No client-side notion of a day is involved.
+async function reconcileScores(next: ServerState | null): Promise<void> {
+  const summary = next?.summary;
+  if (!summary || !syncHost) return;
+  const remaining = await readPending();
+  const focus = (Number(summary.live_focus) || 0) + remaining.focus;
+  const distracted = (Number(summary.live_distracted) || 0) + remaining.distracted;
+  syncHost.onServerScores(round2(focus), round2(distracted));
+}
+
 // ── The single write+read call ────────────────────────────────────────────────
 /** Post whatever is pending (possibly nothing) and store the returned summary.
  *
@@ -281,6 +330,7 @@ export async function flush(): Promise<ServerState | null> {
 
       const state = (await res.json()) as ServerState | null;
       await applyState(state);
+      await reconcileScores(state);
       return state;
     } catch (err) {
       // Offline, DNS failure, project paused — keep the pending delta for later.
@@ -333,6 +383,7 @@ export async function fetchState(): Promise<ServerState | null> {
     if (!res || !res.ok) return null;
     const state = (await res.json()) as ServerState | null;
     await applyState(state);
+    await reconcileScores(state);
     return state;
   } catch {
     return null;

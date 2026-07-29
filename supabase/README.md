@@ -41,6 +41,22 @@ endpoint, so a score delta and a whitelist edit cannot race — the reply always
 reflects the write that just happened. `p_domains` is `null` on almost every call,
 meaning "no edit"; an empty *array* is different and does clear the list.
 
+### Instant feedback, server-authoritative numbers
+
+Scores update **locally the instant a point is earned**, so the sprite's `+1` and the
+`−10` fly-up need no round trip. The post then goes out, and the live score in its
+reply **replaces** the displayed figure — on both the sprite and the popup.
+
+The reconciled value is `server_live_score + still_pending`. The `+ pending` matters:
+deltas queued while that request was in flight are not in the number the server just
+sent, so using the bare server value would visibly take away points the user was
+already shown earning, and the next post would re-add them — the number would jump
+twice.
+
+Neither the fly-up nor the character-change fireworks are disturbed by
+reconciliation, because both are triggered by their own timestamp nonces
+(`penaltyAt`, `iconChangeAt`), not by the score numbers changing.
+
 ### The server is the source of truth
 
 Scores, the whitelist and the day history all live on the server. The extension keeps

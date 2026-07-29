@@ -11,7 +11,7 @@ import {
 } from './heartbeats';
 // Optional Supabase sync. Every call is a no-op until config.ts is filled in AND
 // the user has signed in, so the extension is fully functional without a server.
-import { queueDelta, queueDomains, flush, getCachedSummary } from './server/sync';
+import { initSync, queueDelta, queueDomains, flush, getCachedSummary } from './server/sync';
 import { signIn, signOut, getSession } from './server/auth';
 import { isServerConfigured } from './server/config';
 
@@ -177,15 +177,33 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // ignores anything that isn't a rise in focus / fall in distracted, so the daily
 // rollover zeroing both counters is correctly not forwarded as a huge negative
 // delta — the server runs its own rollover.
-function updateState(newState: Partial<SessionState>) {
-  const prevFocus = state.focusScore;
-  const prevDistracted = state.distractedScore;
+function writeState(newState: Partial<SessionState>) {
   state = { ...state, ...newState };
   chrome.storage.local.set({ focusFlowState: state });
   broadcastState();
+}
+
+function updateState(newState: Partial<SessionState>) {
+  const prevFocus = state.focusScore;
+  const prevDistracted = state.distractedScore;
+  writeState(newState);
   if (state.focusScore !== prevFocus || state.distractedScore !== prevDistracted) {
     void queueDelta(state.focusScore - prevFocus, state.distractedScore - prevDistracted);
   }
+}
+
+// Reconciliation from the server. Goes through writeState, NOT updateState, and that
+// is the whole point: updateState would diff the scores it just received against the
+// old ones and post the difference straight back, which compounds on every reply.
+//
+// Local scores are updated optimistically when a point is earned, so the sprite's +1
+// and the −10 fly-up are instant; this then replaces the displayed figure with the
+// server's, which is the value shared across all of the user's devices. Neither the
+// fly-up nor the fireworks are affected, because both are driven by their own
+// timestamp nonces (penaltyAt / iconChangeAt), not by the score numbers changing.
+function applyServerScores(focus: number, distracted: number) {
+  if (state.focusScore === focus && state.distractedScore === distracted) return;
+  writeState({ focusScore: focus, distractedScore: distracted });
 }
 
 // In-memory only: no storage write, no fan-out to tabs. Used for the "still
@@ -352,6 +370,9 @@ initHeartbeats({
   touchState,
   isAllowedUrl,
 });
+
+// Let the server reconcile the displayed live score after each post.
+initSync({ onServerScores: applyServerScores });
 
 // Mirrors heartbeat.ts: a URL is authorized when it matches a whitelisted domain.
 function isAllowedUrl(url: string): boolean {
