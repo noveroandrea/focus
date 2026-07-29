@@ -84,10 +84,11 @@ interface Pending {
 /** What sync needs from background.ts, which owns SessionState. Same shape of
  *  arrangement as initHeartbeats() — this module never imports the state. */
 export interface SyncHost {
-  /** Replace the local live score with the server's authoritative figure. Must NOT
-   *  route back through the delta hook, or reconciliation would post the difference
-   *  it just received and run away. */
-  onServerScores(focus: number, distracted: number): void;
+  /** Replace the local live score with the server's authoritative figure, and the
+   *  local day label with the server's focus-day. Must NOT route back through the
+   *  delta hook, or reconciliation would post the difference it just received and
+   *  run away. */
+  onServerScores(focus: number, distracted: number, liveDay: string): void;
 }
 
 let syncHost: SyncHost | null = null;
@@ -275,7 +276,7 @@ async function reconcileScores(next: ServerState | null): Promise<void> {
   const remaining = await readPending();
   const focus = (Number(summary.live_focus) || 0) + remaining.focus;
   const distracted = (Number(summary.live_distracted) || 0) + remaining.distracted;
-  syncHost.onServerScores(round2(focus), round2(distracted));
+  syncHost.onServerScores(round2(focus), round2(distracted), String(summary.live_day ?? ''));
 }
 
 // ── The single write+read call ────────────────────────────────────────────────

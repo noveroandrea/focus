@@ -1,4 +1,4 @@
-import { SessionState, MessageType, Settings, DayScore, ServerStatus, DEFAULT_SETTINGS, CHARACTER_COUNT, HISTORY_KEY, clampCryBeepDuration, localDateKey, weekdayName, round2 } from '../types';
+import { SessionState, MessageType, Settings, ServerStatus, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, round2 } from '../types';
 import {
   STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS,
   IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
@@ -110,7 +110,6 @@ chrome.storage.local.get(['focusFlowState', 'focusFlowSettings'], (result) => {
   }
   state.enabled = settings.enabled;
   if (settings.forceActive) state.isHeartbeatActive = true;
-  maybeRollover(); // the PC may have been off across midnight — bank the old day now
   updateActionIcon();
   chrome.windows.getLastFocused((win) => {
     if (win.id) updateState({ activeWindowId: win.id });
@@ -201,9 +200,11 @@ function updateState(newState: Partial<SessionState>) {
 // server's, which is the value shared across all of the user's devices. Neither the
 // fly-up nor the fireworks are affected, because both are driven by their own
 // timestamp nonces (penaltyAt / iconChangeAt), not by the score numbers changing.
-function applyServerScores(focus: number, distracted: number) {
-  if (state.focusScore === focus && state.distractedScore === distracted) return;
-  writeState({ focusScore: focus, distractedScore: distracted });
+function applyServerScores(focus: number, distracted: number, liveDay: string) {
+  if (state.focusScore === focus &&
+      state.distractedScore === distracted &&
+      state.scoreDate === liveDay) return;
+  writeState({ focusScore: focus, distractedScore: distracted, scoreDate: liveDay });
 }
 
 // In-memory only: no storage write, no fan-out to tabs. Used for the "still
@@ -247,49 +248,16 @@ let idleSince = 0;              // when the current idle lapse began
 let idlePenaltyApplied = false; // one penalty per idle lapse
 let autoPauseApplied = false;   // one auto "Not working" switch per idle lapse
 
-// ── Daily rollover ─────────────────────────────────────────────────────────────
-// The two counters belong to one local calendar day (state.scoreDate) and survive
-// reboots via chrome.storage.local. When the day changes we bank the finished day
-// into the DayScore[] history and reset the live counters to 0.
+// ── Day boundaries live on the server ─────────────────────────────────────────
+// There is deliberately no local rollover here. The server ends the day (its cron
+// job, at 01:00 in the user's own timezone) and its reply carries both the reset
+// live score and the 30 most recent completed days, which applyState() writes into
+// the local history cache. A second, midnight-based rollover in the client would
+// only disagree with it: the two boundaries are an hour apart, so it used to zero
+// the score at 00:00 and then have it jump back on the next post.
 //
-// This is date-driven, NOT a midnight timer: an MV3 service worker is asleep most
-// of the time and can't be trusted to fire at 00:00, and the PC may be off
-// entirely. Instead we compare dates on every wake — at startup and on each tick
-// of the status loop — so the rollover lands at midnight if the machine is awake,
-// or at the first moment it's switched on afterwards. Either way no day is lost.
-function maybeRollover() {
-  const today = localDateKey();
-  if (state.scoreDate === today) return;
-
-  // Empty scoreDate = first run since this feature shipped; there's no complete
-  // previous day to bank, so just claim today.
-  if (state.scoreDate) archiveDay(state.scoreDate, state.focusScore, state.distractedScore);
-  updateState({ scoreDate: today, focusScore: 0, distractedScore: 0 });
-  // Deliberately NO server call here. This is the extension's own local history
-  // rolling over; the server runs its own rollover on its own schedule and the
-  // client knows nothing about it. Mixing the two would make the client's idea of
-  // "a day" leak into the sync protocol, which is exactly what it must not do.
-}
-
-// Writes the local history cache. When server sync is active this is not the record
-// of record — the server owns completed days and every response overwrites this key
-// with its own 30 — but it still runs, because it is the ONLY record for a user who
-// is signed out or offline, and it converges to the server's version on the next
-// post either way.
-function archiveDay(date: string, focusScore: number, distractedScore: number) {
-  chrome.storage.local.get([HISTORY_KEY], (r) => {
-    const history: DayScore[] = Array.isArray(r[HISTORY_KEY]) ? r[HISTORY_KEY] : [];
-    const entry: DayScore = { date, weekday: weekdayName(date), focusScore, distractedScore };
-    // Overwrite rather than append if the date is somehow already there, so a
-    // double rollover can never duplicate a day.
-    const i = history.findIndex((e) => e.date === date);
-    if (i >= 0) history[i] = entry;
-    else history.push(entry);
-    history.sort((a, b) => a.date.localeCompare(b.date));
-    chrome.storage.local.set({ [HISTORY_KEY]: history });
-    console.log('Focus: banked', date, entry);
-  });
-}
+// state.scoreDate is now set from the server's live_day, so "today" in the popup
+// means the server's focus-day rather than a locally computed date.
 
 // Called once per second from the status loop. Detects the transition into idle
 // and, once that lapse has outlasted the warning + grace phases, deducts the
@@ -344,11 +312,9 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 // `idleTime` s, the sprite goes Idle.
 //
 // Counting is event-driven (see registerHeartbeat), so this once-per-second loop
-// only handles the day rollover, the forceActive tick, the backup Idle expiry and
-// the idle-lapse scoring.
+// only handles the forceActive tick, the backup Idle expiry and the idle-lapse
+// scoring. Day boundaries are the server's business — see above.
 setInterval(() => {
-  // Before any early return: the day must roll over even while disabled or forced.
-  maybeRollover();
   if (!settings.enabled) return;
 
   if (settings.forceActive) {

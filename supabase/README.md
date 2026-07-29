@@ -41,6 +41,19 @@ endpoint, so a score delta and a whitelist edit cannot race — the reply always
 reflects the write that just happened. `p_domains` is `null` on almost every call,
 meaning "no edit"; an empty *array* is different and does clear the list.
 
+### The client has no day rollover
+
+`maybeRollover()` and `archiveDay()` are removed on this branch. The server ends the
+day and every reply carries the reset live score plus the 30 most recent completed
+days, so a second midnight-based rollover in the client could only disagree with it —
+the two boundaries are an hour apart, so it used to zero the score at 00:00 and then
+have it jump back on the next post.
+
+> **This makes the server mandatory for day tracking.** Signed out, or with
+> `config.ts` unfilled, nothing ends a day: the live score grows indefinitely and no
+> history is banked. The extension still works as a focus companion — sprite, idle
+> detection, beeps, whitelist — but scores stop being daily.
+
 ### Instant feedback, server-authoritative numbers
 
 Scores update **locally the instant a point is earned**, so the sprite's `+1` and the
