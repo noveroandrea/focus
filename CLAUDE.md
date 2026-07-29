@@ -86,6 +86,18 @@ On `CLASSIFY_PAGE` (HTML pages) or the background viewer flow (PDFs), `classifyP
 
 The code speaks Ollama's request/response shape (`/api/generate` warm-up + `/api/chat`, reads `data.message.content`). To target **Gemini / OpenAI / Claude**, edit `classifyPage()` — the README has ready-to-paste examples. If the backend is unreachable it returns `{ isStudy: false, offline: true }` and the page is simply left inactive, so the extension always works without any AI.
 
+### Optional Supabase sync (`withserver` branch)
+
+Off by default and **completely inert** until `src/extension/server/config.ts` is filled in *and* the user signs in — every call short-circuits on `isServerConfigured()`, so the extension still works with no backend.
+
+- **`src/extension/server/auth.ts`** — Google sign-in via `chrome.identity.launchWebAuthFlow` (**not** `getAuthToken`, which is Chrome-only and absent in Brave), exchanging Google's `id_token` for a Supabase session. Refreshes are collapsed into one in-flight promise because Supabase rotates the refresh token on use — two parallel refreshes would sign the user out.
+- **`src/extension/server/sync.ts`** — sends score **deltas** (`+focus` / `−distracted`), never absolutes, so two devices on one account can both post without overwriting each other. Pending deltas live in `chrome.storage.local` (an MV3 worker is suspended constantly) and clear only on server confirmation.
+- **`supabase/migrations/`** — three tables (`daily_scores`, `user_domains`, `user_summary`), one write RPC (`apply_score_delta`, which returns the whole summary so a write and a read are one round trip), and the rollover.
+
+**The hook point is `updateState()`** in `background.ts` — the single writer of `SessionState`. Diffing `focusScore`/`distractedScore` there means any future code path that awards points is synced automatically. `queueDelta` ignores anything that isn't a *rise* in focus / *fall* in distracted, so the local daily rollover zeroing both counters is correctly not forwarded as a huge negative delta.
+
+**A focus-day runs 01:00 → 01:00 local**, defined once in the SQL `focus_day()`. Rollover happens both via hourly `pg_cron` and lazily inside `apply_score_delta`; both call the same idempotent `roll_forward()`, so cron is a convenience and never the correctness guarantee. Note this differs from the *extension's* local midnight rollover, so 00:00–01:00 points land on different days locally vs server-side. Setup and the research/PII caveats are in `supabase/README.md`.
+
 ### Build Entries (vite.config.ts)
 
 Vite compiles multiple entry points into separate `dist/` bundles:

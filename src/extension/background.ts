@@ -1,4 +1,4 @@
-import { SessionState, MessageType, Settings, DayScore, DEFAULT_SETTINGS, CHARACTER_COUNT, HISTORY_KEY, clampCryBeepDuration, localDateKey, weekdayName, round2 } from '../types';
+import { SessionState, MessageType, Settings, DayScore, ServerStatus, DEFAULT_SETTINGS, CHARACTER_COUNT, HISTORY_KEY, clampCryBeepDuration, localDateKey, weekdayName, round2 } from '../types';
 import {
   STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS,
   IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
@@ -9,6 +9,22 @@ import {
   initHeartbeats, onPageHeartbeat, onFocusPing, hasContentScript,
   forceActiveTick, expireStaleHeartbeat, resetOsAnchor,
 } from './heartbeats';
+// Optional Supabase sync. Every call is a no-op until config.ts is filled in AND
+// the user has signed in, so the extension is fully functional without a server.
+import { queueDelta, flush, syncDomains, getCachedSummary } from './server/sync';
+import { signIn, signOut, getSession } from './server/auth';
+import { isServerConfigured } from './server/config';
+
+/** Assemble the account snapshot the popup renders. */
+async function replyServerStatus(sendResponse: (r: ServerStatus) => void) {
+  const session = await getSession();
+  sendResponse({
+    configured: isServerConfigured(),
+    signedIn: session !== null,
+    email: session?.email ?? '',
+    summary: await getCachedSummary(),
+  });
+}
 
 let state: SessionState = {
   isHeartbeatActive: false,
@@ -99,6 +115,25 @@ chrome.storage.local.get(['focusFlowState', 'focusFlowSettings'], (result) => {
   chrome.windows.getLastFocused((win) => {
     if (win.id) updateState({ activeWindowId: win.id });
   });
+  // The other check-in the spec asks for: the browser has just opened (this block
+  // runs on every service-worker start). Flushes anything pending from the last
+  // session and pulls the current live score + averages back. With nothing pending
+  // this is the (0, 0) post, i.e. a pure read.
+  void flush();
+});
+
+// onStartup fires only on a real browser launch, whereas the block above also runs
+// whenever the service worker is merely revived from suspension. Both are wanted —
+// a launch must always check in, even if the worker had been alive moments before —
+// and flush() is idempotent, so the overlap costs at most one extra empty request.
+chrome.runtime.onStartup.addListener(() => { void flush(); });
+
+// A fresh install or update has no pending deltas, but this creates the user's
+// server row and seeds the whitelist so the study has their configuration from the
+// start rather than only after their first accidental edit.
+chrome.runtime.onInstalled.addListener(() => {
+  void flush();
+  void syncDomains(settings.allowedDomains);
 });
 
 // Pick up settings changes written directly by the popup
@@ -117,18 +152,35 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
     // Recolour the toolbar icon whenever the working state OR the whitelist changed
     // (whitelisting the current page flips its icon green↔yellow).
-    if (prev.forceActive !== settings.forceActive ||
-        prev.allowedDomains.join('\n') !== settings.allowedDomains.join('\n')) {
+    const whitelistChanged =
+      prev.allowedDomains.join('\n') !== settings.allowedDomains.join('\n');
+    if (prev.forceActive !== settings.forceActive || whitelistChanged) {
       updateActionIcon();
+    }
+    // Mirror the whitelist to the server on change only — it's a full replace, so
+    // there is nothing to gain from resending an identical list.
+    if (whitelistChanged) {
+      void syncDomains(settings.allowedDomains);
     }
   }
 });
 
 // ── State helpers ─────────────────────────────────────────────────────────────
+// updateState is the ONLY writer of SessionState, which makes it the one place
+// worth hooking the server sync into: any future code path that awards or docks
+// points is picked up automatically instead of needing its own call. queueDelta
+// ignores anything that isn't a rise in focus / fall in distracted, so the daily
+// rollover zeroing both counters is correctly not forwarded as a huge negative
+// delta — the server runs its own rollover.
 function updateState(newState: Partial<SessionState>) {
+  const prevFocus = state.focusScore;
+  const prevDistracted = state.distractedScore;
   state = { ...state, ...newState };
   chrome.storage.local.set({ focusFlowState: state });
   broadcastState();
+  if (state.focusScore !== prevFocus || state.distractedScore !== prevDistracted) {
+    void queueDelta(state.focusScore - prevFocus, state.distractedScore - prevDistracted);
+  }
 }
 
 // In-memory only: no storage write, no fan-out to tabs. Used for the "still
@@ -190,6 +242,10 @@ function maybeRollover() {
   // previous day to bank, so just claim today.
   if (state.scoreDate) archiveDay(state.scoreDate, state.focusScore, state.distractedScore);
   updateState({ scoreDate: today, focusScore: 0, distractedScore: 0 });
+  // A new local day has begun — one of the two moments the spec asks the extension
+  // to check in. Sends any still-pending delta and pulls back the fresh averages,
+  // which the server has just recomputed at its own 01:00 rollover.
+  void flush();
 }
 
 function archiveDay(date: string, focusScore: number, distractedScore: number) {
@@ -437,6 +493,30 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
 
     case 'GET_STATE':
       sendResponse(state);
+      break;
+
+    // ── Server sync ──────────────────────────────────────────────────────────
+    // Sign-in must run here rather than in the popup: launchWebAuthFlow opens a
+    // window, which closes the popup, which would tear down the flow before Google
+    // redirects back.
+    case 'SERVER_SIGN_IN':
+      signIn().then((session) => {
+        if (session) {
+          // Seed the account immediately so a new participant has a server row and
+          // their whitelist recorded without waiting for their first point.
+          void syncDomains(settings.allowedDomains);
+          void flush();
+        }
+        void replyServerStatus(sendResponse);
+      });
+      break;
+
+    case 'SERVER_SIGN_OUT':
+      signOut().then(() => replyServerStatus(sendResponse));
+      break;
+
+    case 'SERVER_STATUS':
+      void replyServerStatus(sendResponse);
       break;
   }
   return true;

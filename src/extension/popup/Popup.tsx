@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { SessionState, Settings, DayScore, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
-import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info } from 'lucide-react';
+import { SessionState, Settings, DayScore, ServerStatus, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
+import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogIn, LogOut } from 'lucide-react';
 import '../../index.css';
 
 
@@ -435,6 +435,106 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
   );
 };
 
+// ── Account & data sync ───────────────────────────────────────────────────────
+// Sign-in is dispatched to the BACKGROUND, not run here: launchWebAuthFlow opens a
+// window, which closes the popup, which would kill the flow before Google
+// redirects back. The background survives that, so the popup only ever asks.
+const ServerAccount = () => {
+  const [status, setStatus] = useState<ServerStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const ask = (type: 'SERVER_STATUS' | 'SERVER_SIGN_IN' | 'SERVER_SIGN_OUT') => {
+    setBusy(type !== 'SERVER_STATUS');
+    chrome.runtime.sendMessage({ type }, (res?: ServerStatus) => {
+      void chrome.runtime.lastError;
+      setBusy(false);
+      if (res) setStatus(res);
+    });
+  };
+
+  useEffect(() => { ask('SERVER_STATUS'); }, []);
+
+  // An unconfigured build has no server at all — say so plainly rather than
+  // offering a sign-in button that can only fail.
+  if (status && !status.configured) {
+    return (
+      <section className="space-y-2">
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Data sync</h3>
+        <p className="text-[9px] text-slate-400">
+          Not configured in this build. Fill in <code>src/extension/server/config.ts</code> and
+          rebuild to enable syncing — see <code>supabase/README.md</code>.
+        </p>
+      </section>
+    );
+  }
+
+  const summary = status?.summary as {
+    live_focus?: number; live_distracted?: number;
+    avg7_focus?: number; avg30_focus?: number;
+  } | null;
+
+  return (
+    <section className="space-y-2">
+      <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Data sync</h3>
+
+      {status?.signedIn ? (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span className="min-w-0 flex-1 text-[11px] leading-tight text-slate-600">
+              Signed in
+              <br />
+              <span className="block truncate text-[10px] text-slate-400">{status.email}</span>
+            </span>
+            <button
+              onClick={() => ask('SERVER_SIGN_OUT')}
+              disabled={busy}
+              className="flex-shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-200 disabled:opacity-40 cursor-pointer"
+            >
+              <LogOut size={11} className="inline" /> Sign out
+            </button>
+          </div>
+          {summary && (
+            <div className="rounded-xl bg-slate-50 p-2 text-[10px] text-slate-500">
+              <div className="flex justify-between">
+                <span>Server live score</span>
+                <span className="font-bold tabular-nums text-slate-700">
+                  {Math.round(summary.live_focus ?? 0)} / {Math.round(summary.live_distracted ?? 0)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>7-day average (focus)</span>
+                <span className="font-bold tabular-nums text-slate-700">{Math.round(summary.avg7_focus ?? 0)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>30-day average (focus)</span>
+                <span className="font-bold tabular-nums text-slate-700">{Math.round(summary.avg30_focus ?? 0)}</span>
+              </div>
+            </div>
+          )}
+          <p className="text-[9px] text-slate-400">
+            Scores and your whitelist are saved to the study server. Days roll over at 01:00 local time.
+          </p>
+        </>
+      ) : (
+        <>
+          <button
+            onClick={() => ask('SERVER_SIGN_IN')}
+            disabled={busy}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-700 px-3 py-2 text-sm font-bold text-white shadow-sm hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+          >
+            <LogIn size={14} /> {busy ? 'Signing in…' : 'Sign in with Google'}
+          </button>
+          <p className="text-[9px] text-slate-400">
+            Optional. Signing in saves your daily scores, averages and whitelisted domains to the
+            study server so they survive a reinstall and sync across devices. The extension works
+            fully without it.
+          </p>
+        </>
+      )}
+    </section>
+  );
+};
+
 // ── Settings tab ──────────────────────────────────────────────────────────────
 const SettingsTab = ({ settings, onChange }: {
   settings: Settings;
@@ -485,6 +585,10 @@ const SettingsTab = ({ settings, onChange }: {
 
   return (
     <div className="space-y-5 text-sm">
+
+      {/* Account first: everything below is local settings, this is the one that
+          decides whether any of it leaves the machine. */}
+      <ServerAccount />
 
       {/* Feature toggles. Sound lives in the header next to Working — it's a
           one-click mute, not a setting you come in here to change. */}

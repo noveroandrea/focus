@@ -177,4 +177,18 @@ export type MessageType =
   | { type: 'STATE_UPDATE'; state: SessionState }
   | { type: 'ADD_DOMAIN'; domain: string }
   | { type: 'REMOVE_DOMAIN'; domain: string }
-  | { type: 'CLASSIFY_PAGE'; url: string; title: string; snippet: string };
+  | { type: 'CLASSIFY_PAGE'; url: string; title: string; snippet: string }
+  // Server sync. Sign-in runs in the background, never in the popup: opening the
+  // Google consent window closes the popup, which would abort the flow mid-way.
+  | { type: 'SERVER_SIGN_IN' }
+  | { type: 'SERVER_SIGN_OUT' }
+  | { type: 'SERVER_STATUS' };
+
+/** Reply to SERVER_STATUS / SERVER_SIGN_IN — what the popup needs to render the
+ *  account section. `summary` is the last payload the server returned. */
+export interface ServerStatus {
+  configured: boolean;
+  signedIn: boolean;
+  email: string;
+  summary: unknown | null;
+}

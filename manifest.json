@@ -3,8 +3,9 @@
   "name": "Focus",
   "version": "1.0.0",
   "description": "Focus companion that helps you stay on task while studying or working.",
-  "permissions": ["tabs", "storage", "scripting", "activeTab", "windows", "idle"],
+  "permissions": ["tabs", "storage", "scripting", "activeTab", "windows", "idle", "identity"],
   "host_permissions": [
+    "https://*.supabase.co/*",
     "*://*.overleaf.com/*",
     "*://overleaf.dei.unipd.it/*",
     "*://arxiv.org/*",
