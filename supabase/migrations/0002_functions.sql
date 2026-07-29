@@ -3,8 +3,24 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 --  The extension talks to exactly two endpoints:
 --
---    POST /rest/v1/rpc/apply_score_delta   send a score delta, get everything back
---    GET  /rest/v1/summary                 read-only: the same payload, no write
+--    POST /rest/v1/rpc/apply_score_delta   send a delta, get the FULL state back
+--    POST /rest/v1/rpc/get_state           read-only: the same payload, no write
+--
+--  "Full state" is everything the client renders, so it never has to assemble a view
+--  of the world out of its own records:
+--
+--    { summary: {...},     live score, last 3 completed days, 7d + 30d averages
+--      domains: [...],     the whitelist
+--      days:    [...] }    the 30 most recent completed days
+--
+--  THE SERVER IS THE SOURCE OF TRUTH for all three. The extension keeps a local copy
+--  only because a content script has to decide whether to activate on every page
+--  load, instantly and offline — but that copy is a CACHE, overwritten by every
+--  response, never an independent record.
+--
+--  The whitelist is written through this same function (p_domains) rather than its
+--  own endpoint, so a score delta and a whitelist edit cannot race: the reply always
+--  reflects the write that just happened.
 --
 --  apply_score_delta is the only writer of live scores, and it only ever ADDS to
 --  them. Ending a day is the cron job's business alone (0003_cron.sql), so there is
@@ -180,9 +196,9 @@ begin
 end;
 $$;
 
--- ── summary (read API) ────────────────────────────────────────────────────────
--- What the extension GETs, and what apply_score_delta returns. A view rather than
--- the raw table so the wire format stays stable if the storage layout changes.
+-- ── summary (view) ────────────────────────────────────────────────────────────
+-- The score block of the payload, as a view rather than the raw table so the wire
+-- format stays stable if the storage layout changes. Consumed by build_state().
 --
 -- It deliberately exposes NOTHING about rollover — no "is this day over" flag. The
 -- client is not a participant in day boundaries: it posts deltas and renders
@@ -205,10 +221,75 @@ select
 from public.user_summary s;
 
 comment on view public.summary is
-  'Read API for the extension: live score, last 3 completed days, 7d/30d averages.';
+  'Score block of the client payload: live score, last 3 completed days, 7d/30d averages.';
 
 grant select on public.summary to authenticated;
 revoke all on public.summary from anon;
+
+-- Earlier versions of this file shipped a 3-argument apply_score_delta and a
+-- separate sync_domains; both are superseded below. Dropped explicitly because
+-- `create or replace` with a new signature ADDS an overload rather than replacing,
+-- which would leave the old ones callable.
+drop function if exists public.apply_score_delta(numeric, numeric, text);
+drop function if exists public.sync_domains(text[]);
+
+-- ── build_state ───────────────────────────────────────────────────────────────
+-- The whole payload the client renders, assembled in one place so the write path and
+-- the read path can never drift apart in shape.
+--
+-- `days` is the 30 most recent RECORDED days rather than a 30-day date window: gaps
+-- (machine switched off) shift the window instead of returning fewer rows, so a user
+-- who works intermittently still gets 30 days of chart. Newest first, matching the
+-- order the popup expects.
+create or replace function public.build_state(p_user uuid)
+returns json
+language sql
+security definer
+set search_path = public
+as $$
+  select json_build_object(
+    'summary', (select to_json(s) from summary s where s.user_id = p_user),
+    'domains', coalesce(
+      (select json_agg(domain order by domain) from user_domains where user_id = p_user),
+      '[]'::json),
+    'days', coalesce(
+      (select json_agg(json_build_object(
+                'day', day,
+                'focus_score', focus_score,
+                'distracted_score', distracted_score) order by day desc)
+       from (select day, focus_score, distracted_score
+             from daily_scores
+             where user_id = p_user
+             order by day desc
+             limit 30) recent),
+      '[]'::json)
+  );
+$$;
+
+-- ── get_state ─────────────────────────────────────────────────────────────────
+-- Read-only sibling of apply_score_delta: identical payload, no write, no side
+-- effects. For anything that just wants to display the numbers (the popup opening)
+-- without counting as one of the client's check-ins.
+-- Takes p_timezone it does not use, purely so both endpoints have the same shape on
+-- the wire and the client can swap one for the other without reshaping the body.
+create or replace function public.get_state(p_timezone text default 'UTC')
+returns json
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  v_user uuid := auth.uid();
+begin
+  if v_user is null then
+    raise exception 'get_state: not authenticated' using errcode = '28000';
+  end if;
+  return build_state(v_user);
+end;
+$$;
+
+revoke all on function public.get_state(text) from anon, public;
+grant execute on function public.get_state(text) to authenticated;
 
 -- ── apply_score_delta ─────────────────────────────────────────────────────────
 -- The extension's single write endpoint.
@@ -223,7 +304,8 @@ revoke all on public.summary from anon;
 create or replace function public.apply_score_delta(
   p_focus_delta      numeric default 0,
   p_distracted_delta numeric default 0,
-  p_timezone         text    default 'UTC'
+  p_timezone         text    default 'UTC',
+  p_domains          text[]  default null   -- NULL = leave the whitelist untouched
 )
 returns json
 language plpgsql
@@ -268,46 +350,25 @@ begin
     updated_at      = now()
   where user_id = v_user;
 
-  select to_json(s) into v_out from summary s where s.user_id = v_user;
-  return v_out;
+  -- Whitelist, only when the client is actually pushing one. NULL means "no edit",
+  -- which is the case for nearly every call: a score delta must not be able to blank
+  -- the whitelist merely by having nothing to say about it. An empty ARRAY is a
+  -- different thing from NULL and does legitimately clear the list.
+  if p_domains is not null then
+    delete from user_domains
+    where user_id = v_user and domain <> all (p_domains);
+
+    insert into user_domains (user_id, domain)
+    select v_user, trim(d)
+    from unnest(p_domains) as d
+    where length(trim(d)) > 0
+    on conflict (user_id, domain) do nothing;
+  end if;
+
+  return build_state(v_user);
 end;
 $$;
 
 -- Only a signed-in user may call it; anon has no business writing scores.
-revoke all on function public.apply_score_delta(numeric, numeric, text) from anon, public;
-grant execute on function public.apply_score_delta(numeric, numeric, text) to authenticated;
-
--- ── sync_domains ──────────────────────────────────────────────────────────────
--- Mirror the extension's whitelist. The extension owns the list, so this is a full
--- replace inside one transaction rather than a diff — a removed domain must
--- actually disappear, and a partial update would leave the server disagreeing with
--- the UI the user is looking at.
-create or replace function public.sync_domains(p_domains text[])
-returns integer
-language plpgsql
-security invoker
-set search_path = public
-as $$
-declare
-  v_user uuid := auth.uid();
-begin
-  if v_user is null then
-    raise exception 'sync_domains: not authenticated' using errcode = '28000';
-  end if;
-
-  delete from user_domains
-  where user_id = v_user
-    and domain <> all (coalesce(p_domains, '{}'));
-
-  insert into user_domains (user_id, domain)
-  select v_user, trim(d)
-  from unnest(coalesce(p_domains, '{}')) as d
-  where length(trim(d)) > 0
-  on conflict (user_id, domain) do nothing;
-
-  return (select count(*) from user_domains where user_id = v_user);
-end;
-$$;
-
-revoke all on function public.sync_domains(text[]) from anon, public;
-grant execute on function public.sync_domains(text[]) to authenticated;
+revoke all on function public.apply_score_delta(numeric, numeric, text, text[]) from anon, public;
+grant execute on function public.apply_score_delta(numeric, numeric, text, text[]) to authenticated;

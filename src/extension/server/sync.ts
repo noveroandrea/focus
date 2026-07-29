@@ -39,7 +39,11 @@
 //  spurious point matters less than a missing one. Nothing here is billing.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY, isServerConfigured } from './config';
+import { DayScore, HISTORY_KEY, Settings, DEFAULT_SETTINGS, weekdayName } from '../../types';
+import {
+  SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY,
+  PENDING_DOMAINS_KEY, SERVER_DOMAINS_KEY, isServerConfigured,
+} from './config';
 import { getAccessToken, isSignedIn } from './auth';
 
 /** Mirrors the `summary` view in supabase/migrations/0002_functions.sql. */
@@ -57,6 +61,21 @@ export interface ServerSummary {
   updated_at: string;
 }
 
+/** One completed day as the server sends it. */
+export interface ServerDay {
+  day: string;                // YYYY-MM-DD
+  focus_score: number;
+  distracted_score: number;
+}
+
+/** The full payload from apply_score_delta / get_state. The server is the source of
+ *  truth for all three parts; the local copies are caches it overwrites. */
+export interface ServerState {
+  summary: ServerSummary | null;
+  domains: string[];
+  days: ServerDay[];
+}
+
 interface Pending {
   focus: number;
   distracted: number;
@@ -66,8 +85,7 @@ interface Pending {
 const FLUSH_DEBOUNCE_MS = 4000;
 
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
-let inFlight: Promise<ServerSummary | null> | null = null;
-let lastSummary: ServerSummary | null = null;
+let inFlight: Promise<ServerState | null> | null = null;
 
 // ── Pending deltas ────────────────────────────────────────────────────────────
 function readPending(): Promise<Pending> {
@@ -112,20 +130,101 @@ async function authedFetch(path: string, init: RequestInit): Promise<Response | 
   });
 }
 
-function cacheSummary(s: ServerSummary | null) {
-  if (!s) return;
-  lastSummary = s;
-  chrome.storage.local.set({ [SUMMARY_KEY]: s });
+// ── Applying the server's state locally ───────────────────────────────────────
+// Everything the server sends is written straight into the SAME storage keys the
+// offline extension uses: Settings.allowedDomains and HISTORY_KEY. That is what
+// makes the server authoritative without rewriting the rest of the extension —
+// heartbeat.ts, isAllowedUrl() and the popup's charts keep reading exactly what they
+// always read, they just no longer own it.
+//
+// It cannot be "no local copy at all": heartbeat.ts has to decide whether to activate
+// on every page load, synchronously and offline, long before any request could
+// return. So local storage stays — demoted from record to cache.
+let lastState: ServerState | null = null;
+
+function readServerDomains(): Promise<string[] | null> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([SERVER_DOMAINS_KEY], (r) => {
+      const d = r[SERVER_DOMAINS_KEY];
+      resolve(Array.isArray(d) ? (d as string[]) : null);
+    });
+  });
 }
 
-/** The last summary the server sent, from memory or storage. Lets the popup show
- *  server figures immediately instead of blank-then-populate. */
+function sameList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+/** Overwrite the local caches with what the server just said. */
+async function applyState(next: ServerState | null): Promise<void> {
+  if (!next) return;
+  lastState = next;
+  chrome.storage.local.set({ [SUMMARY_KEY]: next.summary });
+
+  // Whitelist → Settings.allowedDomains, plus the snapshot that lets the change
+  // listener recognise this write as an echo rather than a user edit.
+  const domains = Array.isArray(next.domains) ? next.domains : [];
+  await new Promise<void>((resolve) => {
+    chrome.storage.local.get(['focusFlowSettings', SERVER_DOMAINS_KEY], (r) => {
+      const settings = { ...DEFAULT_SETTINGS, ...(r.focusFlowSettings as Settings) };
+      const write: Record<string, unknown> = { [SERVER_DOMAINS_KEY]: domains };
+      // Only touch the settings object when the list actually differs, so an
+      // unchanged reply doesn't wake every listener in the extension twice a minute.
+      if (!sameList(settings.allowedDomains ?? [], domains)) {
+        write.focusFlowSettings = { ...settings, allowedDomains: domains };
+      }
+      chrome.storage.local.set(write, () => resolve());
+    });
+  });
+
+  // Completed days → HISTORY_KEY, in the DayScore shape the popup already renders.
+  // weekday is re-derived rather than sent over the wire: it is a pure function of
+  // the date, and deriving it locally means the two can never contradict each other.
+  const days = Array.isArray(next.days) ? next.days : [];
+  const history: DayScore[] = days
+    .map((d) => ({
+      date: d.day,
+      weekday: weekdayName(d.day),
+      focusScore: Number(d.focus_score) || 0,
+      distractedScore: Number(d.distracted_score) || 0,
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date)); // oldest-first, as stored locally
+  chrome.storage.local.set({ [HISTORY_KEY]: history });
+}
+
+/** The last full state the server sent, from memory or storage. */
 export async function getCachedSummary(): Promise<ServerSummary | null> {
-  if (lastSummary) return lastSummary;
+  if (lastState?.summary) return lastState.summary;
   return new Promise((resolve) => {
     chrome.storage.local.get([SUMMARY_KEY], (r) => {
-      lastSummary = (r[SUMMARY_KEY] as ServerSummary) ?? null;
-      resolve(lastSummary);
+      resolve((r[SUMMARY_KEY] as ServerSummary) ?? null);
+    });
+  });
+}
+
+// ── Pending whitelist edit ────────────────────────────────────────────────────
+/** Queue a whitelist edit to go out with the next post.
+ *
+ *  Deliberately NOT its own request: sending it inside apply_score_delta means the
+ *  reply already reflects the edit, so a score delta in flight at the same moment
+ *  cannot come back carrying the pre-edit list and undo the user's change. */
+export async function queueDomains(domains: string[]): Promise<void> {
+  if (!isServerConfigured()) return;
+  const clean = domains.map((d) => d.trim()).filter((d) => d.length > 0);
+  // An echo of the server's own list is not an edit.
+  const known = await readServerDomains();
+  if (known && sameList(known, clean)) return;
+  await new Promise<void>((resolve) => {
+    chrome.storage.local.set({ [PENDING_DOMAINS_KEY]: clean }, () => resolve());
+  });
+  void flush();
+}
+
+function readPendingDomains(): Promise<string[] | null> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([PENDING_DOMAINS_KEY], (r) => {
+      const d = r[PENDING_DOMAINS_KEY];
+      resolve(Array.isArray(d) ? (d as string[]) : null);
     });
   });
 }
@@ -136,13 +235,14 @@ export async function getCachedSummary(): Promise<ServerSummary | null> {
  *  Safe to call at any time: it is a no-op when the server is unconfigured or the
  *  user is signed out, and it serialises itself so concurrent callers share one
  *  request rather than racing two deltas. */
-export async function flush(): Promise<ServerSummary | null> {
+export async function flush(): Promise<ServerState | null> {
   if (!isServerConfigured()) return null;
   if (!(await isSignedIn())) return null;
   if (inFlight) return inFlight;
 
   inFlight = (async () => {
     const pending = await readPending();
+    const pendingDomains = await readPendingDomains();
     try {
       const res = await authedFetch('/rest/v1/rpc/apply_score_delta', {
         method: 'POST',
@@ -150,6 +250,9 @@ export async function flush(): Promise<ServerSummary | null> {
           p_focus_delta: pending.focus,
           p_distracted_delta: pending.distracted,
           p_timezone: currentTimezone(),
+          // null, not [], when there is no edit: an empty array legitimately CLEARS
+          // the whitelist, so the two must not be conflated.
+          p_domains: pendingDomains,
         }),
       });
       if (!res) return null;
@@ -167,10 +270,18 @@ export async function flush(): Promise<ServerSummary | null> {
         focus: Math.max(0, now.focus - pending.focus),
         distracted: Math.min(0, now.distracted - pending.distracted),
       });
+      // The whitelist edit is confirmed only if this request carried the same one we
+      // still hold; a newer edit queued mid-flight must stay pending.
+      if (pendingDomains) {
+        const still = await readPendingDomains();
+        if (still && sameList(still, pendingDomains)) {
+          await new Promise<void>((r) => chrome.storage.local.remove(PENDING_DOMAINS_KEY, () => r()));
+        }
+      }
 
-      const summary = (await res.json()) as ServerSummary | null;
-      cacheSummary(summary);
-      return summary;
+      const state = (await res.json()) as ServerState | null;
+      await applyState(state);
+      return state;
     } catch (err) {
       // Offline, DNS failure, project paused — keep the pending delta for later.
       console.warn('Focus: score sync unreachable:', String(err).slice(0, 120));
@@ -206,44 +317,24 @@ export async function queueDelta(focusDelta: number, distractedDelta: number): P
   flushTimer = setTimeout(() => { flushTimer = null; void flush(); }, FLUSH_DEBOUNCE_MS);
 }
 
-/** Read-only fetch of the summary — no delta, no write.
+ /** Read-only fetch of the full state — no delta, no write, no side effects.
  *
  *  The right call when something merely wants to display the numbers (the popup
- *  opening) without counting as a check-in. flush() is what the three client
- *  triggers use, since it both pushes and reads. */
-export async function fetchSummary(): Promise<ServerSummary | null> {
+ *  opening) without counting as a check-in. flush() is what the three client triggers
+ *  use, since it both pushes and reads. */
+export async function fetchState(): Promise<ServerState | null> {
   if (!isServerConfigured()) return null;
   if (!(await isSignedIn())) return null;
   try {
-    const res = await authedFetch('/rest/v1/summary?select=*&limit=1', { method: 'GET' });
+    const res = await authedFetch('/rest/v1/rpc/get_state', {
+      method: 'POST',
+      body: JSON.stringify({ p_timezone: currentTimezone() }),
+    });
     if (!res || !res.ok) return null;
-    const rows = (await res.json()) as ServerSummary[];
-    const summary = rows?.[0] ?? null;
-    cacheSummary(summary);
-    return summary;
+    const state = (await res.json()) as ServerState | null;
+    await applyState(state);
+    return state;
   } catch {
     return null;
-  }
-}
-
-/** Mirror the whitelist to the server. Full replace — the extension owns the list.
- *  Called when the domain list changes, not on a timer. */
-export async function syncDomains(domains: string[]): Promise<boolean> {
-  if (!isServerConfigured()) return false;
-  if (!(await isSignedIn())) return false;
-  try {
-    const res = await authedFetch('/rest/v1/rpc/sync_domains', {
-      method: 'POST',
-      body: JSON.stringify({
-        p_domains: domains.map((d) => d.trim()).filter((d) => d.length > 0),
-      }),
-    });
-    if (!res || !res.ok) {
-      if (res) console.warn(`Focus: domain sync failed (${res.status})`);
-      return false;
-    }
-    return true;
-  } catch {
-    return false;
   }
 }

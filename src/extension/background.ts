@@ -11,7 +11,7 @@ import {
 } from './heartbeats';
 // Optional Supabase sync. Every call is a no-op until config.ts is filled in AND
 // the user has signed in, so the extension is fully functional without a server.
-import { queueDelta, flush, syncDomains, getCachedSummary } from './server/sync';
+import { queueDelta, queueDomains, flush, getCachedSummary } from './server/sync';
 import { signIn, signOut, getSession } from './server/auth';
 import { isServerConfigured } from './server/config';
 
@@ -133,7 +133,7 @@ chrome.runtime.onStartup.addListener(() => { void flush(); });
 // start rather than only after their first accidental edit.
 chrome.runtime.onInstalled.addListener(() => {
   void flush();
-  void syncDomains(settings.allowedDomains);
+  void queueDomains(settings.allowedDomains);
 });
 
 // Pick up settings changes written directly by the popup
@@ -161,10 +161,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (prev.forceActive !== settings.forceActive || whitelistChanged) {
       updateActionIcon();
     }
-    // Mirror the whitelist to the server on change only — it's a full replace, so
-    // there is nothing to gain from resending an identical list.
+    // Mirror the whitelist to the server. queueDomains ignores a list identical to
+    // the one the server last sent, which is what stops this from looping: every
+    // server reply writes allowedDomains, which fires this very listener.
     if (whitelistChanged) {
-      void syncDomains(settings.allowedDomains);
+      void queueDomains(settings.allowedDomains);
     }
   }
 });
@@ -252,6 +253,11 @@ function maybeRollover() {
   // "a day" leak into the sync protocol, which is exactly what it must not do.
 }
 
+// Writes the local history cache. When server sync is active this is not the record
+// of record — the server owns completed days and every response overwrites this key
+// with its own 30 — but it still runs, because it is the ONLY record for a user who
+// is signed out or offline, and it converges to the server's version on the next
+// post either way.
 function archiveDay(date: string, focusScore: number, distractedScore: number) {
   chrome.storage.local.get([HISTORY_KEY], (r) => {
     const history: DayScore[] = Array.isArray(r[HISTORY_KEY]) ? r[HISTORY_KEY] : [];
@@ -506,9 +512,10 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
     case 'SERVER_SIGN_IN':
       signIn().then((session) => {
         if (session) {
-          // Seed the account immediately so a new participant has a server row and
-          // their whitelist recorded without waiting for their first point.
-          void syncDomains(settings.allowedDomains);
+          // Seed the account so a new participant has a server row and their current
+          // whitelist recorded, rather than waiting for their first point. From here
+          // on the server owns the list and sends it back on every post.
+          void queueDomains(settings.allowedDomains);
           void flush();
         }
         void replyServerStatus(sendResponse);

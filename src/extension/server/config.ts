@@ -44,3 +44,16 @@ export const PENDING_KEY = 'focusServerPending';
 
 /** Storage key holding the last summary the server returned. */
 export const SUMMARY_KEY = 'focusServerSummary';
+
+/** Storage key holding a whitelist edit not yet accepted by the server. Present
+ *  only between the user's edit and the next successful post. */
+export const PENDING_DOMAINS_KEY = 'focusServerPendingDomains';
+
+/** Storage key holding the whitelist as the server last reported it.
+ *
+ *  This is what makes the write path loop-free. Every server reply is written into
+ *  `Settings.allowedDomains`, which fires storage.onChanged, which is also how a
+ *  real user edit is detected — so without a way to tell the two apart the extension
+ *  would push the server's own list straight back at it, forever. Comparing against
+ *  this snapshot answers "did this change come from the server or from the user?". */
+export const SERVER_DOMAINS_KEY = 'focusServerDomains';

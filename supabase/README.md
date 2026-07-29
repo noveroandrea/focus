@@ -20,12 +20,39 @@ is filled in *and* the user signs in, every server call is a no-op.
 Two endpoints, and only one of them writes:
 
 ```
-POST /rest/v1/rpc/apply_score_delta   { p_focus_delta, p_distracted_delta, p_timezone }
-  -> the whole summary as JSON
-
-GET  /rest/v1/summary?select=*        (read-only; cannot trigger a rollover)
-  -> the same shape
+POST /rest/v1/rpc/apply_score_delta   { p_focus_delta, p_distracted_delta,
+                                        p_timezone, p_domains }
+POST /rest/v1/rpc/get_state           { p_timezone }        read-only
 ```
+
+Both return the **full state** — everything the client renders, so it never has to
+assemble a view of the world from its own records:
+
+```json
+{ "summary": { "live_focus": 12, "live_distracted": -30, "live_day": "2026-07-29",
+               "d1_focus": 8, "...": "...", "avg7_focus": 9.5, "avg30_focus": 7.1 },
+  "domains": ["arxiv.org", "overleaf.com"],
+  "days":    [ { "day": "2026-07-28", "focus_score": 8, "distracted_score": -10 },
+               "... 30 most recent completed days ..." ] }
+```
+
+The **whitelist is written through the same call** (`p_domains`) rather than its own
+endpoint, so a score delta and a whitelist edit cannot race — the reply always
+reflects the write that just happened. `p_domains` is `null` on almost every call,
+meaning "no edit"; an empty *array* is different and does clear the list.
+
+### The server is the source of truth
+
+Scores, the whitelist and the day history all live on the server. The extension keeps
+a local copy in the same `chrome.storage.local` keys it always used
+(`focusFlowSettings.allowedDomains`, `focusScoreHistory`), but those are now a
+**cache**, overwritten by every response — not an independent record.
+
+It cannot be *zero* local storage: `heartbeat.ts` has to decide whether to activate
+on every page load, instantly and offline, long before any request could return. So
+the local copy stays and is simply demoted from record to cache. Everything that
+reads it — the content script, `isAllowedUrl()`, the popup charts — keeps working
+unchanged, offline included.
 
 `apply_score_delta` sends a **delta** (`+focus` / `−distracted`), not an absolute
 score, and returns the refreshed summary in the same round trip. Because a `(0, 0)`
