@@ -130,9 +130,49 @@ schedule and for the same reason as the rollover — a cron time is one instant 
 while users are in every timezone, so each pass asks per user whether *their* week
 has turned. A flag returns within one pass of the local Monday 01:00.
 
+It finds those users through an indexable prefilter rather than by evaluating every
+row: `flag_week < focus_week(now() + interval '14 hours', 'UTC')`. UTC+14 is the
+largest real offset, so that is the earliest-turning timezone's week — an upper bound
+no user's own week can exceed, therefore safe to prune on. It is also very selective,
+for a reason specific to weeks: local *dates* differ across timezones every day, but
+local ISO *weeks* differ only during the ~26 hours Monday takes to sweep the globe.
+Roughly 6.9 days out of 7 it is an empty index scan.
+
+The same trick deliberately is **not** applied to `roll_forward_due()`: dates differ
+continuously, so there is no quiet period to exploit and the equivalent predicate
+would prune nothing. It stays a scan of `user_summary`, which is small, cached and
+costs tens of milliseconds. Both jobs stay on `*/5` — that cadence is the accuracy of
+every per-timezone boundary in the system, so the work was made to fit the schedule
+rather than the schedule stretched to fit the work.
+
 `domain_flags.flag_count` is **recomputed** from the append-only `domain_flag_events`
 ledger, never incremented, so it cannot drift from the acts behind it. The ledger
 also records who flagged what and when, which the counter alone could not.
+
+**`domain_flags` is a registry of every known domain**, not only flagged ones. A row
+appears with `flag_count` 0 the moment anyone whitelists the domain, by three paths
+at descending urgency:
+
+| Path | When | Scope |
+|---|---|---|
+| `apply_score_delta` | as the whitelist is saved | the domains just pushed |
+| `register_new_domains()` (in the `*/5` job) | every 5 min | rows added since the last watermark |
+| `register_all_domains()` | daily, 03:17 | everything |
+
+The middle one is **incremental**, via a watermark in `maintenance_state` and an index
+on `user_domains.added_at`. At the design target — 50k users, ~1M rows in
+`user_domains` — a full `DISTINCT` every 5 minutes would be 288M rows and ~17 GB of
+buffer churn a day, evicting 60 MB of hot pages 288 times to discover nothing. The
+watermark is rewound 10 minutes on each pass, because a row stamped at statement
+start but committed later would otherwise fall between two passes: re-reading a few
+minutes of rows is free under `ON CONFLICT DO NOTHING`, missing one is silent and
+permanent.
+
+Domains are **normalised to lower case on write**. `flag_domain` always lower-cased
+its argument while `user_domains` stored what it was given, so `ArXiv.org` and
+`arxiv.org` would have been two rows that never join — and a profile would show 0
+flags for a domain that had been flagged. `apply_score_delta` now lower-cases once,
+up front, and uses that one array for the delete, the insert and the registration.
 
 > **This is the schema's most sensitive exposure.** `user_domains` is browsing data:
 > it says where someone works, which university, which mail provider, which projects.
