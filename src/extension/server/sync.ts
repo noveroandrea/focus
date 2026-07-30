@@ -42,7 +42,7 @@
 
 import { DayScore, HISTORY_KEY, Settings, DEFAULT_SETTINGS, weekdayName, round2 } from '../../types';
 import {
-  SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY, TEAMS_KEY,
+  SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY, TEAMS_KEY, FLAG_KEY,
   PENDING_DOMAINS_KEY, SERVER_DOMAINS_KEY, isServerConfigured,
 } from './config';
 import { getAccessToken, isSignedIn } from './auth';
@@ -118,6 +118,8 @@ export interface ServerState {
   days: ServerDay[];
   teams: TeamBoard[];
   competitions: CompetitionBoard[];
+  /** This week's red-flag budget. One per user, granted each Monday 01:00 local. */
+  flag: { available: boolean } | null;
 }
 
 interface Pending {
@@ -301,6 +303,10 @@ async function applyState(next: ServerState | null): Promise<void> {
       competitions: Array.isArray(next.competitions) ? next.competitions : [],
     },
   });
+
+  // The weekly flag. Defaults to available when the server said nothing, matching
+  // build_state's own coalesce — a user who has never spent one holds one.
+  chrome.storage.local.set({ [FLAG_KEY]: { available: next.flag?.available !== false } });
 }
 
 /** The last full state the server sent, from memory or storage. */
@@ -544,11 +550,26 @@ export function leaveCompetition(team: string, competition: string): Promise<Tea
 // opened and discarded when it is closed. Caching it would mean holding another
 // participant's browsing data on disk long after the popup that asked for it closed.
 
-/** One whitelisted domain on a profile, with the global flag tally. */
+/** One whitelisted domain on a profile.
+ *
+ *  `flag_count` is the global tally across everyone; `my_flags` is how many of those
+ *  are the caller's. Not a boolean any more — a domain can be flagged again in a
+ *  later week, so "have I" was replaced by "how often". */
 export interface MemberDomain {
   domain: string;
   flag_count: number;
-  flagged_by_me: boolean;
+  my_flags: number;
+}
+
+/** What flag_domain returns: the domain's new global tally, the caller's own tally
+ *  on it after this flag, the per-domain ceiling, and the (always false) state of
+ *  their weekly budget. */
+export interface FlagResult {
+  domain: string;
+  flag_count: number;
+  my_flags: number;
+  max_per_domain: number;
+  flag_available: boolean;
 }
 
 /** A participant's detail view. `days` matches ServerDay so the popup renders it
@@ -587,10 +608,17 @@ export function fetchMemberProfile(userId: string): Promise<MemberProfile | null
   return readRpc<MemberProfile>('get_member_profile', { p_user: userId });
 }
 
-/** Raise or withdraw a red flag on a domain. The count is global per domain, not
- *  per participant: the same tally appears on every profile listing that domain. */
-export function flagDomain(domain: string): Promise<MemberDomain | null> {
-  return readRpc<MemberDomain>('flag_domain', { p_domain: domain });
+/** Spend this week's red flag on a domain. One-way: there is no un-flagging, and the
+ *  budget does not return until Monday 01:00 local. Refused once the caller has
+ *  already put MAX_FLAGS_PER_DOMAIN on that one domain.
+ *
+ *  The count is global per domain, not per participant — the same tally appears on
+ *  every profile listing that domain. The result is written straight into FLAG_KEY so
+ *  the badge greys out the moment it lands, without waiting for the next post. */
+export async function flagDomain(domain: string): Promise<FlagResult | null> {
+  const res = await readRpc<FlagResult>('flag_domain', { p_domain: domain });
+  if (res) chrome.storage.local.set({ [FLAG_KEY]: { available: res.flag_available } });
+  return res;
 }
 
  /** Read-only fetch of the full state — no delta, no write, no side effects.

@@ -97,13 +97,42 @@ POST /rest/v1/rpc/flag_domain         { p_domain }
 Tapping a participant on a leaderboard opens their live / 7-day / 30-day scores,
 their day history, and their whitelisted domains. Each domain carries a **global**
 red-flag tally — flagging `youtube.com` on one profile raises the same counter every
-other profile shows. `flag_domain` is a toggle, and the count is *recomputed* from
-`domain_flag_voters` rather than incremented, so it cannot drift from the votes
-behind it.
+other profile shows.
 
-`domain_flag_voters` (keyed `domain, user_id`) is not in the original spec and is
-there so one person cannot inflate a count by holding the button down — the same
-composite-key trick `team_members` uses.
+**Two limits, doing different jobs:**
+
+| Limit | Controls | Value |
+|---|---|---|
+| Weekly budget (`user_flags`) | how often one person can flag *anything* | 1 per week |
+| Per-domain ceiling | how far one person can push *one* domain | 3, ever |
+
+`user_flags` holds 0 or 1 per user (the check constraint is what makes "they don't
+accumulate" a property of the table). Every Monday at 01:00 local the holding is
+**set** to 1 — set, not incremented, so an unspent week is a lost one. Spending is
+**permanent**: there is no un-flagging.
+
+The ceiling exists so a high tally means *breadth* of objection. Without it, someone
+spending every weekly flag on one site would reach 30 on it in a year alone, and the
+number would read as thirty people objecting rather than one objecting thirty times.
+Other users are unaffected — each has their own three — so a domain's total is
+bounded by 3 × participants, not by anyone's persistence.
+
+Checking the ceiling and then inserting looks like a check-then-act race, but the
+weekly budget closes it: the single `update user_flags … where flag = 1` serialises a
+user against themselves, so two concurrent calls can never both reach the insert.
+
+Monday 01:00 needs no new definition: `focus_day()` already turns over at 01:00
+local, and `focus_week()` is that truncated to an ISO week. At Monday 00:30 the
+focus-day is still Sunday and the week is last week's; at 01:00 both turn together.
+
+The grant is `grant_weekly_flags()`, a second `pg_cron` job on the same `*/5 * * * *`
+schedule and for the same reason as the rollover — a cron time is one instant in UTC
+while users are in every timezone, so each pass asks per user whether *their* week
+has turned. A flag returns within one pass of the local Monday 01:00.
+
+`domain_flags.flag_count` is **recomputed** from the append-only `domain_flag_events`
+ledger, never incremented, so it cannot drift from the acts behind it. The ledger
+also records who flagged what and when, which the counter alone could not.
 
 > **This is the schema's most sensitive exposure.** `user_domains` is browsing data:
 > it says where someone works, which university, which mail provider, which projects.

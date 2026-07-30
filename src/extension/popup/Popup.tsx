@@ -2,12 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SessionState, Settings, DayScore, ServerStatus, ServerActionResult, MessageType, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
 import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogOut, Users, Trophy, ChevronLeft, Flag } from 'lucide-react';
-import { SUMMARY_KEY, TEAMS_KEY } from '../server/config';
+import { SUMMARY_KEY, TEAMS_KEY, FLAG_KEY } from '../server/config';
 // Type-only: erased at compile time, so the popup bundle does not pull in sync.ts
 // (and through it auth.ts and the whole fetch path) just to name a shape.
 import type {
   ServerSummary, MemberScore, TeamBoard, CompetitionTeam, CompetitionBoard,
-  MemberProfile, MemberDomain,
+  MemberProfile, FlagResult,
 } from '../server/sync';
 import '../../index.css';
 
@@ -649,10 +649,17 @@ const ProfileStat = ({ label, focus, distracted }: {
   </div>
 );
 
+/** How many flags one person may put on one domain, ever — on top of the weekly
+ *  budget. The SERVER enforces this (flag_domain raises 23514); this copy exists only
+ *  to grey the button before the click, so the two must be changed together. */
+const MAX_FLAGS_PER_DOMAIN = 3;
+
 const MemberProfileView = ({ userId, onBack }: { userId: string; onBack: () => void }) => {
   const [profile, setProfile] = useState<MemberProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [flagging, setFlagging] = useState('');
+  const [flagError, setFlagError] = useState('');
+  const flagAvailable = useWeeklyFlag();
 
   useEffect(() => {
     setLoading(true);
@@ -664,16 +671,25 @@ const MemberProfileView = ({ userId, onBack }: { userId: string; onBack: () => v
   }, [userId]);
 
   // Flagging returns the domain's new global tally, so only that one row is patched
-  // rather than refetching the whole profile.
+  // rather than refetching the whole profile. The badge updates independently: the
+  // background writes FLAG_KEY, which useWeeklyFlag is watching.
   const flag = (domain: string) => {
     setFlagging(domain);
-    chrome.runtime.sendMessage({ type: 'SERVER_FLAG_DOMAIN', domain }, (res?: MemberDomain | null) => {
+    chrome.runtime.sendMessage({ type: 'SERVER_FLAG_DOMAIN', domain }, (res?: FlagResult | null) => {
       void chrome.runtime.lastError;
       setFlagging('');
-      if (!res) return;
+      if (!res) {
+        setFlagError('Could not spend the flag — you may have already used it this week.');
+        return;
+      }
+      setFlagError('');
       setProfile((p) => p && {
         ...p,
-        domains: p.domains.map((d) => (d.domain === res.domain ? { ...d, ...res } : d)),
+        // my_flags comes back from the server rather than being incremented locally,
+        // so the ceiling is judged on the server's count, not this view's guess.
+        domains: p.domains.map((d) => (d.domain === res.domain
+          ? { ...d, flag_count: res.flag_count, my_flags: res.my_flags }
+          : d)),
       });
     });
   };
@@ -741,40 +757,64 @@ const MemberProfileView = ({ userId, onBack }: { userId: string; onBack: () => v
       </div>
 
       <div className="space-y-1">
-        <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
-          Whitelisted domains
+        <h4 className="flex items-baseline justify-between text-[9px] font-bold uppercase tracking-widest text-slate-400">
+          <span>Whitelisted domains</span>
+          <FlagBadge available={flagAvailable} small />
         </h4>
         {profile.domains.length === 0 ? (
           <p className="text-[10px] text-slate-400">No domains recorded.</p>
         ) : (
           <div className="divide-y divide-slate-100 rounded-xl border border-slate-100">
-            {profile.domains.map((d) => (
-              <div key={d.domain} className="flex items-center gap-2 px-2 py-1">
-                <span className="min-w-0 flex-1 truncate text-[10px] text-slate-600">{d.domain}</span>
-                {/* Tally sits inside the button: the count and the act of flagging are
-                    the same affordance, and separating them makes the number look
-                    like a static label. Tapping again withdraws your own flag. */}
-                <button
-                  onClick={() => flag(d.domain)}
-                  disabled={flagging === d.domain}
-                  title={d.flagged_by_me
-                    ? 'You flagged this domain — click to withdraw'
-                    : 'Flag this domain as not focus work'}
-                  className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-lg px-1.5 py-0.5 text-[10px] font-bold tabular-nums transition-colors disabled:opacity-40 ${
-                    d.flagged_by_me
-                      ? 'bg-red-100 text-red-600 hover:bg-red-200'
-                      : 'bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-red-500'
-                  }`}
-                >
-                  <Flag size={10} fill={d.flagged_by_me ? 'currentColor' : 'none'} />
-                  {d.flag_count}
-                </button>
-              </div>
-            ))}
+            {profile.domains.map((d) => {
+              // Two independent gates, and they need different explanations: the week
+              // runs out for every domain at once, the ceiling only for this one.
+              const capped = d.my_flags >= MAX_FLAGS_PER_DOMAIN;
+              const canFlag = flagAvailable && !capped;
+              return (
+                <div key={d.domain} className="flex items-center gap-2 px-2 py-1">
+                  <span className="min-w-0 flex-1 truncate text-[10px] text-slate-600">
+                    {d.domain}
+                    {/* Your own contribution, as a fraction of your ceiling. Shown only
+                        once you have spent something on this domain — "0/3" on every
+                        untouched row would read as a target to fill. */}
+                    {d.my_flags > 0 && (
+                      <span className={capped ? 'text-red-400' : 'text-slate-400'}>
+                        {' '}· {d.my_flags}/{MAX_FLAGS_PER_DOMAIN} from you
+                      </span>
+                    )}
+                  </span>
+                  {/* Tally inside the button: the count and the act of flagging are one
+                      affordance. A permanent, unrevocable action should not look
+                      available when it isn't. */}
+                  <button
+                    onClick={() => flag(d.domain)}
+                    disabled={!canFlag || flagging === d.domain}
+                    title={
+                      capped
+                        ? `You've used all ${MAX_FLAGS_PER_DOMAIN} of your flags on ${d.domain}. Others can still flag it.`
+                        : flagAvailable
+                          ? `Spend this week's red flag on ${d.domain} — this cannot be undone`
+                          : 'Weekly red flag already spent. You get another on Monday at 01:00.'
+                    }
+                    className={`flex flex-shrink-0 items-center gap-1 rounded-lg px-1.5 py-0.5 text-[10px] font-bold tabular-nums transition-colors ${
+                      canFlag
+                        ? 'cursor-pointer bg-slate-100 text-slate-500 hover:bg-red-100 hover:text-red-600'
+                        : 'cursor-not-allowed bg-slate-50 text-slate-300'
+                    }`}
+                  >
+                    <Flag size={10} fill={d.flag_count > 0 ? 'currentColor' : 'none'} />
+                    {d.flag_count}
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
+        {flagError && <p className="text-[9px] font-medium text-red-500">{flagError}</p>}
         <p className="text-[9px] text-slate-400">
-          Flags are counted per domain across everyone, not per person.
+          One red flag per week, granted each Monday at 01:00, and at most{' '}
+          {MAX_FLAGS_PER_DOMAIN} from you on any one domain. Flags are permanent, and
+          the count shown is everyone's together.
         </p>
       </div>
     </div>
@@ -982,6 +1022,49 @@ const CompetitionSection = ({ board, busy, onLeave }: {
   );
 };
 
+/** Whether this week's red flag is still in hand. Read from storage, which both the
+ *  server replies and a successful flag write — so the badge and the flag buttons on
+ *  a profile stay in step without either owning the other's state. */
+function useWeeklyFlag(): boolean {
+  const [available, setAvailable] = useState(true);
+  useEffect(() => {
+    const load = () => chrome.storage.local.get([FLAG_KEY], (r) => {
+      const f = r[FLAG_KEY] as { available?: boolean } | undefined;
+      // Default to available, matching build_state's own coalesce: someone who has
+      // never spent a flag holds one.
+      setAvailable(f?.available !== false);
+    });
+    load();
+    const listener = (changes: Record<string, unknown>, area: string) => {
+      if (area === 'local' && changes[FLAG_KEY]) load();
+    };
+    chrome.storage.onChanged.addListener(listener);
+    return () => chrome.storage.onChanged.removeListener(listener);
+  }, []);
+  return available;
+}
+
+/** The weekly budget, as one glanceable badge. Red flag on light green while it is
+ *  unspent, flat grey once used — the colour says "you have something to spend", so
+ *  it is deliberately the loudest thing in the row when true and the quietest when
+ *  false. */
+const FlagBadge = ({ available, small }: { available: boolean; small?: boolean }) => (
+  <span
+    title={available
+      ? "You have this week's red flag — spend it on a domain from someone's profile"
+      : 'Weekly red flag already spent. You get another on Monday at 01:00.'}
+    className={`flex flex-shrink-0 items-center justify-center rounded-full ${
+      small ? 'h-5 w-5' : 'h-8 w-8 ring-1'
+    } ${available ? 'bg-green-100 ring-green-200' : 'bg-slate-100 ring-slate-200'}`}
+  >
+    <Flag
+      size={small ? 11 : 16}
+      className={available ? 'text-red-600' : 'text-slate-300'}
+      fill={available ? 'currentColor' : 'none'}
+    />
+  </span>
+);
+
 /** The boards, read from the cache the server overwrites on every reply. Watching
  *  storage rather than asking means a membership change or the 1-minute post floor
  *  repaints an open popup with no request of its own. */
@@ -1013,6 +1096,7 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
   onWhitelistToggle: () => void;
 }) => {
   const boards = useBoards();
+  const flagAvailable = useWeeklyFlag();
   // Sections are one-at-a-time rather than stacked. Personal alone is roughly a
   // popup's height, and every team and competition adds several boards behind it;
   // stacked, a user in one competition would scroll past everything to reach
@@ -1065,19 +1149,24 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
     {/* Section switcher, above everything it switches between. The trailing + is
         how you get your first team, so it is present even with no teams at all. */}
     <div className="space-y-2">
-      <div className="flex flex-wrap gap-1">
-        {pill('personal', 'Personal')}
-        {boards.teams.map((t) => pill(`team:${t.team}`, t.team, <Users size={10} />))}
-        {boards.competitions.map((c) => pill(`comp:${c.competition}`, c.competition, <Trophy size={10} />))}
-        <button
-          onClick={() => { setJoinOpen((v) => !v); setError(''); }}
-          title="Create a team, or join one that exists"
-          className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold transition-colors ${
-            joinOpen ? 'bg-blue-500 text-white' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
-          }`}
-        >
-          <Plus size={11} /> Team
-        </button>
+      {/* The badge sits OUTSIDE the wrapping group, pinned right, so it keeps its
+          corner however many team and competition pills wrap onto new lines. */}
+      <div className="flex items-start gap-2">
+        <div className="flex flex-1 flex-wrap items-center gap-1">
+          {pill('personal', 'Personal')}
+          {boards.teams.map((t) => pill(`team:${t.team}`, t.team, <Users size={10} />))}
+          {boards.competitions.map((c) => pill(`comp:${c.competition}`, c.competition, <Trophy size={10} />))}
+          <button
+            onClick={() => { setJoinOpen((v) => !v); setError(''); }}
+            title="Create a team, or join one that exists"
+            className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold transition-colors ${
+              joinOpen ? 'bg-blue-500 text-white' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+            }`}
+          >
+            <Plus size={11} /> Team
+          </button>
+        </div>
+        <FlagBadge available={flagAvailable} />
       </div>
       {joinOpen && (
         <NameForm

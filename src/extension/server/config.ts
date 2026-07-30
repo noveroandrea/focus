@@ -49,6 +49,15 @@ export const PENDING_KEY = 'focusServerPending';
 /** Storage key holding the last summary the server returned. */
 export const SUMMARY_KEY = 'focusServerSummary';
 
+/** Storage key holding whether this week's red flag is still in hand.
+ *
+ *  Its own key rather than a field on the summary because two unrelated parts of the
+ *  popup read it — the badge above the section pills, and the flag buttons on a
+ *  member profile — and storage is how they stay in step without one owning the
+ *  other. Written by every server reply AND by a successful flag, so spending one
+ *  greys the badge immediately. */
+export const FLAG_KEY = 'focusServerFlag';
+
 /** Storage key holding the last team / competition leaderboards the server sent.
  *  A cache like all the others: the server recomputes them on every reply, and the
  *  popup renders whatever is here so it can paint before a request returns. */

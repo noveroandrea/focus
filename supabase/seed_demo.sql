@@ -155,6 +155,12 @@ begin
     select v_uid, d
     from unnest(array['arxiv.org', 'overleaf.com', 'scholar.google.com', 'wikipedia.org']) as d
     on conflict (user_id, domain) do nothing;
+
+    -- This week's red flag. Without a row the cron sweep has nothing to update, so a
+    -- seeded participant would never hold one.
+    insert into public.user_flags (user_id, flag, flag_week)
+    values (v_uid, 1, public.focus_week(now(), c_timezone))
+    on conflict (user_id) do nothing;
   end loop;
 
   -- Optionally give your own account the same treatment.
