@@ -13,7 +13,7 @@ import {
 // the user has signed in, so the extension is fully functional without a server.
 import {
   initSync, queueDelta, queueDomains, flush, getCachedSummary,
-  joinTeam, leaveTeam, enrollTeam, leaveCompetition,
+  joinTeam, leaveTeam, enrollTeam, leaveCompetition, fetchMemberProfile, flagDomain,
 } from './server/sync';
 import { signIn, signOut, getSession } from './server/auth';
 import { isServerConfigured } from './server/config';
@@ -532,11 +532,21 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       break;
 
     case 'SERVER_ENROLL_TEAM':
-      enrollTeam(message.team, message.competition, message.create).then(sendResponse);
+      enrollTeam(message.team, message.competition, message.create, message.password).then(sendResponse);
       break;
 
     case 'SERVER_LEAVE_COMPETITION':
       leaveCompetition(message.team, message.competition).then(sendResponse);
+      break;
+
+    // Both reply with the raw payload (or null) rather than a status: they are reads
+    // of somebody else's data, so nothing is written to the local caches.
+    case 'SERVER_MEMBER_PROFILE':
+      fetchMemberProfile(message.userId).then(sendResponse);
+      break;
+
+    case 'SERVER_FLAG_DOMAIN':
+      flagDomain(message.domain).then(sendResponse);
       break;
   }
   return true;

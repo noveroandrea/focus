@@ -187,8 +187,11 @@ export type MessageType =
   // server, so one module owns the session and the storage caches.
   | { type: 'SERVER_JOIN_TEAM'; team: string; create: boolean; password: string }
   | { type: 'SERVER_LEAVE_TEAM'; team: string }
-  | { type: 'SERVER_ENROLL_TEAM'; team: string; competition: string; create: boolean }
-  | { type: 'SERVER_LEAVE_COMPETITION'; team: string; competition: string };
+  | { type: 'SERVER_ENROLL_TEAM'; team: string; competition: string; create: boolean; password: string }
+  | { type: 'SERVER_LEAVE_COMPETITION'; team: string; competition: string }
+  // Profile detail. Fetched on demand and never cached — it is somebody else's data.
+  | { type: 'SERVER_MEMBER_PROFILE'; userId: string }
+  | { type: 'SERVER_FLAG_DOMAIN'; domain: string };
 
 /** Reply to the three team messages. `error` carries the database's own message
  *  ("Team X already exists — join it instead"), which is written to be shown. */

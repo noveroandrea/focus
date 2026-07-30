@@ -25,8 +25,8 @@
 --
 --  YOUR OWN SCORES ARE NOT TOUCHED unless you set c_seed_my_scores := true below.
 --
---  Every seeded team gets the password in c_team_password (default `demo1234`), so
---  you can also join them from the popup by hand.
+--  Every seeded team AND competition gets the password in c_team_password (default
+--  `demo1234`), so you can also join them from the popup by hand.
 --
 --  Section 7 undoes everything. Read it before you run section 1.
 -- ═══════════════════════════════════════════════════════════════════════════════
@@ -40,7 +40,7 @@ declare
   c_timezone        text    := 'Europe/Rome';            -- drives the 01:00 boundary
   c_days            int     := 35;                       -- days of history per fake user
   c_seed_my_scores  boolean := false;                    -- true = overwrite YOUR scores too
-  c_team_password   text    := 'demo1234';               -- password on every seeded team
+  c_team_password   text    := 'demo1234';               -- password on every seeded team AND competition
   -- ────────────────────────────────────────────────────────────────────────────
 
   v_me    uuid;
@@ -211,7 +211,9 @@ begin
   end loop;
 
   -- ═══ 5. Competition ═══════════════════════════════════════════════════════════
-  insert into public.competitions (name, created_by) values ('uni_cup', v_me)
+  -- Competitions are passworded too, and share c_team_password here for simplicity.
+  insert into public.competitions (name, created_by, password_hash)
+  values ('uni_cup', v_me, extensions.crypt(c_team_password, extensions.gen_salt('bf')))
   on conflict (name) do nothing;
 
   insert into public.team_competitions (team, competition, added_by) values

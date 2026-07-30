@@ -519,15 +519,78 @@ export function leaveTeam(team: string): Promise<TeamActionResult> {
   return teamRpc('leave_team', { p_team: team });
 }
 
-/** Enter one of your teams into a competition, creating the competition if asked. */
-export function enrollTeam(team: string, competition: string, create: boolean): Promise<TeamActionResult> {
-  return teamRpc('enroll_team', { p_team: team, p_competition: competition, p_create: create });
+/** Enter one of your teams into a competition, creating the competition if asked.
+ *
+ *  Passworded like a team, and for a sharper reason: sharing a competition is what
+ *  makes rival teams visible to each other, so without a secret anyone could enrol a
+ *  throwaway team by name and read the whole field. */
+export function enrollTeam(
+  team: string, competition: string, create: boolean, password: string,
+): Promise<TeamActionResult> {
+  return teamRpc('enroll_team', {
+    p_team: team, p_competition: competition, p_create: create, p_password: password,
+  });
 }
 
 /** Withdraw one of your teams from a competition. Mirrors enrolling, including who
  *  is allowed to do it: any member of the team. */
 export function leaveCompetition(team: string, competition: string): Promise<TeamActionResult> {
   return teamRpc('leave_competition', { p_team: team, p_competition: competition });
+}
+
+// ── Member profiles and domain flags ──────────────────────────────────────────
+// Unlike everything above, these do NOT return the full state and do NOT touch the
+// storage caches: a profile is a detail view of somebody else, fetched when it is
+// opened and discarded when it is closed. Caching it would mean holding another
+// participant's browsing data on disk long after the popup that asked for it closed.
+
+/** One whitelisted domain on a profile, with the global flag tally. */
+export interface MemberDomain {
+  domain: string;
+  flag_count: number;
+  flagged_by_me: boolean;
+}
+
+/** A participant's detail view. `days` matches ServerDay so the popup renders it
+ *  through the same code path as your own history. */
+export interface MemberProfile {
+  user_id: string;
+  display_name: string;
+  is_self: boolean;
+  live_focus: number; live_distracted: number;
+  avg7_focus: number; avg7_distracted: number;
+  avg30_focus: number; avg30_distracted: number;
+  days: ServerDay[];
+  domains: MemberDomain[];
+}
+
+async function readRpc<T>(fn: string, body: Record<string, unknown>): Promise<T | null> {
+  if (!isServerConfigured()) return null;
+  if (!(await isSignedIn())) return null;
+  try {
+    const res = await authedFetch(`/rest/v1/rpc/${fn}`, { method: 'POST', body: JSON.stringify(body) });
+    if (!res || !res.ok) {
+      if (res) console.warn(`Focus: ${fn} failed (${res.status}):`, (await res.text()).slice(0, 200));
+      return null;
+    }
+    return (await res.json()) as T;
+  } catch (err) {
+    console.warn(`Focus: ${fn} unreachable:`, String(err).slice(0, 120));
+    return null;
+  }
+}
+
+/** Open a participant's profile. The server refuses anyone the caller cannot
+ *  already see on a leaderboard, so a null here can mean "not allowed" as well as
+ *  "offline" — both come out as the same empty view. */
+export function fetchMemberProfile(userId: string): Promise<MemberProfile | null> {
+  return readRpc<MemberProfile>('get_member_profile', { p_user: userId });
+}
+
+/** Raise or withdraw a red flag on a domain. The count is global per domain, not
+ *  per participant: the same tally appears on every profile listing that domain. */
+export function flagDomain(domain: string): Promise<MemberDomain | null> {
+  return readRpc<MemberDomain>('flag_domain', { p_domain: domain });
 }
 
  /** Read-only fetch of the full state — no delta, no write, no side effects.

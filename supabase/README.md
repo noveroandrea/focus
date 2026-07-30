@@ -60,21 +60,64 @@ repaints everything from its own reply:
 ```
 POST /rest/v1/rpc/join_team          { p_team, p_create, p_password }
 POST /rest/v1/rpc/leave_team         { p_team }
-POST /rest/v1/rpc/enroll_team        { p_team, p_competition, p_create }
+POST /rest/v1/rpc/enroll_team        { p_team, p_competition, p_create, p_password }
 POST /rest/v1/rpc/leave_competition  { p_team, p_competition }
 ```
 
-**Teams have a password** (bcrypt, `teams.password_hash`). Creating sets it, joining
-must match it — a name alone is no longer enough to reach a team's scores. The hash
-is unreachable by any client: `SELECT` on `public.teams` is revoked and re-granted
-column by column, omitting `password_hash`, so PostgREST cannot be asked for it at
-any URL. That is also why `join_team` is the one membership function that is
-`SECURITY DEFINER` — it has to read the column nobody else can — and it keeps the
-safe shape (no `user_id` parameter, caller from `auth.uid()`, revoked from `anon`).
+**Teams and competitions both have a password** (bcrypt, in `password_hash` on each
+table). Creating sets it, joining must match it. Neither hash is reachable by any
+client: `SELECT` on the table is revoked and re-granted column by column, omitting
+`password_hash`, so PostgREST cannot be asked for it at any URL — RLS filters *rows*
+and cannot hide a *column*, which is why this layer exists at all.
 
-**Competitions have no password.** Any team can still enter any competition by name,
-and entering exposes its members to everyone already in it. Whether that matters
-depends on how guessable your competition names are; the same pattern would close it.
+That is also why `join_team` and `enroll_team` are the two membership functions that
+are `SECURITY DEFINER`: they have to read the column nobody else can. Both keep the
+safe shape — no `user_id` parameter, caller from `auth.uid()`, `EXECUTE` revoked from
+`anon` and `PUBLIC` — and because RLS is bypassed under `DEFINER`, the explicit
+`user_id = auth.uid()` / team-membership predicates in their bodies are load-bearing
+rather than belt-and-braces.
+
+The competition password closes a route that the team password left open: create a
+team with your own password, enrol it into a known competition name, and you shared a
+competition with every team in it — so `visible_teams()` legitimately returned them
+and `get_member_profile` handed over their scores and browsing data. Nothing there
+was a bug; the rule was just satisfiable unilaterally. Now step two needs a secret.
+
+`leave_competition` is deliberately **not** passworded: withdrawing your own team
+needs no permission you didn't already have, and requiring the password to leave
+would strand a team whose organiser forgot it.
+
+### Profiles and domain flags
+
+```
+POST /rest/v1/rpc/get_member_profile  { p_user }      read-only
+POST /rest/v1/rpc/flag_domain         { p_domain }
+```
+
+Tapping a participant on a leaderboard opens their live / 7-day / 30-day scores,
+their day history, and their whitelisted domains. Each domain carries a **global**
+red-flag tally — flagging `youtube.com` on one profile raises the same counter every
+other profile shows. `flag_domain` is a toggle, and the count is *recomputed* from
+`domain_flag_voters` rather than incremented, so it cannot drift from the votes
+behind it.
+
+`domain_flag_voters` (keyed `domain, user_id`) is not in the original spec and is
+there so one person cannot inflate a count by holding the button down — the same
+composite-key trick `team_members` uses.
+
+> **This is the schema's most sensitive exposure.** `user_domains` is browsing data:
+> it says where someone works, which university, which mail provider, which projects.
+> Until now only the researcher could read it. A participant's peers can now read it
+> too. **That belongs in the consent form in those words.** If it shouldn't, delete
+> the `domains` key from `get_member_profile`'s payload — the profile still works
+> without it, and the flag tables remain useful to the researcher.
+
+`get_member_profile` takes a `user_id` — the exact shape behind the vulnerability
+fixed in `20260729210000_harden_function_privileges.sql`. It is safe only because of
+the explicit authorization check in its body: the target must already be visible to
+the caller through a shared team or competition. That check and `build_teams()` now
+consult one definition, `visible_teams()`, so the thing that authorizes and the
+thing that displays cannot drift apart.
 
 `p_create` is the difference between two intents, not a convenience flag: creating
 refuses a name that already exists, joining refuses one that doesn't. A mistyped

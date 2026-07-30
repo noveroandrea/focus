@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SessionState, Settings, DayScore, ServerStatus, ServerActionResult, MessageType, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
-import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogOut, Users, Trophy } from 'lucide-react';
+import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogOut, Users, Trophy, ChevronLeft, Flag } from 'lucide-react';
 import { SUMMARY_KEY, TEAMS_KEY } from '../server/config';
 // Type-only: erased at compile time, so the popup bundle does not pull in sync.ts
 // (and through it auth.ts and the whole fetch path) just to name a shape.
-import type { ServerSummary, MemberScore, TeamBoard, CompetitionTeam, CompetitionBoard } from '../server/sync';
+import type {
+  ServerSummary, MemberScore, TeamBoard, CompetitionTeam, CompetitionBoard,
+  MemberProfile, MemberDomain,
+} from '../server/sync';
 import '../../index.css';
 
 
@@ -421,9 +424,19 @@ interface BoardRow {
   label: string;
   sub?: string;
   mine: boolean;      // the caller, or a team they're in — highlighted, never re-ranked
+  userId?: string;    // present on people, absent on teams — what makes a row tappable
   focus: number;
   distracted: number;
 }
+
+/** Five rows before a list starts scrolling, everywhere one appears. The pixel
+ *  height is derived from it rather than the other way round: a scroll container has
+ *  to be told its size before it knows how many children it received. One bar row is
+ *  a 10px label line + a 10px bar + the 6px gap under it. */
+const BOARD_ROWS_VISIBLE = 5;
+const BOARD_MAX_HEIGHT_PX = BOARD_ROWS_VISIBLE * 32 + 16;
+/** Day rows are a single line, so more of them fit in the same idea of "five". */
+const DAY_MAX_HEIGHT_PX = BOARD_ROWS_VISIBLE * 24 + 8;
 
 /** The ranking number, and the one piece of arithmetic worth stating outright:
  *  `distracted` is stored NEGATIVE, so focus + distracted IS "focus minus
@@ -447,6 +460,7 @@ function memberRow(m: MemberScore, metric: Metric, withTeam: boolean): BoardRow 
     label: m.display_name,
     sub: withTeam ? m.team : undefined,
     mine: m.is_self,
+    userId: m.user_id,
     ...metricPair(m as unknown as Record<string, unknown>, metric),
   };
 }
@@ -478,7 +492,16 @@ function teamRow(t: CompetitionTeam, metric: Metric): BoardRow {
  *
  *  Sorting happens here, not on the server: one payload is drawn under three
  *  metrics and each needs its own order. */
-const BarBoard = ({ title, rows, empty }: { title: string; rows: BoardRow[]; empty?: string }) => {
+const BarBoard = ({ title, rows, empty, onSelect }: {
+  title: string;
+  rows: BoardRow[];
+  empty?: string;
+  /** Supplied when the rows stand for people, making each one a button that opens
+   *  their profile. Team rows have no profile, so they render as plain divs and the
+   *  chart is inert — an element that looks tappable but isn't is worse than one
+   *  that doesn't. */
+  onSelect?: (userId: string) => void;
+}) => {
   const sorted = [...rows].sort((a, b) => netOf(b) - netOf(a));
   const max = Math.max(1, ...sorted.map((r) => Math.max(Math.abs(r.focus), Math.abs(r.distracted))));
   // 49% rather than 50% per side: the fills start 1px off centre (that inset is the
@@ -488,50 +511,76 @@ const BarBoard = ({ title, rows, empty }: { title: string; rows: BoardRow[]; emp
 
   return (
     <div className="space-y-1.5">
-      <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-400">{title}</h4>
+      <h4 className="flex items-baseline justify-between text-[9px] font-bold uppercase tracking-widest text-slate-400">
+        <span>{title}</span>
+        {/* Say so when there is more below the fold: a scroll container with no
+            visible cue reads as a chart that is simply missing people. */}
+        {sorted.length > BOARD_ROWS_VISIBLE && (
+          <span className="font-medium normal-case tracking-normal text-slate-300">
+            {sorted.length} · scroll
+          </span>
+        )}
+      </h4>
       {sorted.length === 0 ? (
         <p className="py-1 text-[10px] text-slate-400">{empty ?? 'Nobody here yet.'}</p>
       ) : (
-        <div className="space-y-1.5">
-          {sorted.map((r, i) => (
-            <div key={r.key} className={r.mine ? '-mx-1 rounded-lg bg-blue-50 px-1 py-0.5' : ''}>
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="min-w-0 truncate text-[10px] leading-tight">
-                  <span className="text-slate-400">{i + 1}. </span>
-                  <span className={r.mine ? 'font-bold text-blue-700' : 'text-slate-600'}>{r.label}</span>
-                  {r.sub && <span className="text-slate-400"> · {r.sub}</span>}
-                </span>
-                {/* The net is direct-labelled on every row because it is the value the
-                    ranking uses — without it the order looks arbitrary whenever two
-                    bars are close. The component focus/distracted figures are not
-                    labelled; the bars carry those. */}
-                <span className="flex-shrink-0 text-[10px] font-extrabold tabular-nums text-slate-700">
-                  {Math.round(netOf(r))}
-                </span>
-              </div>
-              <div className="relative h-2.5 w-full">
-                <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-200" />
-                <div
-                  className="absolute inset-y-0"
-                  style={{
-                    right: 'calc(50% + 1px)',
-                    width: pct(r.distracted),
-                    background: DISTRACTED_COLOR,
-                    borderRadius: '4px 0 0 4px',
-                  }}
-                />
-                <div
-                  className="absolute inset-y-0"
-                  style={{
-                    left: 'calc(50% + 1px)',
-                    width: pct(r.focus),
-                    background: FOCUS_COLOR,
-                    borderRadius: '0 4px 4px 0',
-                  }}
-                />
-              </div>
-            </div>
-          ))}
+        <div
+          className="space-y-1.5 overflow-y-auto pr-0.5"
+          style={sorted.length > BOARD_ROWS_VISIBLE ? { maxHeight: BOARD_MAX_HEIGHT_PX } : undefined}
+        >
+          {sorted.map((r, i) => {
+            const clickable = !!onSelect && !!r.userId;
+            const body = (
+              <>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="min-w-0 truncate text-[10px] leading-tight">
+                    <span className="text-slate-400">{i + 1}. </span>
+                    <span className={r.mine ? 'font-bold text-blue-700' : 'text-slate-600'}>{r.label}</span>
+                    {r.sub && <span className="text-slate-400"> · {r.sub}</span>}
+                  </span>
+                  {/* The net is direct-labelled on every row because it is the value
+                      the ranking uses — without it the order looks arbitrary whenever
+                      two bars are close. The component focus/distracted figures are
+                      not labelled; the bars carry those. */}
+                  <span className="flex-shrink-0 text-[10px] font-extrabold tabular-nums text-slate-700">
+                    {Math.round(netOf(r))}
+                  </span>
+                </div>
+                <div className="relative h-2.5 w-full">
+                  <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-200" />
+                  <div
+                    className="absolute inset-y-0"
+                    style={{
+                      right: 'calc(50% + 1px)',
+                      width: pct(r.distracted),
+                      background: DISTRACTED_COLOR,
+                      borderRadius: '4px 0 0 4px',
+                    }}
+                  />
+                  <div
+                    className="absolute inset-y-0"
+                    style={{
+                      left: 'calc(50% + 1px)',
+                      width: pct(r.focus),
+                      background: FOCUS_COLOR,
+                      borderRadius: '0 4px 4px 0',
+                    }}
+                  />
+                </div>
+              </>
+            );
+            const shell = `-mx-1 block w-full rounded-lg px-1 py-0.5 text-left ${
+              r.mine ? 'bg-blue-50' : ''
+            } ${clickable ? 'cursor-pointer hover:bg-slate-100' : ''}`;
+
+            return clickable ? (
+              <button key={r.key} onClick={() => onSelect!(r.userId!)} title={`Open ${r.label}'s stats`} className={shell}>
+                {body}
+              </button>
+            ) : (
+              <div key={r.key} className={shell}>{body}</div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -551,25 +600,198 @@ const BarLegend = () => (
   </div>
 );
 
-/** A metric's heading. All three metrics are shown stacked rather than behind a
- *  switcher, so these are the landmarks you scroll between. */
-const MetricHeading = ({ label }: { label: string }) => (
-  <div className="flex items-center gap-2 pt-1">
-    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{label}</span>
-    <span className="h-px flex-1 bg-slate-100" />
+/** Live / 7-day / 30-day, as a switcher: one metric is on show and its charts fill
+ *  the section. A competition holds a team chart, a combined chart and one chart per
+ *  team, so drawing all three metrics at once would run past a thousand pixels and
+ *  bury the comparison you opened the section to make. Switching re-ranks every
+ *  chart under the chosen metric. */
+const MetricTabs = ({ value, onChange }: { value: Metric; onChange: (m: Metric) => void }) => (
+  <div className="flex gap-0.5 rounded-lg bg-slate-100 p-0.5">
+    {METRICS.map((m) => (
+      <button
+        key={m.id}
+        onClick={() => onChange(m.id)}
+        className={`flex-1 cursor-pointer rounded-md px-1 py-1 text-[10px] font-bold transition-colors ${
+          value === m.id ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+        }`}
+      >
+        {m.label}
+      </button>
+    ))}
   </div>
 );
+
+// ── Member profile ────────────────────────────────────────────────────────────
+// Opened by tapping someone on a leaderboard. Fetched on demand and held only in
+// this component's state: it is another participant's data, including their
+// whitelisted domains, and caching it would leave that on disk long after the popup
+// asking for it had closed.
+//
+// The server refuses anyone the caller cannot already see, so a null response covers
+// both "not allowed" and "offline" — deliberately indistinguishable here, since
+// telling the two apart would confirm that a given user id exists.
+
+/** One metric of a profile, as a labelled focus/distracted pair. Not a bar chart:
+ *  three values for one person is a reading, not a comparison, and bars would imply
+ *  a ranking that isn't there. */
+const ProfileStat = ({ label, focus, distracted }: {
+  label: string; focus: number; distracted: number;
+}) => (
+  <div className="flex items-center justify-between gap-2 px-2 py-1.5 text-[10px]">
+    <span className="font-bold uppercase tracking-widest text-slate-400">{label}</span>
+    <span className="flex-shrink-0 tabular-nums">
+      <span className="font-extrabold text-slate-700">{Math.round(focus + distracted)}</span>
+      <span className="text-slate-300"> · </span>
+      <span className="text-green-600">{Math.round(focus)}</span>
+      <span className="text-slate-300"> / </span>
+      <span className="text-red-600">{Math.round(distracted)}</span>
+    </span>
+  </div>
+);
+
+const MemberProfileView = ({ userId, onBack }: { userId: string; onBack: () => void }) => {
+  const [profile, setProfile] = useState<MemberProfile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [flagging, setFlagging] = useState('');
+
+  useEffect(() => {
+    setLoading(true);
+    chrome.runtime.sendMessage({ type: 'SERVER_MEMBER_PROFILE', userId }, (res?: MemberProfile | null) => {
+      void chrome.runtime.lastError;
+      setLoading(false);
+      setProfile(res ?? null);
+    });
+  }, [userId]);
+
+  // Flagging returns the domain's new global tally, so only that one row is patched
+  // rather than refetching the whole profile.
+  const flag = (domain: string) => {
+    setFlagging(domain);
+    chrome.runtime.sendMessage({ type: 'SERVER_FLAG_DOMAIN', domain }, (res?: MemberDomain | null) => {
+      void chrome.runtime.lastError;
+      setFlagging('');
+      if (!res) return;
+      setProfile((p) => p && {
+        ...p,
+        domains: p.domains.map((d) => (d.domain === res.domain ? { ...d, ...res } : d)),
+      });
+    });
+  };
+
+  const back = (
+    <button
+      onClick={onBack}
+      className="flex cursor-pointer items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-slate-600"
+    >
+      <ChevronLeft size={12} /> Back
+    </button>
+  );
+
+  if (loading) return <div className="space-y-3">{back}<p className="text-[11px] text-slate-400">Loading…</p></div>;
+  if (!profile) {
+    return (
+      <div className="space-y-3">
+        {back}
+        <p className="text-[11px] text-slate-400">
+          Couldn't load this participant — they may have left your teams, or you're offline.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        {back}
+        <span className={`min-w-0 truncate text-sm font-bold ${profile.is_self ? 'text-blue-700' : 'text-slate-700'}`}>
+          {profile.display_name}
+        </span>
+      </div>
+
+      <div className="divide-y divide-slate-100 rounded-xl border border-slate-100">
+        <ProfileStat label="Live" focus={profile.live_focus} distracted={profile.live_distracted} />
+        <ProfileStat label="7-day" focus={profile.avg7_focus} distracted={profile.avg7_distracted} />
+        <ProfileStat label="30-day" focus={profile.avg30_focus} distracted={profile.avg30_distracted} />
+      </div>
+
+      <div className="space-y-1">
+        <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Daily history</h4>
+        {profile.days.length === 0 ? (
+          <p className="text-[10px] text-slate-400">No completed days yet.</p>
+        ) : (
+          <div
+            className="divide-y divide-slate-100 overflow-y-auto rounded-xl border border-slate-100"
+            style={{ maxHeight: DAY_MAX_HEIGHT_PX }}
+          >
+            {profile.days.map((d) => (
+              <div key={d.day} className="flex items-center justify-between px-2 py-1 text-[10px]">
+                <span>
+                  <span className="font-medium text-slate-600">{weekdayName(d.day).slice(0, 3)}</span>{' '}
+                  <span className="text-slate-400">{d.day}</span>
+                </span>
+                <span className="font-bold tabular-nums">
+                  <span className="text-green-600">{Math.round(d.focus_score)}</span>
+                  <span className="text-slate-300"> / </span>
+                  <span className="text-red-600">{Math.round(d.distracted_score)}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-1">
+        <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
+          Whitelisted domains
+        </h4>
+        {profile.domains.length === 0 ? (
+          <p className="text-[10px] text-slate-400">No domains recorded.</p>
+        ) : (
+          <div className="divide-y divide-slate-100 rounded-xl border border-slate-100">
+            {profile.domains.map((d) => (
+              <div key={d.domain} className="flex items-center gap-2 px-2 py-1">
+                <span className="min-w-0 flex-1 truncate text-[10px] text-slate-600">{d.domain}</span>
+                {/* Tally sits inside the button: the count and the act of flagging are
+                    the same affordance, and separating them makes the number look
+                    like a static label. Tapping again withdraws your own flag. */}
+                <button
+                  onClick={() => flag(d.domain)}
+                  disabled={flagging === d.domain}
+                  title={d.flagged_by_me
+                    ? 'You flagged this domain — click to withdraw'
+                    : 'Flag this domain as not focus work'}
+                  className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-lg px-1.5 py-0.5 text-[10px] font-bold tabular-nums transition-colors disabled:opacity-40 ${
+                    d.flagged_by_me
+                      ? 'bg-red-100 text-red-600 hover:bg-red-200'
+                      : 'bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-red-500'
+                  }`}
+                >
+                  <Flag size={10} fill={d.flagged_by_me ? 'currentColor' : 'none'} />
+                  {d.flag_count}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="text-[9px] text-slate-400">
+          Flags are counted per domain across everyone, not per person.
+        </p>
+      </div>
+    </div>
+  );
+};
 
 /** Create-or-join, one field and two verbs. They are separate buttons because they
  *  are separate intents, and the server enforces the difference: create refuses a
  *  name that exists, join refuses one that doesn't. A typo can neither found a
  *  one-person team nor drop you into a stranger's. */
-const NameForm = ({ placeholder, hint, busy, error, withPassword, onSubmit }: {
+const NameForm = ({ placeholder, hint, busy, error, withPassword, passwordPlaceholder, onSubmit }: {
   placeholder: string;
   hint: string;
   busy: boolean;
   error: string;
   withPassword?: boolean;
+  passwordPlaceholder?: string;
   onSubmit: (name: string, create: boolean, password: string) => void;
 }) => {
   const [name, setName] = useState('');
@@ -589,15 +811,15 @@ const NameForm = ({ placeholder, hint, busy, error, withPassword, onSubmit }: {
         className="w-full rounded-lg border border-slate-200 px-2 py-1 text-[11px] focus:border-slate-400 focus:outline-none"
       />
       {withPassword && (
-        // A team's shared secret. Creating sets it; joining must match it. The server
-        // stores only a bcrypt hash and lets no client read it back, so this is the
-        // one and only place it exists in the clear.
+        // The shared secret for a team or a competition. Creating sets it; joining
+        // must match it. The server stores only a bcrypt hash and lets no client read
+        // it back, so this field is the one and only place it exists in the clear.
         <input
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && valid && !busy) go(false); }}
-          placeholder="team password (min 4)"
+          placeholder={passwordPlaceholder ?? 'password (min 4)'}
           className="w-full rounded-lg border border-slate-200 px-2 py-1 text-[11px] focus:border-slate-400 focus:outline-none"
         />
       )}
@@ -629,10 +851,16 @@ const TeamSection = ({ board, busy, error, onEnroll, onLeave }: {
   board: TeamBoard;
   busy: boolean;
   error: string;
-  onEnroll: (competition: string, create: boolean) => void;
+  onEnroll: (competition: string, create: boolean, password: string) => void;
   onLeave: () => void;
 }) => {
+  const [metric, setMetric] = useState<Metric>('live');
   const [addOpen, setAddOpen] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+
+  // A profile takes over the section rather than opening beside it — at 320px there
+  // is no beside, and returning to the board is one tap.
+  if (selected) return <MemberProfileView userId={selected} onBack={() => setSelected(null)} />;
 
   return (
     <div className="space-y-3">
@@ -655,22 +883,23 @@ const TeamSection = ({ board, busy, error, onEnroll, onLeave }: {
       {addOpen && (
         <NameForm
           placeholder="competition name"
-          hint="Enters this team into the competition. Any member can do it."
+          hint="Name and password both needed — sharing a competition is what lets rival teams see each other."
+          withPassword
+          passwordPlaceholder="competition password (min 4)"
           busy={busy}
           error={error}
-          onSubmit={(competition, create) => onEnroll(competition, create)}
+          onSubmit={onEnroll}
         />
       )}
 
+      <MetricTabs value={metric} onChange={setMetric} />
       <BarLegend />
-      {METRICS.map((m) => (
-        <BarBoard
-          key={m.id}
-          title={m.label}
-          rows={board.members.map((x) => memberRow(x, m.id, false))}
-          empty="No members yet."
-        />
-      ))}
+      <BarBoard
+        title="Team standings"
+        rows={board.members.map((x) => memberRow(x, metric, false))}
+        empty="No members yet."
+        onSelect={setSelected}
+      />
 
       <button
         onClick={onLeave}
@@ -691,6 +920,9 @@ const CompetitionSection = ({ board, busy, onLeave }: {
   busy: boolean;
   onLeave: (team: string) => void;
 }) => {
+  const [metric, setMetric] = useState<Metric>('live');
+  const [selected, setSelected] = useState<string | null>(null);
+
   const byTeam = new Map<string, MemberScore[]>();
   for (const m of board.members) {
     const t = m.team ?? '—';
@@ -702,6 +934,8 @@ const CompetitionSection = ({ board, busy, onLeave }: {
   // Withdrawing is per-team, since you can have more than one team in a competition.
   const myTeams = board.teams.filter((t) => t.is_mine).map((t) => t.team);
 
+  if (selected) return <MemberProfileView userId={selected} onBack={() => setSelected(null)} />;
+
   return (
     <div className="space-y-3">
       <h3 className="flex min-w-0 items-center gap-1.5 text-sm font-bold text-slate-700">
@@ -709,33 +943,29 @@ const CompetitionSection = ({ board, busy, onLeave }: {
         <span className="truncate">{board.competition}</span>
       </h3>
 
+      <MetricTabs value={metric} onChange={setMetric} />
       <BarLegend />
 
-      {/* Metric-major: each of the three metrics gets the full set of boards — teams
-          against teams, then everyone, then one per team. Ordering it the other way
-          (a metric switcher, or boards grouped by subject) would mean scrolling past
-          two irrelevant metrics to compare two teams on the same footing. */}
-      {METRICS.map((m) => (
-        <div key={m.id} className="space-y-2.5">
-          <MetricHeading label={m.label} />
-          <BarBoard
-            title="Teams"
-            rows={board.teams.map((t) => teamRow(t, m.id))}
-            empty="No teams entered yet."
-          />
-          <BarBoard
-            title="Everyone"
-            rows={board.members.map((x) => memberRow(x, m.id, true))}
-            empty="No participants yet."
-          />
-          {teamOrder.map((t) => (
-            <BarBoard
-              key={t}
-              title={t}
-              rows={(byTeam.get(t) ?? []).map((x) => memberRow(x, m.id, false))}
-            />
-          ))}
-        </div>
+      {/* The chosen metric, drawn three ways: teams against teams, then the whole
+          field, then each team's own roster. */}
+      <BarBoard
+        title="Teams"
+        rows={board.teams.map((t) => teamRow(t, metric))}
+        empty="No teams entered yet."
+      />
+      <BarBoard
+        title="Everyone"
+        rows={board.members.map((x) => memberRow(x, metric, true))}
+        empty="No participants yet."
+        onSelect={setSelected}
+      />
+      {teamOrder.map((t) => (
+        <BarBoard
+          key={t}
+          title={t}
+          rows={(byTeam.get(t) ?? []).map((x) => memberRow(x, metric, false))}
+          onSelect={setSelected}
+        />
       ))}
 
       {myTeams.map((t) => (
@@ -871,8 +1101,8 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
         board={teamSection}
         busy={busy}
         error={error}
-        onEnroll={(competition, create) =>
-          act({ type: 'SERVER_ENROLL_TEAM', team: teamSection.team, competition, create },
+        onEnroll={(competition, create, password) =>
+          act({ type: 'SERVER_ENROLL_TEAM', team: teamSection.team, competition, create, password },
               () => setSection(`comp:${competition}`))
         }
         onLeave={() =>
