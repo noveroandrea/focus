@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SessionState, Settings, DayScore, ServerStatus, ServerActionResult, MessageType, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
-import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogOut, Users, Trophy, ChevronLeft, Flag } from 'lucide-react';
-import { SUMMARY_KEY, TEAMS_KEY, FLAG_KEY } from '../server/config';
+import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogOut, Users, Trophy, ChevronLeft, ChevronRight, Flag } from 'lucide-react';
+import { SUMMARY_KEY, TEAMS_KEY, FLAG_KEY, DOMAIN_FLAGS_KEY } from '../server/config';
 // Type-only: erased at compile time, so the popup bundle does not pull in sync.ts
 // (and through it auth.ts and the whole fetch path) just to name a shape.
 import type {
@@ -493,7 +493,9 @@ function teamRow(t: CompetitionTeam, metric: Metric): BoardRow {
  *  Sorting happens here, not on the server: one payload is drawn under three
  *  metrics and each needs its own order. */
 const BarBoard = ({ title, rows, empty, onSelect }: {
-  title: string;
+  /** Omitted when something above the chart already names it — an expanded team
+   *  panel, whose button carries the team name. The scroll marker still shows. */
+  title?: string;
   rows: BoardRow[];
   empty?: string;
   /** Supplied when the rows stand for people, making each one a button that opens
@@ -511,16 +513,18 @@ const BarBoard = ({ title, rows, empty, onSelect }: {
 
   return (
     <div className="space-y-1.5">
-      <h4 className="flex items-baseline justify-between text-[9px] font-bold uppercase tracking-widest text-slate-400">
-        <span>{title}</span>
-        {/* Say so when there is more below the fold: a scroll container with no
-            visible cue reads as a chart that is simply missing people. */}
-        {sorted.length > BOARD_ROWS_VISIBLE && (
-          <span className="font-medium normal-case tracking-normal text-slate-300">
-            {sorted.length} · scroll
-          </span>
-        )}
-      </h4>
+      {(title || sorted.length > BOARD_ROWS_VISIBLE) && (
+        <h4 className="flex items-baseline justify-between text-[9px] font-bold uppercase tracking-widest text-slate-400">
+          <span>{title}</span>
+          {/* Say so when there is more below the fold: a scroll container with no
+              visible cue reads as a chart that is simply missing people. */}
+          {sorted.length > BOARD_ROWS_VISIBLE && (
+            <span className="font-medium normal-case tracking-normal text-slate-300">
+              {sorted.length} · scroll
+            </span>
+          )}
+        </h4>
+      )}
       {sorted.length === 0 ? (
         <p className="py-1 text-[10px] text-slate-400">{empty ?? 'Nobody here yet.'}</p>
       ) : (
@@ -962,6 +966,15 @@ const CompetitionSection = ({ board, busy, onLeave }: {
 }) => {
   const [metric, setMetric] = useState<Metric>('live');
   const [selected, setSelected] = useState<string | null>(null);
+  // A Set, so teams open and close independently: comparing two rosters side by side
+  // is the whole reason to expand one, and an accordion would forbid it.
+  const [openTeams, setOpenTeams] = useState<Set<string>>(new Set());
+
+  const toggleTeam = (t: string) => setOpenTeams((prev) => {
+    const next = new Set(prev);
+    if (next.has(t)) next.delete(t); else next.add(t);
+    return next;
+  });
 
   const byTeam = new Map<string, MemberScore[]>();
   for (const m of board.members) {
@@ -969,8 +982,11 @@ const CompetitionSection = ({ board, busy, onLeave }: {
     if (!byTeam.has(t)) byTeam.set(t, []);
     byTeam.get(t)!.push(m);
   }
-  // Follow the server's team order, so the leading team's roster comes first.
-  const teamOrder = board.teams.map((t) => t.team).filter((t) => byTeam.has(t));
+  // Alphabetical, NOT by rank. These are navigation controls, so their job is to be
+  // findable: a list that reorders itself as scores move means hunting for the same
+  // team in a different place every time you open the popup. The Teams chart above
+  // is where rank is expressed.
+  const teamNames = [...byTeam.keys()].sort((a, b) => a.localeCompare(b));
   // Withdrawing is per-team, since you can have more than one team in a competition.
   const myTeams = board.teams.filter((t) => t.is_mine).map((t) => t.team);
 
@@ -999,14 +1015,52 @@ const CompetitionSection = ({ board, busy, onLeave }: {
         empty="No participants yet."
         onSelect={setSelected}
       />
-      {teamOrder.map((t) => (
-        <BarBoard
-          key={t}
-          title={t}
-          rows={(byTeam.get(t) ?? []).map((x) => memberRow(x, metric, false))}
-          onSelect={setSelected}
-        />
-      ))}
+      {/* One collapsed button per team rather than every roster at once. A
+          competition with eight teams would otherwise be eight charts deep before
+          you reached anything, three times over. Expansion state is held here and
+          not per-metric, so a team you opened stays open when you switch to 7-day. */}
+      <div className="space-y-1">
+        <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-400">By team</h4>
+        {teamNames.map((t) => {
+          const open = openTeams.has(t);
+          const members = byTeam.get(t) ?? [];
+          const mine = myTeams.includes(t);
+          return (
+            <div key={t} className="space-y-1.5">
+              <button
+                onClick={() => toggleTeam(t)}
+                title={open ? `Hide ${t}` : `Show the ${t} roster`}
+                className={`flex w-full cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-[10px] font-bold transition-colors ${
+                  open
+                    ? 'bg-slate-700 text-white'
+                    : mine
+                      ? 'bg-blue-50 text-blue-700 hover:bg-blue-100'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                <ChevronRight
+                  size={11}
+                  className={`flex-shrink-0 transition-transform ${open ? 'rotate-90' : ''}`}
+                />
+                <span className="min-w-0 flex-1 truncate">{t}</span>
+                <span className={`flex-shrink-0 font-medium tabular-nums ${open ? 'text-slate-300' : 'text-slate-400'}`}>
+                  {members.length}
+                </span>
+              </button>
+              {open && (
+                // No title: the button above is the heading, and repeating the team
+                // name inside its own panel is noise.
+                <div className="pl-2">
+                  <BarBoard
+                    rows={members.map((x) => memberRow(x, metric, false))}
+                    onSelect={setSelected}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
 
       {myTeams.map((t) => (
         <button
@@ -1021,6 +1075,26 @@ const CompetitionSection = ({ board, busy, onLeave }: {
     </div>
   );
 };
+
+/** Red-flag tallies for the user's own whitelisted domains, as `{domain: count}`.
+ *  Refreshed by every server reply — so, via the 1-minute post floor, at least once
+ *  a minute while the popup is open. */
+function useDomainFlags(): Record<string, number> {
+  const [flags, setFlags] = useState<Record<string, number>>({});
+  useEffect(() => {
+    const load = () => chrome.storage.local.get([DOMAIN_FLAGS_KEY], (r) => {
+      const f = r[DOMAIN_FLAGS_KEY];
+      setFlags(f && typeof f === 'object' ? (f as Record<string, number>) : {});
+    });
+    load();
+    const listener = (changes: Record<string, unknown>, area: string) => {
+      if (area === 'local' && changes[DOMAIN_FLAGS_KEY]) load();
+    };
+    chrome.storage.onChanged.addListener(listener);
+    return () => chrome.storage.onChanged.removeListener(listener);
+  }, []);
+  return flags;
+}
 
 /** Whether this week's red flag is still in hand. Read from storage, which both the
  *  server replies and a successful flag write — so the badge and the flag buttons on
@@ -1088,12 +1162,13 @@ function useBoards() {
 }
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
-const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelistToggle }: {
+const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelistToggle, onSettingsChange }: {
   state: SessionState;
-  settings: Settings;   // read-only here: the whitelist check. Edits live in SettingsTab.
+  settings: Settings;
   currentTabDomain: string;
   currentTabUrl: string;
   onWhitelistToggle: () => void;
+  onSettingsChange: (s: Settings) => void;
 }) => {
   const boards = useBoards();
   const flagAvailable = useWeeklyFlag();
@@ -1210,22 +1285,202 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
     ) : (
       <PersonalSection
         state={state}
+        settings={settings}
         currentTabDomain={currentTabDomain}
         isWhitelisted={isWhitelisted}
         onWhitelistToggle={onWhitelistToggle}
+        onSettingsChange={onSettingsChange}
       />
     )}
   </div>
   );
 };
 
+/** The focus whitelist: the list, clipboard import/export, and the add field.
+ *
+ *  On the Main tab rather than in Settings because it is not a preference — it is
+ *  what decides whether the extension does anything at all on the page you are
+ *  looking at, and it gets edited far more often than any slider is touched.
+ *
+ *  On this branch the list is a CACHE of the server's copy: an edit here goes out
+ *  through apply_score_delta and the reply overwrites it. It still works offline,
+ *  because heartbeat.ts reads the same local key. */
+const AllowedPages = ({ settings, onChange }: {
+  settings: Settings;
+  onChange: (s: Settings) => void;
+}) => {
+  const flags = useDomainFlags();
+  const [newDomain, setNewDomain] = useState('');
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState('');
+  const [msg, setMsg] = useState('');
+
+  const set = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
+
+  /** One normalisation for both entry paths, so a domain typed by hand and the same
+   *  domain pasted in can never end up stored differently. Lower case matters more
+   *  than it used to: the server keys its domain registry on it. */
+  const normalise = (raw: string) =>
+    raw.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+
+  const addDomain = () => {
+    const d = normalise(newDomain);
+    if (!d || settings.allowedDomains.includes(d)) return;
+    set({ allowedDomains: [...settings.allowedDomains, d] });
+    setNewDomain('');
+  };
+
+  const removeDomain = (d: string) =>
+    set({ allowedDomains: settings.allowedDomains.filter((x) => x !== d) });
+
+  const copyDomains = async () => {
+    const n = settings.allowedDomains.length;
+    const ok = await copyText(settings.allowedDomains.join('\n') + '\n');
+    setMsg(ok
+      ? `Copied ${n} domain${n === 1 ? '' : 's'} to clipboard`
+      : 'Copy failed — clipboard unavailable');
+  };
+
+  // Overwrite the whitelist with the pasted list. Blanks and duplicates dropped.
+  const applyPaste = () => {
+    const seen = new Set<string>();
+    const domains: string[] = [];
+    for (const line of pasteText.split(/[\n,]/)) {
+      const d = normalise(line);
+      if (!d || seen.has(d)) continue;
+      seen.add(d);
+      domains.push(d);
+    }
+    set({ allowedDomains: domains });
+    setPasteOpen(false);
+    setPasteText('');
+    setMsg(`Replaced whitelist with ${domains.length} domain${domains.length === 1 ? '' : 's'}`);
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-slate-500">Allowed pages</span>
+        <div className="flex gap-1">
+          <button
+            onClick={copyDomains}
+            title="Copy the whitelist to the clipboard, one domain per line"
+            className="flex cursor-pointer items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-200"
+          >
+            <Copy size={11} /> Copy
+          </button>
+          <button
+            onClick={() => { setPasteOpen((v) => !v); setMsg(''); }}
+            title="Paste a list — REPLACES the whole whitelist"
+            className="flex cursor-pointer items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-200"
+          >
+            <ClipboardPaste size={11} /> Paste
+          </button>
+        </div>
+      </div>
+
+      {pasteOpen && (
+        <div className="space-y-1 rounded-xl bg-slate-50 p-2">
+          <textarea
+            value={pasteText}
+            onChange={(e) => setPasteText(e.target.value)}
+            placeholder={'overleaf.com\narxiv.org\nwikipedia.org'}
+            rows={4}
+            className="w-full resize-none rounded-lg border border-slate-200 p-1.5 font-mono text-[9px] text-slate-700 focus:border-slate-400 focus:outline-none"
+          />
+          <div className="flex justify-end gap-1">
+            <button
+              onClick={() => { setPasteOpen(false); setPasteText(''); }}
+              className="cursor-pointer rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 hover:bg-slate-200"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={applyPaste}
+              disabled={!pasteText.trim()}
+              className="cursor-pointer rounded-lg bg-slate-700 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-slate-800 disabled:opacity-40"
+            >
+              Replace whitelist
+            </button>
+          </div>
+        </div>
+      )}
+      {msg && <p className="text-[9px] text-slate-500">{msg}</p>}
+
+      {/* Same five-rows-then-scroll as the day history and the leaderboards above
+          it, so the Main tab has one scroll rhythm rather than three. */}
+      <div
+        className="space-y-0.5 overflow-y-auto rounded-xl border border-slate-100 bg-white p-1"
+        style={{ maxHeight: DAY_MAX_HEIGHT_PX }}
+      >
+        {settings.allowedDomains.length === 0 && (
+          <p className="py-2 text-center text-[10px] text-slate-400">No domains — add one below.</p>
+        )}
+        {settings.allowedDomains.map((d) => {
+          // Undefined means the server has not reported this domain yet — just added,
+          // or signed out entirely. Nobody has flagged it, so 0 is the honest reading.
+          const count = flags[d] ?? 0;
+          return (
+            <div key={d} className="flex items-center gap-2 rounded-lg px-2 py-1 hover:bg-slate-50">
+              <span className="min-w-0 flex-1 truncate text-[11px] text-slate-700">{d}</span>
+              {/* Shown on every row, including zeros — an absent number would read as
+                  "unknown" rather than "nobody has objected". Grey at 0 keeps a list
+                  of clean domains quiet; red once anyone has flagged it. */}
+              <span
+                title={count === 0
+                  ? `No red flags on ${d}`
+                  : `${count} red flag${count === 1 ? '' : 's'} raised against ${d} by participants`}
+                className={`flex flex-shrink-0 items-center gap-0.5 text-[10px] font-bold tabular-nums ${
+                  count > 0 ? 'text-red-500' : 'text-slate-300'
+                }`}
+              >
+                <Flag size={9} fill={count > 0 ? 'currentColor' : 'none'} />
+                {count}
+              </span>
+              <button
+                onClick={() => removeDomain(d)}
+                title={`Stop tracking ${d}`}
+                className="flex-shrink-0 cursor-pointer text-slate-300 transition-colors hover:text-red-500"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          type="text"
+          placeholder="e.g. github.com"
+          value={newDomain}
+          onChange={(e) => setNewDomain(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && addDomain()}
+          className="flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-[11px] focus:outline-none focus:ring-2 focus:ring-blue-300"
+        />
+        <button
+          onClick={addDomain}
+          className="flex cursor-pointer items-center gap-1 rounded-lg bg-blue-500 px-3 py-1.5 text-[11px] text-white transition-colors hover:bg-blue-600"
+        >
+          <Plus size={12} /> Add
+        </button>
+      </div>
+      <p className="text-[9px] text-slate-400">
+        Newly added pages require a tab reload to activate.
+      </p>
+    </div>
+  );
+};
+
 /** Everything the Main tab showed before teams existed, unchanged and now one
  *  section among several. */
-const PersonalSection = ({ state, currentTabDomain, isWhitelisted, onWhitelistToggle }: {
+const PersonalSection = ({ state, settings, currentTabDomain, isWhitelisted, onWhitelistToggle, onSettingsChange }: {
   state: SessionState;
+  settings: Settings;
   currentTabDomain: string;
   isWhitelisted: boolean;
   onWhitelistToggle: () => void;
+  onSettingsChange: (s: Settings) => void;
 }) => {
   return (
   <div className="space-y-4">
@@ -1279,6 +1534,8 @@ const PersonalSection = ({ state, currentTabDomain, isWhitelisted, onWhitelistTo
     </div>
 
     <DailyHistory state={state} />
+
+    <AllowedPages settings={settings} onChange={onSettingsChange} />
 
   </div>
   );
@@ -1393,48 +1650,9 @@ const SettingsTab = ({ settings, onChange }: {
   settings: Settings;
   onChange: (s: Settings) => void;
 }) => {
-  const [newDomain, setNewDomain] = useState('');
-  const [domainPasteOpen, setDomainPasteOpen] = useState(false);
-  const [domainPasteText, setDomainPasteText] = useState('');
-  const [domainMsg, setDomainMsg] = useState('');
   const [companionInfoOpen, setCompanionInfoOpen] = useState(false);
 
   const set = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
-
-  const addDomain = () => {
-    const d = newDomain.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
-    if (!d || settings.allowedDomains.includes(d)) return;
-    set({ allowedDomains: [...settings.allowedDomains, d] });
-    setNewDomain('');
-  };
-
-  const removeDomain = (d: string) =>
-    set({ allowedDomains: settings.allowedDomains.filter(x => x !== d) });
-
-  // Copy the whitelist to the clipboard, one domain per line.
-  const copyDomains = async () => {
-    const ok = await copyText(settings.allowedDomains.join('\n') + '\n');
-    setDomainMsg(ok
-      ? `Copied ${settings.allowedDomains.length} domain${settings.allowedDomains.length === 1 ? '' : 's'} to clipboard`
-      : 'Copy failed — clipboard unavailable');
-  };
-
-  // Overwrite the whitelist with the pasted list (one domain per line). Same
-  // normalisation as addDomain; blanks and duplicates are dropped.
-  const applyDomainPaste = () => {
-    const seen = new Set<string>();
-    const domains: string[] = [];
-    for (const line of domainPasteText.split(/[\n,]/)) {
-      const d = line.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
-      if (!d || seen.has(d)) continue;
-      seen.add(d);
-      domains.push(d);
-    }
-    set({ allowedDomains: domains });
-    setDomainPasteOpen(false);
-    setDomainPasteText('');
-    setDomainMsg(`Replaced whitelist with ${domains.length} domain${domains.length === 1 ? '' : 's'}`);
-  };
 
   return (
     <div className="space-y-5 text-sm">
@@ -1715,94 +1933,6 @@ const SettingsTab = ({ settings, onChange }: {
         </p>
       </section>
 
-      {/* Allowed pages */}
-      <section className="space-y-2">
-        <div className="flex items-center justify-between">
-          <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Allowed Pages</h3>
-          <div className="flex gap-1">
-            <button
-              onClick={copyDomains}
-              title="Copy the whitelist to the clipboard, one domain per line"
-              className="flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-200 cursor-pointer"
-            >
-              <Copy size={11} /> Copy
-            </button>
-            <button
-              onClick={() => { setDomainPasteOpen(v => !v); setDomainMsg(''); }}
-              title="Paste a list — REPLACES the whole whitelist"
-              className="flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-200 cursor-pointer"
-            >
-              <ClipboardPaste size={11} /> Paste
-            </button>
-          </div>
-        </div>
-
-        {domainPasteOpen && (
-          <div className="space-y-1 rounded-xl bg-slate-50 p-2">
-            <textarea
-              value={domainPasteText}
-              onChange={e => setDomainPasteText(e.target.value)}
-              placeholder={'overleaf.com\narxiv.org\nwikipedia.org'}
-              rows={4}
-              className="w-full resize-none rounded-lg border border-slate-200 p-1.5 font-mono text-[9px] text-slate-700 focus:border-slate-400 focus:outline-none"
-            />
-            <div className="flex justify-end gap-1">
-              <button
-                onClick={() => { setDomainPasteOpen(false); setDomainPasteText(''); }}
-                className="rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 hover:bg-slate-200 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={applyDomainPaste}
-                disabled={!domainPasteText.trim()}
-                className="rounded-lg bg-slate-700 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-slate-800 disabled:opacity-40 cursor-pointer"
-              >
-                Replace whitelist
-              </button>
-            </div>
-          </div>
-        )}
-        {domainMsg && <p className="text-[9px] text-slate-500">{domainMsg}</p>}
-
-        <div className="rounded-xl border border-slate-100 bg-white p-2 space-y-0.5 max-h-48 overflow-y-auto">
-          {settings.allowedDomains.length === 0 && (
-            <p className="text-[10px] text-slate-400 text-center py-2">No domains — add one below.</p>
-          )}
-          {settings.allowedDomains.map(d => (
-            <div key={d} className="flex items-center justify-between px-2 py-1 rounded-lg hover:bg-slate-50">
-              <span className="text-[11px] text-slate-700">{d}</span>
-              <button
-                onClick={() => removeDomain(d)}
-                className="text-slate-300 hover:text-red-500 transition-colors ml-2 flex-shrink-0"
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ))}
-        </div>
-
-        {/* Add domain */}
-        <div className="flex gap-2">
-          <input
-            type="text"
-            placeholder="e.g. github.com"
-            value={newDomain}
-            onChange={e => setNewDomain(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && addDomain()}
-            className="flex-1 text-[11px] border border-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-300"
-          />
-          <button
-            onClick={addDomain}
-            className="flex items-center gap-1 text-[11px] bg-blue-500 text-white px-3 py-1.5 rounded-lg hover:bg-blue-600 transition-colors"
-          >
-            <Plus size={12} /> Add
-          </button>
-        </div>
-        <p className="text-[9px] text-slate-400">
-          Newly added pages require a tab reload to activate.
-        </p>
-      </section>
     </div>
   );
 };
@@ -2027,6 +2157,7 @@ const Popup = () => {
             currentTabDomain={currentTabDomain}
             currentTabUrl={currentTabUrl}
             onWhitelistToggle={handleWhitelistToggle}
+            onSettingsChange={saveSettings}
           />
         ) : (
           <SettingsTab settings={settings} onChange={saveSettings} />

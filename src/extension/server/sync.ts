@@ -43,7 +43,7 @@
 import { DayScore, HISTORY_KEY, Settings, DEFAULT_SETTINGS, weekdayName, round2 } from '../../types';
 import {
   SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY, TEAMS_KEY, FLAG_KEY,
-  PENDING_DOMAINS_KEY, SERVER_DOMAINS_KEY, isServerConfigured,
+  DOMAIN_FLAGS_KEY, PENDING_DOMAINS_KEY, SERVER_DOMAINS_KEY, isServerConfigured,
 } from './config';
 import { getAccessToken, isSignedIn } from './auth';
 
@@ -115,6 +115,9 @@ export interface CompetitionBoard {
 export interface ServerState {
   summary: ServerSummary | null;
   domains: string[];
+  /** The same domains with their global flag tally. Display only — `domains` above
+   *  is the copy that drives whether the extension activates on a page. */
+  domain_flags: { domain: string; flag_count: number }[];
   days: ServerDay[];
   teams: TeamBoard[];
   competitions: CompetitionBoard[];
@@ -303,6 +306,15 @@ async function applyState(next: ServerState | null): Promise<void> {
       competitions: Array.isArray(next.competitions) ? next.competitions : [],
     },
   });
+
+  // Flag tallies for the user's own domains, flattened to a lookup map so the popup
+  // does not scan an array per row. Written unconditionally: a domain removed from
+  // the whitelist must lose its entry, not keep a stale count.
+  const tallies: Record<string, number> = {};
+  for (const d of Array.isArray(next.domain_flags) ? next.domain_flags : []) {
+    if (d && typeof d.domain === 'string') tallies[d.domain] = Number(d.flag_count) || 0;
+  }
+  chrome.storage.local.set({ [DOMAIN_FLAGS_KEY]: tallies });
 
   // The weekly flag. Defaults to available when the server said nothing, matching
   // build_state's own coalesce — a user who has never spent one holds one.

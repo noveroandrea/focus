@@ -49,6 +49,14 @@ export const PENDING_KEY = 'focusServerPending';
 /** Storage key holding the last summary the server returned. */
 export const SUMMARY_KEY = 'focusServerSummary';
 
+/** Storage key holding `{ [domain]: flagCount }` for the user's own whitelist.
+ *
+ *  Separate from the whitelist itself, which lives in `focusFlowSettings` and is read
+ *  synchronously by heartbeat.ts on every page load. That one decides whether the
+ *  extension runs; this one is display only, so a missing or stale entry costs a
+ *  number on screen rather than a page that fails to activate. */
+export const DOMAIN_FLAGS_KEY = 'focusServerDomainFlags';
+
 /** Storage key holding whether this week's red flag is still in hand.
  *
  *  Its own key rather than a field on the summary because two unrelated parts of the
