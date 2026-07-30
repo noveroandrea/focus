@@ -18,6 +18,14 @@ const DISTRACTED_COLOR = '#b91c1c'; // red-700
 const DAY_MS = 86_400_000;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+// Visible build marker. Bump it whenever you need to confirm at a glance that the
+// extension Brave has loaded is the one you just built — a stale service worker or an
+// extension loaded from a different directory is otherwise indistinguishable from a
+// code bug. Rendered at the top of the Main tab, deliberately OUTSIDE ServerAccount
+// so "marker present, account section missing" and "nothing at all" mean different
+// things. Delete both this and the line that renders it once syncing is verified.
+const BUILD_TAG = 'server-sync build 1';
+
 /** Mean of each score over the `days` complete days ENDING YESTERDAY. Today is
  *  excluded on purpose: it's still accumulating, so folding a half-finished day
  *  into the average would drag it down all morning and make the bar meaningless.
@@ -380,6 +388,11 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
 
   return (
   <div className="space-y-4">
+    {/* Temporary: see BUILD_TAG. */}
+    <div className="rounded-lg bg-indigo-50 px-2 py-1 text-center text-[10px] font-bold text-indigo-600">
+      {BUILD_TAG}
+    </div>
+
     <div className="flex items-center justify-between">
       <span className="text-sm text-slate-500 font-medium">Status</span>
       <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
@@ -429,6 +442,11 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
       </div>
     </div>
 
+    {/* Directly under the scores it syncs, and above the history it feeds. Sits on
+        the main page rather than in Settings: signing in is a first-run action that
+        has to be findable, not a preference buried behind a tab. */}
+    <ServerAccount />
+
     <DailyHistory state={state} />
 
   </div>
@@ -475,7 +493,9 @@ const ServerAccount = () => {
 
   return (
     <section className="space-y-2">
-      <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Data sync</h3>
+      <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+        Data sync — sign in
+      </h3>
 
       {status?.signedIn ? (
         <>
@@ -585,10 +605,6 @@ const SettingsTab = ({ settings, onChange }: {
 
   return (
     <div className="space-y-5 text-sm">
-
-      {/* Account first: everything below is local settings, this is the one that
-          decides whether any of it leaves the machine. */}
-      <ServerAccount />
 
       {/* Feature toggles. Sound lives in the header next to Working — it's a
           one-click mute, not a setting you come in here to change. */}

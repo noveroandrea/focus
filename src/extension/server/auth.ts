@@ -145,20 +145,47 @@ export async function getAccessToken(): Promise<string | null> {
 }
 
 // ── Interactive sign-in ───────────────────────────────────────────────────────
-function randomNonce(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
+function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-function launchGoogle(nonce: string): Promise<string | null> {
+function randomNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return toHex(bytes);
+}
+
+/** SHA-256, hex-encoded.
+ *
+ *  THE NONCE IS SENT IN TWO DIFFERENT FORMS, and mixing them up is a
+ *  "Nonces mismatch" 400 from Supabase:
+ *
+ *    → Google   gets the HASHED nonce, which it copies into the id_token's
+ *               `nonce` claim verbatim.
+ *    → Supabase gets the RAW nonce. It hashes that itself and compares the result
+ *               with the claim, which is how it proves the token was minted for
+ *               this specific sign-in attempt and is not a replay.
+ *
+ *  Sending the raw value to both makes Supabase compare sha256(raw) against raw,
+ *  which can never match. */
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return toHex(new Uint8Array(digest));
+}
+
+function launchGoogle(hashedNonce: string): Promise<string | null> {
   const redirectUri = chrome.identity.getRedirectURL();
+  // Logged because a redirect_uri_mismatch is otherwise pure guesswork: Google
+  // compares this string byte-for-byte against the Authorized redirect URIs, and the
+  // extension ID (and therefore this whole URL) changes if the unpacked folder moves.
+  // Copy it verbatim, trailing slash included.
+  console.log('Focus: OAuth redirect URI (must be registered in Google Cloud, exactly):', redirectUri);
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
     response_type: 'id_token',
     redirect_uri: redirectUri,
     scope: 'openid email profile',
-    nonce,
+    nonce: hashedNonce,
     prompt: 'select_account',
   });
   const url = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
@@ -191,7 +218,7 @@ export async function signIn(): Promise<ServerSession | null> {
     return null;
   }
   const nonce = randomNonce();
-  const redirect = await launchGoogle(nonce);
+  const redirect = await launchGoogle(await sha256Hex(nonce));
   if (!redirect) return null;
 
   const idToken = idTokenFromRedirect(redirect);
@@ -200,8 +227,9 @@ export async function signIn(): Promise<ServerSession | null> {
     return null;
   }
 
-  // The same nonce goes to Supabase: it checks the id_token's nonce claim matches,
-  // which is what stops a token minted for another site being replayed here.
+  // The RAW nonce goes to Supabase — see sha256Hex() above. Supabase hashes it and
+  // compares against the token's claim, which is what stops a token minted for
+  // another sign-in being replayed here.
   const session = await exchange('id_token', {
     provider: 'google',
     id_token: idToken,

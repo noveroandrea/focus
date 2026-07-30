@@ -18,20 +18,24 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Project URL, e.g. https://abcdefghijklm.supabase.co (no trailing slash). */
-export const SUPABASE_URL = '';
+export const SUPABASE_URL: string = 'https://zjdcanlogiidqqgkfutp.supabase.co';
 
 /** Project `anon` / publishable key. Public by design — see the note above. */
-export const SUPABASE_ANON_KEY = '';
+export const SUPABASE_ANON_KEY: string = 'sb_publishable_HHxAUdAbNabMNZwri-imLw_x2X2cSpR';
 
 /** Google OAuth 2.0 **Web application** client ID, ending in
  *  .apps.googleusercontent.com. Must be listed in Supabase → Authentication →
  *  Providers → Google → "Authorized Client IDs", or the id_token exchange is
  *  rejected. */
-export const GOOGLE_CLIENT_ID = '';
+export const GOOGLE_CLIENT_ID: string = '6850334637-raa373p6et6vunpur0gofapq3cd3fhr1.apps.googleusercontent.com';
 
 /** True once the three values above are filled in. Every server call checks this
  *  first, so an unconfigured build simply behaves like the offline extension
- *  rather than throwing on every heartbeat. */
+ *  rather than throwing on every heartbeat.
+ *
+ *  The three constants are annotated `: string` rather than left to inference on
+ *  purpose — inferred literal types make these emptiness checks provably false and
+ *  tsc rejects them the moment real values are pasted in. */
 export function isServerConfigured(): boolean {
   return SUPABASE_URL !== '' && SUPABASE_ANON_KEY !== '' && GOOGLE_CLIENT_ID !== '';
 }
