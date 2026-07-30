@@ -11,7 +11,10 @@ import {
 } from './heartbeats';
 // Optional Supabase sync. Every call is a no-op until config.ts is filled in AND
 // the user has signed in, so the extension is fully functional without a server.
-import { initSync, queueDelta, queueDomains, flush, getCachedSummary } from './server/sync';
+import {
+  initSync, queueDelta, queueDomains, flush, getCachedSummary,
+  joinTeam, leaveTeam, enrollTeam,
+} from './server/sync';
 import { signIn, signOut, getSession } from './server/auth';
 import { isServerConfigured } from './server/config';
 
@@ -515,6 +518,21 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
 
     case 'SERVER_STATUS':
       void replyServerStatus(sendResponse);
+      break;
+
+    // Each of these returns the full state, which applyState() writes into the same
+    // storage keys the popup already watches — so the reply repaints the boards with
+    // no second request.
+    case 'SERVER_JOIN_TEAM':
+      joinTeam(message.team, message.create).then(sendResponse);
+      break;
+
+    case 'SERVER_LEAVE_TEAM':
+      leaveTeam(message.team).then(sendResponse);
+      break;
+
+    case 'SERVER_ENROLL_TEAM':
+      enrollTeam(message.team, message.competition, message.create).then(sendResponse);
       break;
   }
   return true;

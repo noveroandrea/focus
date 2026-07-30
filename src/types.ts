@@ -182,7 +182,19 @@ export type MessageType =
   // Google consent window closes the popup, which would abort the flow mid-way.
   | { type: 'SERVER_SIGN_IN' }
   | { type: 'SERVER_SIGN_OUT' }
-  | { type: 'SERVER_STATUS' };
+  | { type: 'SERVER_STATUS' }
+  // Teams. Routed through the background like everything else that touches the
+  // server, so one module owns the session and the storage caches.
+  | { type: 'SERVER_JOIN_TEAM'; team: string; create: boolean }
+  | { type: 'SERVER_LEAVE_TEAM'; team: string }
+  | { type: 'SERVER_ENROLL_TEAM'; team: string; competition: string; create: boolean };
+
+/** Reply to the three team messages. `error` carries the database's own message
+ *  ("Team X already exists — join it instead"), which is written to be shown. */
+export interface ServerActionResult {
+  ok: boolean;
+  error?: string;
+}
 
 /** Reply to SERVER_STATUS / SERVER_SIGN_IN — what the popup needs to render the
  *  account section. `summary` is the last payload the server returned. */

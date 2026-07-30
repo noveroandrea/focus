@@ -9,6 +9,8 @@ Optional server for the Focus extension. It stores, per signed-in user:
 | Last 3 completed days | `user_summary.d1_* / d2_* / d3_*` |
 | 7-day and 30-day averages | `user_summary.avg7_* / avg30_*` |
 | Whitelisted page domains | `user_domains` |
+| Team membership | `team_members` (pk `user_id, team`) |
+| Which competitions a team is in | `team_competitions` (pk `team, competition`) |
 
 The extension works **fully without any of this**. Until `src/extension/server/config.ts`
 is filled in *and* the user signs in, every server call is a no-op.
@@ -33,13 +35,63 @@ assemble a view of the world from its own records:
                "d1_focus": 8, "...": "...", "avg7_focus": 9.5, "avg30_focus": 7.1 },
   "domains": ["arxiv.org", "overleaf.com"],
   "days":    [ { "day": "2026-07-28", "focus_score": 8, "distracted_score": -10 },
-               "... 30 most recent completed days ..." ] }
+               "... 30 most recent completed days ..." ],
+  "teams":   [ { "team": "math_students",
+                 "members": [ { "display_name": "andrea", "is_self": true,
+                                "live_focus": 12, "live_distracted": -30,
+                                "avg7_focus": 9.5, "avg30_focus": 7.1, "...": "..." } ] } ],
+  "competitions": [
+    { "competition": "uni_cup",
+      "teams":   [ { "team": "math_students", "is_mine": true, "member_count": 3,
+                     "live_focus": 40, "...": "..." } ],
+      "members": [ { "team": "psycho_students", "display_name": "ada", "...": "..." } ] } ] }
 ```
 
 The **whitelist is written through the same call** (`p_domains`) rather than its own
 endpoint, so a score delta and a whitelist edit cannot race — the reply always
 reflects the write that just happened. `p_domains` is `null` on almost every call,
 meaning "no edit"; an empty *array* is different and does clear the list.
+
+### Teams and competitions
+
+Three more write endpoints, all returning that same full state so a membership change
+repaints everything from its own reply:
+
+```
+POST /rest/v1/rpc/join_team     { p_team, p_create }
+POST /rest/v1/rpc/leave_team    { p_team }
+POST /rest/v1/rpc/enroll_team   { p_team, p_competition, p_create }
+```
+
+`p_create` is the difference between two intents, not a convenience flag: creating
+refuses a name that already exists, joining refuses one that doesn't. A mistyped
+"join" therefore cannot silently found a one-person team, and a "create" cannot drop
+you into a stranger's.
+
+**Who can see whose scores** is decided in exactly one place, `build_teams()`:
+
+- members of teams you are in;
+- members of teams that share a competition with one of yours;
+- nobody else.
+
+`user_summary` keeps its `user_id = auth.uid()` RLS policy. `build_teams()` is the
+only way around it, and is built to the safe shape: **no arguments** (the caller is
+`auth.uid()` and cannot be passed in), `EXECUTE` revoked from `anon` and `PUBLIC`.
+See the header of `20260729210000_harden_function_privileges.sql` for what goes wrong
+when a `SECURITY DEFINER` function takes a `user_id` parameter instead.
+
+**Ranking** is by `focus + distracted`. `distracted_score` is stored *negative*, so
+that expression is "focus minus distraction". Writing the subtraction literally would
+rank a distracted user above a focused one.
+
+**Team scores are sums**, not means, so a bigger team scores higher; `member_count`
+travels with every team row so the board can be read honestly.
+
+> **PII:** `build_teams()` exposes the local part of each member's email as
+> `display_name` (`andrea9roa9@gmail.com` → `andrea9roa9`), because a leaderboard has
+> to name someone. That is a disclosure *between participants* and belongs in the
+> consent form. To anonymise, change the single `split_part` expression in
+> `20260730120000_teams.sql` to a stable pseudonym.
 
 ### The client has no day rollover
 

@@ -1,7 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { SessionState, Settings, DayScore, ServerStatus, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
-import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogIn, LogOut } from 'lucide-react';
+import { SessionState, Settings, DayScore, ServerStatus, ServerActionResult, MessageType, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
+import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogOut, Users, Trophy } from 'lucide-react';
+import { SUMMARY_KEY, TEAMS_KEY } from '../server/config';
+// Type-only: erased at compile time, so the popup bundle does not pull in sync.ts
+// (and through it auth.ts and the whole fetch path) just to name a shape.
+import type { ServerSummary, MemberScore, TeamBoard, CompetitionTeam, CompetitionBoard } from '../server/sync';
 import '../../index.css';
 
 
@@ -18,19 +22,17 @@ const DISTRACTED_COLOR = '#b91c1c'; // red-700
 const DAY_MS = 86_400_000;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-// Visible build marker. Bump it whenever you need to confirm at a glance that the
-// extension Brave has loaded is the one you just built — a stale service worker or an
-// extension loaded from a different directory is otherwise indistinguishable from a
-// code bug. Rendered at the top of the Main tab, deliberately OUTSIDE ServerAccount
-// so "marker present, account section missing" and "nothing at all" mean different
-// things. Delete both this and the line that renders it once syncing is verified.
-const BUILD_TAG = 'server-sync build 1';
-
 /** Mean of each score over the `days` complete days ENDING YESTERDAY. Today is
  *  excluded on purpose: it's still accumulating, so folding a half-finished day
  *  into the average would drag it down all morning and make the bar meaningless.
  *  Counts only days that were actually recorded — a day the PC never came on
- *  shouldn't read as a day of zero focus. */
+ *  shouldn't read as a day of zero focus.
+ *
+ *  FALLBACK ONLY once a server is in play. `refresh_rollup` in the SQL computes the
+ *  same means to the same definition, and that is the figure to show, because it
+ *  has seen every device's days — this function can only average what this browser
+ *  happens to have cached. Used when there is no summary at all: an unconfigured
+ *  build, or before the first reply lands. */
 function windowAvg(rows: DayScore[], days: number, todayKey: string) {
   const end = new Date(`${todayKey}T00:00:00`).getTime() - DAY_MS; // yesterday
   const start = end - (days - 1) * DAY_MS;
@@ -49,13 +51,29 @@ function windowAvg(rows: DayScore[], days: number, todayKey: string) {
  *  baseline and red growing down. Both series share ONE magnitude scale so the
  *  two halves stay comparable. Exact numbers live in the list above, so the bars
  *  carry hover tooltips instead of a label on every mark. */
-const ScoreChart = ({ rows, todayKey }: { rows: DayScore[]; todayKey: string }) => {
+const ScoreChart = ({ rows, todayKey, summary }: {
+  rows: DayScore[];
+  todayKey: string;
+  summary: ServerSummary | null;
+}) => {
+  // The averages come from the SERVER whenever one has answered — the same
+  // reconciliation the live score gets, applied to the two average bars. Both sides
+  // implement one definition (complete days ending yesterday, recorded days only),
+  // so this is a change of source and not of meaning; the server's is simply the
+  // copy that has seen every device.
+  const avg = (days: 7 | 30) => {
+    if (!summary) return windowAvg(rows, days, todayKey);
+    return days === 7
+      ? { focusScore: Number(summary.avg7_focus) || 0, distractedScore: Number(summary.avg7_distracted) || 0 }
+      : { focusScore: Number(summary.avg30_focus) || 0, distractedScore: Number(summary.avg30_distracted) || 0 };
+  };
+
   // Left→right runs from the widest lookback to the most recent: the 30- and
   // 7-day averages, then the 3 previous days, then today at the far right.
   const last4 = rows.slice(0, 4).reverse(); // rows arrive newest-first; today ends up last
   const bars = [
-    { key: 'm', label: '30 d', isAvg: true, ...windowAvg(rows, 30, todayKey) },
-    { key: 'w', label: '7 d', isAvg: true, ...windowAvg(rows, 7, todayKey) },
+    { key: 'm', label: '30 d', isAvg: true, ...avg(30) },
+    { key: 'w', label: '7 d', isAvg: true, ...avg(7) },
     ...last4.map((d) => ({ key: d.date, label: d.weekday.slice(0, 3), isAvg: false, ...d })),
   ];
 
@@ -232,18 +250,24 @@ function sampleDays(todayKey: string): DayScore[] {
 
 const DailyHistory = ({ state }: { state: SessionState }) => {
   const [history, setHistory] = useState<DayScore[]>([]);
+  const [summary, setSummary] = useState<ServerSummary | null>(null);
   const [importMsg, setImportMsg] = useState('');
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState('');
 
   useEffect(() => {
-    const load = () => chrome.storage.local.get([HISTORY_KEY], (r) => {
+    const load = () => chrome.storage.local.get([HISTORY_KEY, SUMMARY_KEY], (r) => {
       setHistory(Array.isArray(r[HISTORY_KEY]) ? r[HISTORY_KEY] : []);
+      setSummary((r[SUMMARY_KEY] as ServerSummary) ?? null);
     });
     load();
-    // Repaint if a rollover banks a day while the popup happens to be open.
+    // Both keys, because applyState() rewrites both on every reply: HISTORY_KEY holds
+    // the banked days and SUMMARY_KEY the 7/30-day means. Watching them is how the
+    // charts reconcile after a post, the same way onServerScores() reconciles the live
+    // score — storage is the channel, so an open popup repaints without polling.
+    // Also still covers a rollover landing while the popup happens to be open.
     const listener = (changes: Record<string, unknown>, area: string) => {
-      if (area === 'local' && changes[HISTORY_KEY]) load();
+      if (area === 'local' && (changes[HISTORY_KEY] || changes[SUMMARY_KEY])) load();
     };
     chrome.storage.onChanged.addListener(listener);
     return () => chrome.storage.onChanged.removeListener(listener);
@@ -264,7 +288,11 @@ const DailyHistory = ({ state }: { state: SessionState }) => {
   // Nothing banked yet → pad with sample days so the charts render. The moment a
   // single real day exists the samples vanish for good. They stay out of realRows,
   // which is what the CSV exports, so demo numbers can never leak into your data.
-  const isSample = history.length === 0;
+  //
+  // Suppressed once the server has answered: its averages are then real (a genuine
+  // zero on day one), and padding the bars with invented days beside them would put
+  // two different stories in one chart. An empty chart is the honest reading.
+  const isSample = history.length === 0 && !summary;
   const rows = isSample
     ? [...realRows, ...sampleDays(today.date)].sort((a, b) => b.date.localeCompare(a.date))
     : realRows;
@@ -349,7 +377,7 @@ const DailyHistory = ({ state }: { state: SessionState }) => {
         </p>
       )}
       {importMsg && <p className="text-[9px] text-slate-500">{importMsg}</p>}
-      <ScoreChart rows={rows} todayKey={today.date} />
+      <ScoreChart rows={rows} todayKey={today.date} summary={summary} />
       <ScoreTrend rows={rows} />
       <ScoreLegend />
       {/* Per-day detail last: the charts answer "how am I doing", this answers
@@ -375,6 +403,300 @@ const DailyHistory = ({ state }: { state: SessionState }) => {
 };
 
 
+// ── Leaderboards ──────────────────────────────────────────────────────────────
+// Every board is the same shape — a ranked list of {name, focus, distracted} — so
+// members, teams-within-a-competition and the combined field all render through one
+// component, differing only in what gets mapped into it.
+
+type Metric = 'live' | 'avg7' | 'avg30';
+
+const METRICS: { id: Metric; label: string }[] = [
+  { id: 'live', label: 'Live' },
+  { id: 'avg7', label: '7-day' },
+  { id: 'avg30', label: '30-day' },
+];
+
+interface BoardRow {
+  key: string;
+  label: string;
+  sub?: string;
+  mine: boolean;      // the caller, or a team they're in — highlighted, never re-ranked
+  focus: number;
+  distracted: number;
+}
+
+/** The ranking number, and the one piece of arithmetic worth stating outright:
+ *  `distracted` is stored NEGATIVE, so focus + distracted IS "focus minus
+ *  distraction". Writing the subtraction literally would rank a distracted user
+ *  ABOVE a clean one (50 focus, −30 distracted scoring 80 instead of 20). The SQL
+ *  orders by the same expression. */
+const netOf = (r: { focus: number; distracted: number }) => r.focus + r.distracted;
+
+function metricPair(src: Record<string, unknown>, metric: Metric) {
+  const key = metric === 'live' ? 'live' : metric;
+  return {
+    focus: Number(src[`${key}_focus`]) || 0,
+    distracted: Number(src[`${key}_distracted`]) || 0,
+  };
+}
+
+function memberRow(m: MemberScore, metric: Metric, withTeam: boolean): BoardRow {
+  return {
+    // A user can be in two teams of one competition, so the team is part of the key.
+    key: `${m.team ?? ''}:${m.user_id}`,
+    label: m.display_name,
+    sub: withTeam ? m.team : undefined,
+    mine: m.is_self,
+    ...metricPair(m as unknown as Record<string, unknown>, metric),
+  };
+}
+
+function teamRow(t: CompetitionTeam, metric: Metric): BoardRow {
+  return {
+    key: t.team,
+    label: t.team,
+    // Team scores are SUMS, so size is part of reading them honestly.
+    sub: `${t.member_count} member${t.member_count === 1 ? '' : 's'}`,
+    mine: t.is_mine,
+    ...metricPair(t as unknown as Record<string, unknown>, metric),
+  };
+}
+
+/** Ranked list, highest net first. Sorting happens HERE rather than being trusted
+ *  from the server, because the same array is shown under three different metrics
+ *  and each needs its own order — one payload, three views. */
+const Board = ({ title, rows, empty }: { title: string; rows: BoardRow[]; empty?: string }) => {
+  const sorted = [...rows].sort((a, b) => netOf(b) - netOf(a));
+  return (
+    <div className="space-y-1">
+      <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-400">{title}</h4>
+      {sorted.length === 0 ? (
+        <p className="py-1.5 text-[10px] text-slate-400">{empty ?? 'Nobody here yet.'}</p>
+      ) : (
+        <div className="divide-y divide-slate-100 rounded-xl border border-slate-100">
+          {sorted.map((r, i) => (
+            <div
+              key={r.key}
+              className={`flex items-center gap-2 px-2 py-1.5 ${r.mine ? 'bg-blue-50' : ''}`}
+            >
+              <span className="w-3.5 flex-shrink-0 text-[10px] font-bold tabular-nums text-slate-400">
+                {i + 1}
+              </span>
+              <span className="min-w-0 flex-1 leading-tight">
+                <span className={`block truncate text-[11px] ${r.mine ? 'font-bold text-blue-700' : 'text-slate-700'}`}>
+                  {r.label}
+                </span>
+                {r.sub && <span className="block truncate text-[9px] text-slate-400">{r.sub}</span>}
+              </span>
+              <span className="flex-shrink-0 text-right leading-tight tabular-nums">
+                <span className="block text-[11px] font-extrabold text-slate-700">{Math.round(netOf(r))}</span>
+                <span className="block text-[9px]">
+                  <span className="text-green-600">{Math.round(r.focus)}</span>
+                  <span className="text-slate-300"> / </span>
+                  <span className="text-red-600">{Math.round(r.distracted)}</span>
+                </span>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/** Live / 7-day / 30-day. A switcher rather than three stacked lists: a competition
+ *  section holds a team board, a combined board and one board per team, and showing
+ *  each of those three times over would run to several thousand pixels in a 320px
+ *  popup. Every list asked for is here — one metric at a time, and each re-ranks
+ *  itself under the metric on show. */
+const MetricTabs = ({ value, onChange }: { value: Metric; onChange: (m: Metric) => void }) => (
+  <div className="flex gap-0.5 rounded-lg bg-slate-100 p-0.5">
+    {METRICS.map((m) => (
+      <button
+        key={m.id}
+        onClick={() => onChange(m.id)}
+        className={`flex-1 cursor-pointer rounded-md px-1 py-1 text-[10px] font-bold transition-colors ${
+          value === m.id ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+        }`}
+      >
+        {m.label}
+      </button>
+    ))}
+  </div>
+);
+
+/** Create-or-join, one field and two verbs. They are separate buttons because they
+ *  are separate intents, and the server enforces the difference: create refuses a
+ *  name that exists, join refuses one that doesn't. A typo can neither found a
+ *  one-person team nor drop you into a stranger's. */
+const NameForm = ({ placeholder, hint, busy, error, onSubmit }: {
+  placeholder: string;
+  hint: string;
+  busy: boolean;
+  error: string;
+  onSubmit: (name: string, create: boolean) => void;
+}) => {
+  const [name, setName] = useState('');
+  const clean = name.trim().toLowerCase();
+  const valid = clean.length >= 2 && clean.length <= 40;
+
+  return (
+    <div className="space-y-1.5 rounded-xl bg-slate-50 p-2">
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && valid && !busy) onSubmit(clean, false); }}
+        placeholder={placeholder}
+        className="w-full rounded-lg border border-slate-200 px-2 py-1 text-[11px] focus:border-slate-400 focus:outline-none"
+      />
+      <div className="flex gap-1">
+        <button
+          onClick={() => onSubmit(clean, false)}
+          disabled={!valid || busy}
+          className="flex-1 cursor-pointer rounded-lg bg-blue-500 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-blue-600 disabled:opacity-40"
+        >
+          Join existing
+        </button>
+        <button
+          onClick={() => onSubmit(clean, true)}
+          disabled={!valid || busy}
+          className="flex-1 cursor-pointer rounded-lg bg-slate-700 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-slate-800 disabled:opacity-40"
+        >
+          Create new
+        </button>
+      </div>
+      {error
+        ? <p className="text-[9px] font-medium text-red-500">{error}</p>
+        : <p className="text-[9px] text-slate-400">{hint}</p>}
+    </div>
+  );
+};
+
+/** One of the caller's own teams: everyone in it ranked against them. */
+const TeamSection = ({ board, busy, error, onEnroll, onLeave }: {
+  board: TeamBoard;
+  busy: boolean;
+  error: string;
+  onEnroll: (competition: string, create: boolean) => void;
+  onLeave: () => void;
+}) => {
+  const [metric, setMetric] = useState<Metric>('live');
+  const [addOpen, setAddOpen] = useState(false);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="flex min-w-0 items-center gap-1.5 text-sm font-bold text-slate-700">
+          <Users size={14} className="flex-shrink-0 text-slate-400" />
+          <span className="truncate">{board.team}</span>
+        </h3>
+        <button
+          onClick={() => setAddOpen((v) => !v)}
+          title="Enter this team into a competition"
+          className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
+            addOpen ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+          }`}
+        >
+          <Plus size={11} /> Competition
+        </button>
+      </div>
+
+      {addOpen && (
+        <NameForm
+          placeholder="competition name"
+          hint="Enters this team into the competition. Any member can do it."
+          busy={busy}
+          error={error}
+          onSubmit={onEnroll}
+        />
+      )}
+
+      <MetricTabs value={metric} onChange={setMetric} />
+      <Board
+        title="Team standings"
+        rows={board.members.map((m) => memberRow(m, metric, false))}
+        empty="No members yet."
+      />
+
+      <button
+        onClick={onLeave}
+        disabled={busy}
+        className="w-full cursor-pointer rounded-lg py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400 hover:bg-slate-50 hover:text-red-500 disabled:opacity-40"
+      >
+        Leave {board.team}
+      </button>
+    </div>
+  );
+};
+
+/** A competition: teams against teams, then everyone against everyone, then each
+ *  team's own list. All three are derived from one payload — the per-team lists are
+ *  the combined list grouped by the `team` each row carries. */
+const CompetitionSection = ({ board }: { board: CompetitionBoard }) => {
+  const [metric, setMetric] = useState<Metric>('live');
+
+  const byTeam = new Map<string, MemberScore[]>();
+  for (const m of board.members) {
+    const t = m.team ?? '—';
+    if (!byTeam.has(t)) byTeam.set(t, []);
+    byTeam.get(t)!.push(m);
+  }
+  // Follow the server's team order, so the leading team's roster comes first.
+  const teamOrder = board.teams.map((t) => t.team).filter((t) => byTeam.has(t));
+
+  return (
+    <div className="space-y-3">
+      <h3 className="flex min-w-0 items-center gap-1.5 text-sm font-bold text-slate-700">
+        <Trophy size={14} className="flex-shrink-0 text-amber-500" />
+        <span className="truncate">{board.competition}</span>
+      </h3>
+
+      <MetricTabs value={metric} onChange={setMetric} />
+
+      <Board
+        title="Teams"
+        rows={board.teams.map((t) => teamRow(t, metric))}
+        empty="No teams entered yet."
+      />
+      <Board
+        title="Everyone"
+        rows={board.members.map((m) => memberRow(m, metric, true))}
+        empty="No participants yet."
+      />
+      {teamOrder.map((t) => (
+        <Board
+          key={t}
+          title={t}
+          rows={(byTeam.get(t) ?? []).map((m) => memberRow(m, metric, false))}
+        />
+      ))}
+    </div>
+  );
+};
+
+/** The boards, read from the cache the server overwrites on every reply. Watching
+ *  storage rather than asking means a membership change or the 1-minute post floor
+ *  repaints an open popup with no request of its own. */
+function useBoards() {
+  const [boards, setBoards] = useState<{ teams: TeamBoard[]; competitions: CompetitionBoard[] }>(
+    { teams: [], competitions: [] },
+  );
+  useEffect(() => {
+    const load = () => chrome.storage.local.get([TEAMS_KEY], (r) => {
+      const b = r[TEAMS_KEY] as { teams?: TeamBoard[]; competitions?: CompetitionBoard[] } | undefined;
+      setBoards({ teams: b?.teams ?? [], competitions: b?.competitions ?? [] });
+    });
+    load();
+    const listener = (changes: Record<string, unknown>, area: string) => {
+      if (area === 'local' && changes[TEAMS_KEY]) load();
+    };
+    chrome.storage.onChanged.addListener(listener);
+    return () => chrome.storage.onChanged.removeListener(listener);
+  }, []);
+  return boards;
+}
+
 // ── Main tab ──────────────────────────────────────────────────────────────────
 const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelistToggle }: {
   state: SessionState;
@@ -383,16 +705,126 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
   currentTabUrl: string;
   onWhitelistToggle: () => void;
 }) => {
+  const boards = useBoards();
+  // Sections are one-at-a-time rather than stacked. Personal alone is roughly a
+  // popup's height, and every team and competition adds several boards behind it;
+  // stacked, a user in one competition would scroll past everything to reach
+  // anything. The pills keep all of them one tap away.
+  const [section, setSection] = useState('personal');
+  const [joinOpen, setJoinOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  // Every team action returns the full state, which the background writes into the
+  // storage the boards watch — so a successful call repaints by itself and there is
+  // nothing to refetch here.
+  const act = (msg: MessageType, onDone?: () => void) => {
+    setBusy(true);
+    setError('');
+    chrome.runtime.sendMessage(msg, (res?: ServerActionResult) => {
+      void chrome.runtime.lastError;
+      setBusy(false);
+      if (!res?.ok) { setError(res?.error ?? 'Could not reach the server.'); return; }
+      setError('');
+      onDone?.();
+    });
+  };
+
   const isWhitelisted = currentTabUrl.length > 0 &&
     settings.allowedDomains.some(d => d.trim() !== '' && currentTabUrl.includes(d.trim()));
 
+  const teamSection = boards.teams.find((t) => `team:${t.team}` === section);
+  const compSection = boards.competitions.find((c) => `comp:${c.competition}` === section);
+  // Leaving the team you were looking at removes its pill; fall back rather than
+  // rendering a section that no longer exists.
+  const active = teamSection || compSection ? section : 'personal';
+
+  const pill = (key: string, label: string, icon?: React.ReactNode) => (
+    <button
+      key={key}
+      onClick={() => { setSection(key); setError(''); }}
+      className={`flex max-w-[120px] flex-shrink-0 cursor-pointer items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold transition-colors ${
+        active === key ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+      }`}
+    >
+      {icon}
+      <span className="truncate">{label}</span>
+    </button>
+  );
+
   return (
   <div className="space-y-4">
-    {/* Temporary: see BUILD_TAG. */}
-    <div className="rounded-lg bg-indigo-50 px-2 py-1 text-center text-[10px] font-bold text-indigo-600">
-      {BUILD_TAG}
+
+    {/* Section switcher, above everything it switches between. The trailing + is
+        how you get your first team, so it is present even with no teams at all. */}
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-1">
+        {pill('personal', 'Personal')}
+        {boards.teams.map((t) => pill(`team:${t.team}`, t.team, <Users size={10} />))}
+        {boards.competitions.map((c) => pill(`comp:${c.competition}`, c.competition, <Trophy size={10} />))}
+        <button
+          onClick={() => { setJoinOpen((v) => !v); setError(''); }}
+          title="Create a team, or join one that exists"
+          className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold transition-colors ${
+            joinOpen ? 'bg-blue-500 text-white' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+          }`}
+        >
+          <Plus size={11} /> Team
+        </button>
+      </div>
+      {joinOpen && (
+        <NameForm
+          placeholder="team name"
+          hint="Anyone who knows the name can join, so pick one you'll share."
+          busy={busy}
+          error={error}
+          onSubmit={(name, create) =>
+            act({ type: 'SERVER_JOIN_TEAM', team: name, create }, () => {
+              setJoinOpen(false);
+              setSection(`team:${name}`);
+            })
+          }
+        />
+      )}
     </div>
 
+    {teamSection && active !== 'personal' ? (
+      <TeamSection
+        board={teamSection}
+        busy={busy}
+        error={error}
+        onEnroll={(competition, create) =>
+          act({ type: 'SERVER_ENROLL_TEAM', team: teamSection.team, competition, create },
+              () => setSection(`comp:${competition}`))
+        }
+        onLeave={() =>
+          act({ type: 'SERVER_LEAVE_TEAM', team: teamSection.team }, () => setSection('personal'))
+        }
+      />
+    ) : compSection && active !== 'personal' ? (
+      <CompetitionSection board={compSection} />
+    ) : (
+      <PersonalSection
+        state={state}
+        currentTabDomain={currentTabDomain}
+        isWhitelisted={isWhitelisted}
+        onWhitelistToggle={onWhitelistToggle}
+      />
+    )}
+  </div>
+  );
+};
+
+/** Everything the Main tab showed before teams existed, unchanged and now one
+ *  section among several. */
+const PersonalSection = ({ state, currentTabDomain, isWhitelisted, onWhitelistToggle }: {
+  state: SessionState;
+  currentTabDomain: string;
+  isWhitelisted: boolean;
+  onWhitelistToggle: () => void;
+}) => {
+  return (
+  <div className="space-y-4">
     <div className="flex items-center justify-between">
       <span className="text-sm text-slate-500 font-medium">Status</span>
       <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
@@ -442,24 +874,37 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
       </div>
     </div>
 
-    {/* Directly under the scores it syncs, and above the history it feeds. Sits on
-        the main page rather than in Settings: signing in is a first-run action that
-        has to be findable, not a preference buried behind a tab. */}
-    <ServerAccount />
-
     <DailyHistory state={state} />
 
   </div>
   );
 };
 
-// ── Account & data sync ───────────────────────────────────────────────────────
+// ── Account ───────────────────────────────────────────────────────────────────
 // Sign-in is dispatched to the BACKGROUND, not run here: launchWebAuthFlow opens a
 // window, which closes the popup, which would kill the flow before Google
 // redirects back. The background survives that, so the popup only ever asks.
-const ServerAccount = () => {
+//
+// The status lives in the ROOT rather than in a component inside a tab, because it
+// now GATES the entire popup: signed out, the only thing rendered is the sign-in
+// button. Anything that needs it must therefore be above the tab bar.
+
+/** Google's four-colour "G". Not in lucide — it dropped brand marks — and a
+ *  generic key/login glyph would leave the button looking like it signs you into
+ *  something else. Inline SVG so it survives with no network and no asset step. */
+const GoogleIcon = ({ size = 16 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true" className="flex-shrink-0">
+    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
+    <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
+    <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24s.92 7.54 2.56 10.78l7.97-6.19z" />
+    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
+  </svg>
+);
+
+function useServerAccount() {
   const [status, setStatus] = useState<ServerStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   const ask = (type: 'SERVER_STATUS' | 'SERVER_SIGN_IN' | 'SERVER_SIGN_OUT') => {
     setBusy(type !== 'SERVER_STATUS');
@@ -467,93 +912,77 @@ const ServerAccount = () => {
       void chrome.runtime.lastError;
       setBusy(false);
       if (res) setStatus(res);
+      // A sign-in that comes back still signed out failed somewhere in the OAuth
+      // round trip. ServerStatus carries no error channel, so infer it here —
+      // otherwise the button simply goes quiet and reads as broken.
+      setFailed(type === 'SERVER_SIGN_IN' && !!res && !res.signedIn);
     });
   };
 
   useEffect(() => { ask('SERVER_STATUS'); }, []);
 
-  // An unconfigured build has no server at all — say so plainly rather than
-  // offering a sign-in button that can only fail.
-  if (status && !status.configured) {
-    return (
-      <section className="space-y-2">
-        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Data sync</h3>
-        <p className="text-[9px] text-slate-400">
-          Not configured in this build. Fill in <code>src/extension/server/config.ts</code> and
-          rebuild to enable syncing — see <code>supabase/README.md</code>.
+  return { status, busy, failed, ask };
+}
+
+/** The whole popup when signed out: nothing but the button. No Working toggle, no
+ *  tabs, no scores — an account is a precondition, not a feature, so offering the
+ *  controls would imply the extension is already doing something. */
+const SignInScreen = ({ busy, failed, onSignIn }: {
+  busy: boolean;
+  failed: boolean;
+  onSignIn: () => void;
+}) => (
+  <div className="w-[320px] bg-white text-slate-900 font-sans">
+    <header className="border-b border-slate-100 px-4 pt-4 pb-3">
+      <h1 className="flex items-center gap-2 text-lg font-bold">
+        <Activity className="text-slate-300" size={20} />
+        Focus
+      </h1>
+    </header>
+    <div className="space-y-3 p-4">
+      <button
+        onClick={onSignIn}
+        disabled={busy}
+        className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+      >
+        <GoogleIcon size={16} />
+        {busy ? 'Signing in…' : 'Sign in with Google'}
+      </button>
+      {failed && (
+        <p className="text-[10px] font-medium text-red-500">
+          Sign-in didn't complete — try again.
         </p>
-      </section>
-    );
-  }
-
-  const summary = status?.summary as {
-    live_focus?: number; live_distracted?: number;
-    avg7_focus?: number; avg30_focus?: number;
-  } | null;
-
-  return (
-    <section className="space-y-2">
-      <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-        Data sync — sign in
-      </h3>
-
-      {status?.signedIn ? (
-        <>
-          <div className="flex items-center justify-between gap-2">
-            <span className="min-w-0 flex-1 text-[11px] leading-tight text-slate-600">
-              Signed in
-              <br />
-              <span className="block truncate text-[10px] text-slate-400">{status.email}</span>
-            </span>
-            <button
-              onClick={() => ask('SERVER_SIGN_OUT')}
-              disabled={busy}
-              className="flex-shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-200 disabled:opacity-40 cursor-pointer"
-            >
-              <LogOut size={11} className="inline" /> Sign out
-            </button>
-          </div>
-          {summary && (
-            <div className="rounded-xl bg-slate-50 p-2 text-[10px] text-slate-500">
-              <div className="flex justify-between">
-                <span>Server live score</span>
-                <span className="font-bold tabular-nums text-slate-700">
-                  {Math.round(summary.live_focus ?? 0)} / {Math.round(summary.live_distracted ?? 0)}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>7-day average (focus)</span>
-                <span className="font-bold tabular-nums text-slate-700">{Math.round(summary.avg7_focus ?? 0)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>30-day average (focus)</span>
-                <span className="font-bold tabular-nums text-slate-700">{Math.round(summary.avg30_focus ?? 0)}</span>
-              </div>
-            </div>
-          )}
-          <p className="text-[9px] text-slate-400">
-            Scores and your whitelist are saved to the study server. Days roll over at 01:00 local time.
-          </p>
-        </>
-      ) : (
-        <>
-          <button
-            onClick={() => ask('SERVER_SIGN_IN')}
-            disabled={busy}
-            className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-700 px-3 py-2 text-sm font-bold text-white shadow-sm hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
-          >
-            <LogIn size={14} /> {busy ? 'Signing in…' : 'Sign in with Google'}
-          </button>
-          <p className="text-[9px] text-slate-400">
-            Optional. Signing in saves your daily scores, averages and whitelisted domains to the
-            study server so they survive a reinstall and sync across devices. The extension works
-            fully without it.
-          </p>
-        </>
       )}
-    </section>
-  );
-};
+      <p className="text-[10px] leading-snug text-slate-400">
+        Focus keeps your scores, averages and whitelisted pages on the study server, so sign in
+        before you start. Your data follows your account across devices and reinstalls.
+      </p>
+    </div>
+  </div>
+);
+
+/** Signed-in state, condensed to one line above the tab bar: who you are and how
+ *  to leave. Everything else the server knows is already on the Main tab. */
+const AccountRow = ({ email, busy, onSignOut }: {
+  email: string;
+  busy: boolean;
+  onSignOut: () => void;
+}) => (
+  <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-4 py-1.5">
+    <GoogleIcon size={13} />
+    <span className="min-w-0 flex-1 truncate text-[10px] text-slate-500" title={email}>
+      {email}
+    </span>
+    <button
+      onClick={onSignOut}
+      disabled={busy}
+      title="Sign out — stops syncing to the study server"
+      className="flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-lg bg-white px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-slate-500 hover:bg-slate-200 disabled:opacity-40"
+    >
+      <LogOut size={10} /> Sign out
+    </button>
+  </div>
+);
 
 // ── Settings tab ──────────────────────────────────────────────────────────────
 const SettingsTab = ({ settings, onChange }: {
@@ -1006,6 +1435,7 @@ const Popup = () => {
   const [currentTabUrl, setCurrentTabUrl] = useState('');
   const [currentTabDomain, setCurrentTabDomain] = useState('');
   const [currentTabId, setCurrentTabId] = useState<number | null>(null);
+  const { status, busy: accountBusy, failed: signInFailed, ask } = useServerAccount();
 
   useEffect(() => {
     // Load session state
@@ -1082,6 +1512,24 @@ const Popup = () => {
     }
   };
 
+  // Account first: signed out, nothing else renders. Waiting for the status before
+  // deciding avoids flashing the sign-in screen at an already-signed-in user on
+  // every open.
+  //
+  // Gated ONLY when a server is actually configured. A build with an empty
+  // config.ts (a fresh clone) has no sign-in to complete, and locking it behind a
+  // button that can only fail would brick the offline extension.
+  if (!status) return <div className="p-4 text-sm text-slate-500">Loading…</div>;
+  if (status.configured && !status.signedIn) {
+    return (
+      <SignInScreen
+        busy={accountBusy}
+        failed={signInFailed}
+        onSignIn={() => ask('SERVER_SIGN_IN')}
+      />
+    );
+  }
+
   if (!state) return <div className="p-4 text-sm text-slate-500">Loading…</div>;
 
   return (
@@ -1139,6 +1587,14 @@ const Popup = () => {
           </div>
         </div>
       </header>
+
+      {status.signedIn && (
+        <AccountRow
+          email={status.email}
+          busy={accountBusy}
+          onSignOut={() => ask('SERVER_SIGN_OUT')}
+        />
+      )}
 
       {/* Tab bar */}
       <div className="flex border-b border-slate-100">

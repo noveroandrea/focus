@@ -49,6 +49,11 @@ export const PENDING_KEY = 'focusServerPending';
 /** Storage key holding the last summary the server returned. */
 export const SUMMARY_KEY = 'focusServerSummary';
 
+/** Storage key holding the last team / competition leaderboards the server sent.
+ *  A cache like all the others: the server recomputes them on every reply, and the
+ *  popup renders whatever is here so it can paint before a request returns. */
+export const TEAMS_KEY = 'focusServerTeams';
+
 /** Storage key holding a whitelist edit not yet accepted by the server. Present
  *  only between the user's edit and the next successful post. */
 export const PENDING_DOMAINS_KEY = 'focusServerPendingDomains';

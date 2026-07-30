@@ -4,11 +4,12 @@
 //  One endpoint does the work: rpc/apply_score_delta. It takes a DELTA (+focus /
 //  −distracted) and returns the whole summary, so "push my points" and "tell me
 //  where I stand" are the same round trip. A (0, 0) delta is therefore a pure read,
-//  and one endpoint covers all three moments the client checks in:
+//  and one endpoint covers every moment the client checks in:
 //
 //    • a score change            (queueDelta, debounced)
 //    • the browser opening       (background init + onStartup)
 //    • the Working button        (the forceActive toggle in background.ts)
+//    • a minute since the last   (the chrome.alarms floor below)
 //
 //  THE CLIENT KNOWS NOTHING ABOUT ROLLOVER. Days are ended by the server's cron job
 //  on its own schedule; nothing here tracks, triggers or even asks about it. The
@@ -41,7 +42,7 @@
 
 import { DayScore, HISTORY_KEY, Settings, DEFAULT_SETTINGS, weekdayName, round2 } from '../../types';
 import {
-  SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY,
+  SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY, TEAMS_KEY,
   PENDING_DOMAINS_KEY, SERVER_DOMAINS_KEY, isServerConfigured,
 } from './config';
 import { getAccessToken, isSignedIn } from './auth';
@@ -68,12 +69,55 @@ export interface ServerDay {
   distracted_score: number;
 }
 
+/** One participant on a leaderboard, as build_teams() sends them.
+ *
+ *  `display_name` is the local part of their email — see the PII note in the teams
+ *  migration. `is_self` marks the caller's own row so the popup can highlight it
+ *  without matching ids. `team` is present only inside a competition, where one list
+ *  spans several teams. */
+export interface MemberScore {
+  user_id: string;
+  display_name: string;
+  is_self: boolean;
+  team?: string;
+  live_focus: number; live_distracted: number;
+  avg7_focus: number; avg7_distracted: number;
+  avg30_focus: number; avg30_distracted: number;
+}
+
+/** A team's board: everyone in it, including you. */
+export interface TeamBoard {
+  team: string;
+  members: MemberScore[];
+}
+
+/** One team's summed scores, for the team-vs-team board inside a competition. */
+export interface CompetitionTeam {
+  team: string;
+  is_mine: boolean;
+  member_count: number;
+  live_focus: number; live_distracted: number;
+  avg7_focus: number; avg7_distracted: number;
+  avg30_focus: number; avg30_distracted: number;
+}
+
+/** A competition: the team-level board, plus every participant across every team in
+ *  it. Per-team member lists are NOT a separate field — each member row carries its
+ *  `team`, and the popup groups by it. */
+export interface CompetitionBoard {
+  competition: string;
+  teams: CompetitionTeam[];
+  members: MemberScore[];
+}
+
 /** The full payload from apply_score_delta / get_state. The server is the source of
- *  truth for all three parts; the local copies are caches it overwrites. */
+ *  truth for every part; the local copies are caches it overwrites. */
 export interface ServerState {
   summary: ServerSummary | null;
   domains: string[];
   days: ServerDay[];
+  teams: TeamBoard[];
+  competitions: CompetitionBoard[];
 }
 
 interface Pending {
@@ -111,6 +155,39 @@ const FLUSH_DEBOUNCE_MS = 1000;
 
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let inFlight: Promise<ServerState | null> | null = null;
+
+// ── The floor: never more than a minute without a post ────────────────────────
+// The triggers above are all things the USER does, so a session with no score
+// changes — reading a PDF, another device doing the earning, simply idle — could
+// sit indefinitely on a stale live score, stale averages and a day the server has
+// already rolled over. This is the backstop: one post a minute, no matter what.
+//
+// Reset by every post rather than free-running, so it is a "time since last
+// contact" floor and not an extra request on top of a busy session. Re-arming with
+// the same alarm name replaces the pending one, which IS the reset.
+//
+// chrome.alarms, NOT setTimeout, for the reason that shapes this whole codebase: an
+// MV3 service worker is suspended between events and its timers die with it.
+// An alarm survives suspension and wakes the worker to deliver it, which is the only
+// way a periodic task runs at all here. Also why one minute is the shortest useful
+// period — Chrome clamps alarms below that.
+const PERIODIC_ALARM = 'focus-sync-post';
+const PERIODIC_POST_MINUTES = 1;
+
+function armPeriodicPost() {
+  chrome.alarms.create(PERIODIC_ALARM, { delayInMinutes: PERIODIC_POST_MINUTES });
+}
+
+function clearPeriodicPost() {
+  chrome.alarms.clear(PERIODIC_ALARM);
+}
+
+// Registered at module scope, which for the service worker means synchronously at
+// top level — a listener added later would not exist yet when Chrome wakes the
+// worker to deliver the alarm, and the event would be dropped.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === PERIODIC_ALARM) void flush();
+});
 
 // ── Pending deltas ────────────────────────────────────────────────────────────
 function readPending(): Promise<Pending> {
@@ -215,6 +292,15 @@ async function applyState(next: ServerState | null): Promise<void> {
     }))
     .sort((a, b) => a.date.localeCompare(b.date)); // oldest-first, as stored locally
   chrome.storage.local.set({ [HISTORY_KEY]: history });
+
+  // Leaderboards → their own key. Written unconditionally, including when empty:
+  // leaving your last team has to clear the board, not leave the old one on screen.
+  chrome.storage.local.set({
+    [TEAMS_KEY]: {
+      teams: Array.isArray(next.teams) ? next.teams : [],
+      competitions: Array.isArray(next.competitions) ? next.competitions : [],
+    },
+  });
 }
 
 /** The last full state the server sent, from memory or storage. */
@@ -287,7 +373,16 @@ async function reconcileScores(next: ServerState | null): Promise<void> {
  *  request rather than racing two deltas. */
 export async function flush(): Promise<ServerState | null> {
   if (!isServerConfigured()) return null;
-  if (!(await isSignedIn())) return null;
+  if (!(await isSignedIn())) {
+    // Stop the cycle instead of waking the worker every minute to do nothing. It
+    // restarts on its own: signing in posts, and posting arms the alarm again.
+    clearPeriodicPost();
+    return null;
+  }
+
+  // Before the in-flight check, not after: a caller that joins an existing request
+  // has still made contact, and the point is time since the last one.
+  armPeriodicPost();
   if (inFlight) return inFlight;
 
   inFlight = (async () => {
@@ -366,6 +461,63 @@ export async function queueDelta(focusDelta: number, distractedDelta: number): P
   // suspension before the timer fires costs nothing but latency.
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = setTimeout(() => { flushTimer = null; void flush(); }, FLUSH_DEBOUNCE_MS);
+}
+
+// ── Teams and competitions ────────────────────────────────────────────────────
+// Each of these RPCs returns the same full state every other call returns, so a
+// membership change repaints the whole popup — new board included — from its own
+// reply. No follow-up fetch, no window where the UI and the server disagree.
+//
+// Errors are surfaced rather than swallowed, unlike flush(): the user typed a name
+// and pressed a button, so "that team already exists" has to reach them. Postgres
+// raises those as a JSON body with a `message`, which is what gets returned here.
+export interface TeamActionResult {
+  ok: boolean;
+  error?: string;
+}
+
+async function teamRpc(fn: string, body: Record<string, unknown>): Promise<TeamActionResult> {
+  if (!isServerConfigured()) return { ok: false, error: 'No server configured in this build.' };
+  if (!(await isSignedIn())) return { ok: false, error: 'Sign in first.' };
+  try {
+    const res = await authedFetch(`/rest/v1/rpc/${fn}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    if (!res) return { ok: false, error: 'Sign in first.' };
+    if (!res.ok) {
+      // PostgREST wraps a RAISE as {"message": "...", "code": "..."}; the raised text
+      // is already written for a human, so it is shown as-is.
+      let msg = `Request failed (${res.status})`;
+      try {
+        const j = await res.json() as { message?: string };
+        if (j?.message) msg = j.message;
+      } catch { /* non-JSON body — keep the status line */ }
+      return { ok: false, error: msg };
+    }
+    const state = (await res.json()) as ServerState | null;
+    await applyState(state);
+    await reconcileScores(state);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: `Offline — ${String(err).slice(0, 80)}` };
+  }
+}
+
+/** Join a team, or create it first. `create` refuses a name that already exists and
+ *  join refuses one that doesn't — that separation is the point of the two buttons. */
+export function joinTeam(team: string, create: boolean): Promise<TeamActionResult> {
+  return teamRpc('join_team', { p_team: team, p_create: create });
+}
+
+/** Leave a team. The team itself survives even if it empties. */
+export function leaveTeam(team: string): Promise<TeamActionResult> {
+  return teamRpc('leave_team', { p_team: team });
+}
+
+/** Enter one of your teams into a competition, creating the competition if asked. */
+export function enrollTeam(team: string, competition: string, create: boolean): Promise<TeamActionResult> {
+  return teamRpc('enroll_team', { p_team: team, p_competition: competition, p_create: create });
 }
 
  /** Read-only fetch of the full state — no delta, no write, no side effects.
