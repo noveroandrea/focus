@@ -25,6 +25,9 @@
 --
 --  YOUR OWN SCORES ARE NOT TOUCHED unless you set c_seed_my_scores := true below.
 --
+--  Every seeded team gets the password in c_team_password (default `demo1234`), so
+--  you can also join them from the popup by hand.
+--
 --  Section 7 undoes everything. Read it before you run section 1.
 -- ═══════════════════════════════════════════════════════════════════════════════
 
@@ -37,6 +40,7 @@ declare
   c_timezone        text    := 'Europe/Rome';            -- drives the 01:00 boundary
   c_days            int     := 35;                       -- days of history per fake user
   c_seed_my_scores  boolean := false;                    -- true = overwrite YOUR scores too
+  c_team_password   text    := 'demo1234';               -- password on every seeded team
   -- ────────────────────────────────────────────────────────────────────────────
 
   v_me    uuid;
@@ -176,10 +180,16 @@ begin
   end if;
 
   -- ═══ 4. Teams ═════════════════════════════════════════════════════════════════
-  insert into public.teams (name, created_by) values
-    ('math_students',    v_me),
-    ('psycho_students',  (select id from auth.users where email = 'carla@example.com')),
-    ('physics_students', (select id from auth.users where email = 'fatima@example.com'))
+  -- Every team needs a password now. These are seed fixtures, so they all share one
+  -- — c_team_password below. To test the join flow from the extension, delete a team
+  -- here and recreate it through the popup instead.
+  insert into public.teams (name, created_by, password_hash) values
+    ('math_students',    v_me,
+     extensions.crypt(c_team_password, extensions.gen_salt('bf'))),
+    ('psycho_students',  (select id from auth.users where email = 'carla@example.com'),
+     extensions.crypt(c_team_password, extensions.gen_salt('bf'))),
+    ('physics_students', (select id from auth.users where email = 'fatima@example.com'),
+     extensions.crypt(c_team_password, extensions.gen_salt('bf')))
   on conflict (name) do nothing;
 
   -- Memberships. The (user_id, team) primary key makes a re-run idempotent for free.

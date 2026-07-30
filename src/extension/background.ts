@@ -13,7 +13,7 @@ import {
 // the user has signed in, so the extension is fully functional without a server.
 import {
   initSync, queueDelta, queueDomains, flush, getCachedSummary,
-  joinTeam, leaveTeam, enrollTeam,
+  joinTeam, leaveTeam, enrollTeam, leaveCompetition,
 } from './server/sync';
 import { signIn, signOut, getSession } from './server/auth';
 import { isServerConfigured } from './server/config';
@@ -524,7 +524,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
     // storage keys the popup already watches — so the reply repaints the boards with
     // no second request.
     case 'SERVER_JOIN_TEAM':
-      joinTeam(message.team, message.create).then(sendResponse);
+      joinTeam(message.team, message.create, message.password).then(sendResponse);
       break;
 
     case 'SERVER_LEAVE_TEAM':
@@ -533,6 +533,10 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
 
     case 'SERVER_ENROLL_TEAM':
       enrollTeam(message.team, message.competition, message.create).then(sendResponse);
+      break;
+
+    case 'SERVER_LEAVE_COMPETITION':
+      leaveCompetition(message.team, message.competition).then(sendResponse);
       break;
   }
   return true;

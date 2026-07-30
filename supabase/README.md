@@ -58,10 +58,23 @@ Three more write endpoints, all returning that same full state so a membership c
 repaints everything from its own reply:
 
 ```
-POST /rest/v1/rpc/join_team     { p_team, p_create }
-POST /rest/v1/rpc/leave_team    { p_team }
-POST /rest/v1/rpc/enroll_team   { p_team, p_competition, p_create }
+POST /rest/v1/rpc/join_team          { p_team, p_create, p_password }
+POST /rest/v1/rpc/leave_team         { p_team }
+POST /rest/v1/rpc/enroll_team        { p_team, p_competition, p_create }
+POST /rest/v1/rpc/leave_competition  { p_team, p_competition }
 ```
+
+**Teams have a password** (bcrypt, `teams.password_hash`). Creating sets it, joining
+must match it — a name alone is no longer enough to reach a team's scores. The hash
+is unreachable by any client: `SELECT` on `public.teams` is revoked and re-granted
+column by column, omitting `password_hash`, so PostgREST cannot be asked for it at
+any URL. That is also why `join_team` is the one membership function that is
+`SECURITY DEFINER` — it has to read the column nobody else can — and it keeps the
+safe shape (no `user_id` parameter, caller from `auth.uid()`, revoked from `anon`).
+
+**Competitions have no password.** Any team can still enter any competition by name,
+and entering exposes its members to everyone already in it. Whether that matters
+depends on how guessable your competition names are; the same pattern would close it.
 
 `p_create` is the difference between two intents, not a convenience flag: creating
 refuses a name that already exists, joining refuses one that doesn't. A mistyped

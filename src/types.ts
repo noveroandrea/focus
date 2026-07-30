@@ -185,9 +185,10 @@ export type MessageType =
   | { type: 'SERVER_STATUS' }
   // Teams. Routed through the background like everything else that touches the
   // server, so one module owns the session and the storage caches.
-  | { type: 'SERVER_JOIN_TEAM'; team: string; create: boolean }
+  | { type: 'SERVER_JOIN_TEAM'; team: string; create: boolean; password: string }
   | { type: 'SERVER_LEAVE_TEAM'; team: string }
-  | { type: 'SERVER_ENROLL_TEAM'; team: string; competition: string; create: boolean };
+  | { type: 'SERVER_ENROLL_TEAM'; team: string; competition: string; create: boolean }
+  | { type: 'SERVER_LEAVE_COMPETITION'; team: string; competition: string };
 
 /** Reply to the three team messages. `error` carries the database's own message
  *  ("Team X already exists — join it instead"), which is written to be shown. */

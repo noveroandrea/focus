@@ -505,9 +505,13 @@ async function teamRpc(fn: string, body: Record<string, unknown>): Promise<TeamA
 }
 
 /** Join a team, or create it first. `create` refuses a name that already exists and
- *  join refuses one that doesn't — that separation is the point of the two buttons. */
-export function joinTeam(team: string, create: boolean): Promise<TeamActionResult> {
-  return teamRpc('join_team', { p_team: team, p_create: create });
+ *  join refuses one that doesn't — that separation is the point of the two buttons.
+ *
+ *  The password is the team's shared secret: creating sets it, joining must match
+ *  it. Sent in the request body over TLS and compared against a bcrypt hash the
+ *  server never lets any client read. */
+export function joinTeam(team: string, create: boolean, password: string): Promise<TeamActionResult> {
+  return teamRpc('join_team', { p_team: team, p_create: create, p_password: password });
 }
 
 /** Leave a team. The team itself survives even if it empties. */
@@ -518,6 +522,12 @@ export function leaveTeam(team: string): Promise<TeamActionResult> {
 /** Enter one of your teams into a competition, creating the competition if asked. */
 export function enrollTeam(team: string, competition: string, create: boolean): Promise<TeamActionResult> {
   return teamRpc('enroll_team', { p_team: team, p_competition: competition, p_create: create });
+}
+
+/** Withdraw one of your teams from a competition. Mirrors enrolling, including who
+ *  is allowed to do it: any member of the team. */
+export function leaveCompetition(team: string, competition: string): Promise<TeamActionResult> {
+  return teamRpc('leave_competition', { p_team: team, p_competition: competition });
 }
 
  /** Read-only fetch of the full state — no delta, no write, no side effects.

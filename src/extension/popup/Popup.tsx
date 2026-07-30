@@ -462,40 +462,74 @@ function teamRow(t: CompetitionTeam, metric: Metric): BoardRow {
   };
 }
 
-/** Ranked list, highest net first. Sorting happens HERE rather than being trusted
- *  from the server, because the same array is shown under three different metrics
- *  and each needs its own order — one payload, three views. */
-const Board = ({ title, rows, empty }: { title: string; rows: BoardRow[]; empty?: string }) => {
+/** Ranked diverging bar chart, highest net first — the horizontal twin of the
+ *  personal ScoreChart. Focus grows RIGHT of the zero line, distraction LEFT.
+ *
+ *  That mirroring is not decoration. FOCUS_COLOR and DISTRACTED_COLOR are ΔE 4.2
+ *  apart under deuteranopia — as a colour pair they are indistinguishable to a
+ *  red/green colourblind reader. It is safe here for the same reason it is safe in
+ *  the vertical chart: the two series can never cross the midpoint, so SIDE carries
+ *  identity and colour merely reinforces it. Anything that lets a bar appear on the
+ *  wrong side of zero breaks that and must be re-validated.
+ *
+ *  Both series share ONE magnitude scale so the halves stay comparable, and the
+ *  scale is per-chart: each metric has its own range, and normalising 30-day
+ *  averages against live scores would flatten them to nothing.
+ *
+ *  Sorting happens here, not on the server: one payload is drawn under three
+ *  metrics and each needs its own order. */
+const BarBoard = ({ title, rows, empty }: { title: string; rows: BoardRow[]; empty?: string }) => {
   const sorted = [...rows].sort((a, b) => netOf(b) - netOf(a));
+  const max = Math.max(1, ...sorted.map((r) => Math.max(Math.abs(r.focus), Math.abs(r.distracted))));
+  // 49% rather than 50% per side: the fills start 1px off centre (that inset is the
+  // 2px gap that keeps them from fusing into one shape across the midpoint), so a
+  // full-scale bar at 50% would overhang the track by that same pixel.
+  const pct = (v: number) => `${(Math.min(Math.abs(v), max) / max) * 49}%`;
+
   return (
-    <div className="space-y-1">
+    <div className="space-y-1.5">
       <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-400">{title}</h4>
       {sorted.length === 0 ? (
-        <p className="py-1.5 text-[10px] text-slate-400">{empty ?? 'Nobody here yet.'}</p>
+        <p className="py-1 text-[10px] text-slate-400">{empty ?? 'Nobody here yet.'}</p>
       ) : (
-        <div className="divide-y divide-slate-100 rounded-xl border border-slate-100">
+        <div className="space-y-1.5">
           {sorted.map((r, i) => (
-            <div
-              key={r.key}
-              className={`flex items-center gap-2 px-2 py-1.5 ${r.mine ? 'bg-blue-50' : ''}`}
-            >
-              <span className="w-3.5 flex-shrink-0 text-[10px] font-bold tabular-nums text-slate-400">
-                {i + 1}
-              </span>
-              <span className="min-w-0 flex-1 leading-tight">
-                <span className={`block truncate text-[11px] ${r.mine ? 'font-bold text-blue-700' : 'text-slate-700'}`}>
-                  {r.label}
+            <div key={r.key} className={r.mine ? '-mx-1 rounded-lg bg-blue-50 px-1 py-0.5' : ''}>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="min-w-0 truncate text-[10px] leading-tight">
+                  <span className="text-slate-400">{i + 1}. </span>
+                  <span className={r.mine ? 'font-bold text-blue-700' : 'text-slate-600'}>{r.label}</span>
+                  {r.sub && <span className="text-slate-400"> · {r.sub}</span>}
                 </span>
-                {r.sub && <span className="block truncate text-[9px] text-slate-400">{r.sub}</span>}
-              </span>
-              <span className="flex-shrink-0 text-right leading-tight tabular-nums">
-                <span className="block text-[11px] font-extrabold text-slate-700">{Math.round(netOf(r))}</span>
-                <span className="block text-[9px]">
-                  <span className="text-green-600">{Math.round(r.focus)}</span>
-                  <span className="text-slate-300"> / </span>
-                  <span className="text-red-600">{Math.round(r.distracted)}</span>
+                {/* The net is direct-labelled on every row because it is the value the
+                    ranking uses — without it the order looks arbitrary whenever two
+                    bars are close. The component focus/distracted figures are not
+                    labelled; the bars carry those. */}
+                <span className="flex-shrink-0 text-[10px] font-extrabold tabular-nums text-slate-700">
+                  {Math.round(netOf(r))}
                 </span>
-              </span>
+              </div>
+              <div className="relative h-2.5 w-full">
+                <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-200" />
+                <div
+                  className="absolute inset-y-0"
+                  style={{
+                    right: 'calc(50% + 1px)',
+                    width: pct(r.distracted),
+                    background: DISTRACTED_COLOR,
+                    borderRadius: '4px 0 0 4px',
+                  }}
+                />
+                <div
+                  className="absolute inset-y-0"
+                  style={{
+                    left: 'calc(50% + 1px)',
+                    width: pct(r.focus),
+                    background: FOCUS_COLOR,
+                    borderRadius: '0 4px 4px 0',
+                  }}
+                />
+              </div>
             </div>
           ))}
         </div>
@@ -504,24 +538,25 @@ const Board = ({ title, rows, empty }: { title: string; rows: BoardRow[]; empty?
   );
 };
 
-/** Live / 7-day / 30-day. A switcher rather than three stacked lists: a competition
- *  section holds a team board, a combined board and one board per team, and showing
- *  each of those three times over would run to several thousand pixels in a 320px
- *  popup. Every list asked for is here — one metric at a time, and each re-ranks
- *  itself under the metric on show. */
-const MetricTabs = ({ value, onChange }: { value: Metric; onChange: (m: Metric) => void }) => (
-  <div className="flex gap-0.5 rounded-lg bg-slate-100 p-0.5">
-    {METRICS.map((m) => (
-      <button
-        key={m.id}
-        onClick={() => onChange(m.id)}
-        className={`flex-1 cursor-pointer rounded-md px-1 py-1 text-[10px] font-bold transition-colors ${
-          value === m.id ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-        }`}
-      >
-        {m.label}
-      </button>
-    ))}
+/** Legend for the horizontal charts. Two series, so a legend is always present —
+ *  identity never rests on the colour pair alone. */
+const BarLegend = () => (
+  <div className="flex justify-center gap-3 text-[8px] text-slate-400">
+    <span className="flex items-center gap-1">
+      <span className="h-1.5 w-1.5 rounded-sm" style={{ background: DISTRACTED_COLOR }} /> Distracted (left)
+    </span>
+    <span className="flex items-center gap-1">
+      <span className="h-1.5 w-1.5 rounded-sm" style={{ background: FOCUS_COLOR }} /> Focus (right)
+    </span>
+  </div>
+);
+
+/** A metric's heading. All three metrics are shown stacked rather than behind a
+ *  switcher, so these are the landmarks you scroll between. */
+const MetricHeading = ({ label }: { label: string }) => (
+  <div className="flex items-center gap-2 pt-1">
+    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{label}</span>
+    <span className="h-px flex-1 bg-slate-100" />
   </div>
 );
 
@@ -529,16 +564,19 @@ const MetricTabs = ({ value, onChange }: { value: Metric; onChange: (m: Metric) 
  *  are separate intents, and the server enforces the difference: create refuses a
  *  name that exists, join refuses one that doesn't. A typo can neither found a
  *  one-person team nor drop you into a stranger's. */
-const NameForm = ({ placeholder, hint, busy, error, onSubmit }: {
+const NameForm = ({ placeholder, hint, busy, error, withPassword, onSubmit }: {
   placeholder: string;
   hint: string;
   busy: boolean;
   error: string;
-  onSubmit: (name: string, create: boolean) => void;
+  withPassword?: boolean;
+  onSubmit: (name: string, create: boolean, password: string) => void;
 }) => {
   const [name, setName] = useState('');
+  const [password, setPassword] = useState('');
   const clean = name.trim().toLowerCase();
-  const valid = clean.length >= 2 && clean.length <= 40;
+  const valid = clean.length >= 2 && clean.length <= 40 && (!withPassword || password.length >= 4);
+  const go = (create: boolean) => onSubmit(clean, create, password);
 
   return (
     <div className="space-y-1.5 rounded-xl bg-slate-50 p-2">
@@ -546,20 +584,33 @@ const NameForm = ({ placeholder, hint, busy, error, onSubmit }: {
         type="text"
         value={name}
         onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && valid && !busy) onSubmit(clean, false); }}
+        onKeyDown={(e) => { if (e.key === 'Enter' && valid && !busy) go(false); }}
         placeholder={placeholder}
         className="w-full rounded-lg border border-slate-200 px-2 py-1 text-[11px] focus:border-slate-400 focus:outline-none"
       />
+      {withPassword && (
+        // A team's shared secret. Creating sets it; joining must match it. The server
+        // stores only a bcrypt hash and lets no client read it back, so this is the
+        // one and only place it exists in the clear.
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && valid && !busy) go(false); }}
+          placeholder="team password (min 4)"
+          className="w-full rounded-lg border border-slate-200 px-2 py-1 text-[11px] focus:border-slate-400 focus:outline-none"
+        />
+      )}
       <div className="flex gap-1">
         <button
-          onClick={() => onSubmit(clean, false)}
+          onClick={() => go(false)}
           disabled={!valid || busy}
           className="flex-1 cursor-pointer rounded-lg bg-blue-500 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-blue-600 disabled:opacity-40"
         >
           Join existing
         </button>
         <button
-          onClick={() => onSubmit(clean, true)}
+          onClick={() => go(true)}
           disabled={!valid || busy}
           className="flex-1 cursor-pointer rounded-lg bg-slate-700 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-slate-800 disabled:opacity-40"
         >
@@ -581,7 +632,6 @@ const TeamSection = ({ board, busy, error, onEnroll, onLeave }: {
   onEnroll: (competition: string, create: boolean) => void;
   onLeave: () => void;
 }) => {
-  const [metric, setMetric] = useState<Metric>('live');
   const [addOpen, setAddOpen] = useState(false);
 
   return (
@@ -608,21 +658,24 @@ const TeamSection = ({ board, busy, error, onEnroll, onLeave }: {
           hint="Enters this team into the competition. Any member can do it."
           busy={busy}
           error={error}
-          onSubmit={onEnroll}
+          onSubmit={(competition, create) => onEnroll(competition, create)}
         />
       )}
 
-      <MetricTabs value={metric} onChange={setMetric} />
-      <Board
-        title="Team standings"
-        rows={board.members.map((m) => memberRow(m, metric, false))}
-        empty="No members yet."
-      />
+      <BarLegend />
+      {METRICS.map((m) => (
+        <BarBoard
+          key={m.id}
+          title={m.label}
+          rows={board.members.map((x) => memberRow(x, m.id, false))}
+          empty="No members yet."
+        />
+      ))}
 
       <button
         onClick={onLeave}
         disabled={busy}
-        className="w-full cursor-pointer rounded-lg py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400 hover:bg-slate-50 hover:text-red-500 disabled:opacity-40"
+        className="w-full cursor-pointer rounded-lg border border-slate-100 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-40"
       >
         Leave {board.team}
       </button>
@@ -633,9 +686,11 @@ const TeamSection = ({ board, busy, error, onEnroll, onLeave }: {
 /** A competition: teams against teams, then everyone against everyone, then each
  *  team's own list. All three are derived from one payload — the per-team lists are
  *  the combined list grouped by the `team` each row carries. */
-const CompetitionSection = ({ board }: { board: CompetitionBoard }) => {
-  const [metric, setMetric] = useState<Metric>('live');
-
+const CompetitionSection = ({ board, busy, onLeave }: {
+  board: CompetitionBoard;
+  busy: boolean;
+  onLeave: (team: string) => void;
+}) => {
   const byTeam = new Map<string, MemberScore[]>();
   for (const m of board.members) {
     const t = m.team ?? '—';
@@ -644,6 +699,8 @@ const CompetitionSection = ({ board }: { board: CompetitionBoard }) => {
   }
   // Follow the server's team order, so the leading team's roster comes first.
   const teamOrder = board.teams.map((t) => t.team).filter((t) => byTeam.has(t));
+  // Withdrawing is per-team, since you can have more than one team in a competition.
+  const myTeams = board.teams.filter((t) => t.is_mine).map((t) => t.team);
 
   return (
     <div className="space-y-3">
@@ -652,24 +709,44 @@ const CompetitionSection = ({ board }: { board: CompetitionBoard }) => {
         <span className="truncate">{board.competition}</span>
       </h3>
 
-      <MetricTabs value={metric} onChange={setMetric} />
+      <BarLegend />
 
-      <Board
-        title="Teams"
-        rows={board.teams.map((t) => teamRow(t, metric))}
-        empty="No teams entered yet."
-      />
-      <Board
-        title="Everyone"
-        rows={board.members.map((m) => memberRow(m, metric, true))}
-        empty="No participants yet."
-      />
-      {teamOrder.map((t) => (
-        <Board
+      {/* Metric-major: each of the three metrics gets the full set of boards — teams
+          against teams, then everyone, then one per team. Ordering it the other way
+          (a metric switcher, or boards grouped by subject) would mean scrolling past
+          two irrelevant metrics to compare two teams on the same footing. */}
+      {METRICS.map((m) => (
+        <div key={m.id} className="space-y-2.5">
+          <MetricHeading label={m.label} />
+          <BarBoard
+            title="Teams"
+            rows={board.teams.map((t) => teamRow(t, m.id))}
+            empty="No teams entered yet."
+          />
+          <BarBoard
+            title="Everyone"
+            rows={board.members.map((x) => memberRow(x, m.id, true))}
+            empty="No participants yet."
+          />
+          {teamOrder.map((t) => (
+            <BarBoard
+              key={t}
+              title={t}
+              rows={(byTeam.get(t) ?? []).map((x) => memberRow(x, m.id, false))}
+            />
+          ))}
+        </div>
+      ))}
+
+      {myTeams.map((t) => (
+        <button
           key={t}
-          title={t}
-          rows={(byTeam.get(t) ?? []).map((m) => memberRow(m, metric, false))}
-        />
+          onClick={() => onLeave(t)}
+          disabled={busy}
+          className="w-full cursor-pointer rounded-lg border border-slate-100 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-40"
+        >
+          Withdraw {t} from {board.competition}
+        </button>
       ))}
     </div>
   );
@@ -775,11 +852,12 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
       {joinOpen && (
         <NameForm
           placeholder="team name"
-          hint="Anyone who knows the name can join, so pick one you'll share."
+          hint="Share the name and password with your team — both are needed to join."
+          withPassword
           busy={busy}
           error={error}
-          onSubmit={(name, create) =>
-            act({ type: 'SERVER_JOIN_TEAM', team: name, create }, () => {
+          onSubmit={(name, create, password) =>
+            act({ type: 'SERVER_JOIN_TEAM', team: name, create, password }, () => {
               setJoinOpen(false);
               setSection(`team:${name}`);
             })
@@ -802,7 +880,14 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
         }
       />
     ) : compSection && active !== 'personal' ? (
-      <CompetitionSection board={compSection} />
+      <CompetitionSection
+        board={compSection}
+        busy={busy}
+        onLeave={(team) =>
+          act({ type: 'SERVER_LEAVE_COMPETITION', team, competition: compSection.competition },
+              () => setSection('personal'))
+        }
+      />
     ) : (
       <PersonalSection
         state={state}
