@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SessionState, Settings, DayScore, ServerStatus, ServerActionResult, MessageType, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
-import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogOut, Users, Trophy, ChevronLeft, ChevronRight, Flag } from 'lucide-react';
+import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogOut, Users, Trophy, ChevronLeft, ChevronRight, Flag, Loader2 } from 'lucide-react';
 import { SUMMARY_KEY, TEAMS_KEY, FLAG_KEY, DOMAIN_FLAGS_KEY } from '../server/config';
 // Type-only: erased at compile time, so the popup bundle does not pull in sync.ts
 // (and through it auth.ts and the whole fetch path) just to name a shape.
 import type {
-  ServerSummary, MemberScore, TeamBoard, CompetitionTeam, CompetitionBoard,
+  ServerSummary, ServerDay, MemberScore, TeamBoard, CompetitionTeam, CompetitionBoard,
   MemberProfile, FlagResult,
 } from '../server/sync';
 import '../../index.css';
@@ -259,16 +259,36 @@ const DailyHistory = ({ state }: { state: SessionState }) => {
   const [pasteText, setPasteText] = useState('');
 
   useEffect(() => {
+    // Paint from the cache first, so opening the popup never shows an empty chart
+    // waiting on a round trip — and so this still works offline.
     const load = () => chrome.storage.local.get([HISTORY_KEY, SUMMARY_KEY], (r) => {
       setHistory(Array.isArray(r[HISTORY_KEY]) ? r[HISTORY_KEY] : []);
       setSummary((r[SUMMARY_KEY] as ServerSummary) ?? null);
     });
     load();
-    // Both keys, because applyState() rewrites both on every reply: HISTORY_KEY holds
-    // the banked days and SUMMARY_KEY the 7/30-day means. Watching them is how the
-    // charts reconcile after a post, the same way onServerScores() reconciles the live
-    // score — storage is the channel, so an open popup repaints without polling.
-    // Also still covers a rollover landing while the popup happens to be open.
+
+    // Then refresh the days from the server. They no longer ride along on every
+    // check-in — 30 completed days were two thirds of that payload and change once a
+    // day — so this is the one place that asks for them, when they are on screen.
+    // No spinner: the cache is already drawn, and swapping it for a loading state
+    // would be a downgrade.
+    chrome.runtime.sendMessage({ type: 'SERVER_MY_DAYS' }, (res?: ServerDay[] | null) => {
+      void chrome.runtime.lastError;
+      if (!Array.isArray(res)) return;   // offline or signed out — the cache stands
+      const rows: DayScore[] = res
+        .map((d) => ({
+          date: d.day,
+          weekday: weekdayName(d.day),
+          focusScore: Number(d.focus_score) || 0,
+          distractedScore: Number(d.distracted_score) || 0,
+        }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+      setHistory(rows);
+      chrome.storage.local.set({ [HISTORY_KEY]: rows });
+    });
+
+    // SUMMARY_KEY still arrives with every reply, so keep watching it: the 7/30-day
+    // averages reconcile without this component asking again.
     const listener = (changes: Record<string, unknown>, area: string) => {
       if (area === 'local' && (changes[HISTORY_KEY] || changes[SUMMARY_KEY])) load();
     };
@@ -891,13 +911,14 @@ const NameForm = ({ placeholder, hint, busy, error, withPassword, passwordPlaceh
 };
 
 /** One of the caller's own teams: everyone in it ranked against them. */
-const TeamSection = ({ board, busy, error, onEnroll, onLeave }: {
-  board: TeamBoard;
+const TeamSection = ({ team, busy, error, onEnroll, onLeave }: {
+  team: string;
   busy: boolean;
   error: string;
   onEnroll: (competition: string, create: boolean, password: string) => void;
   onLeave: () => void;
 }) => {
+  const { board, loading } = useBoard<TeamBoard>({ type: 'SERVER_TEAM_BOARD', team }, team);
   const [metric, setMetric] = useState<Metric>('live');
   const [addOpen, setAddOpen] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
@@ -911,7 +932,7 @@ const TeamSection = ({ board, busy, error, onEnroll, onLeave }: {
       <div className="flex items-center justify-between gap-2">
         <h3 className="flex min-w-0 items-center gap-1.5 text-sm font-bold text-slate-700">
           <Users size={14} className="flex-shrink-0 text-slate-400" />
-          <span className="truncate">{board.team}</span>
+          <span className="truncate">{team}</span>
         </h3>
         <button
           onClick={() => setAddOpen((v) => !v)}
@@ -936,21 +957,25 @@ const TeamSection = ({ board, busy, error, onEnroll, onLeave }: {
         />
       )}
 
-      <MetricTabs value={metric} onChange={setMetric} />
-      <BarLegend />
-      <BarBoard
-        title="Team standings"
-        rows={board.members.map((x) => memberRow(x, metric, false))}
-        empty="No members yet."
-        onSelect={setSelected}
-      />
+      {loading && !board ? <BoardLoading /> : (
+        <>
+          <MetricTabs value={metric} onChange={setMetric} />
+          <BarLegend />
+          <BarBoard
+            title="Team standings"
+            rows={(board?.members ?? []).map((x) => memberRow(x, metric, false))}
+            empty={board ? 'No members yet.' : "Couldn't load this team."}
+            onSelect={setSelected}
+          />
+        </>
+      )}
 
       <button
         onClick={onLeave}
         disabled={busy}
         className="w-full cursor-pointer rounded-lg border border-slate-100 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-40"
       >
-        Leave {board.team}
+        Leave {team}
       </button>
     </div>
   );
@@ -959,11 +984,13 @@ const TeamSection = ({ board, busy, error, onEnroll, onLeave }: {
 /** A competition: teams against teams, then everyone against everyone, then each
  *  team's own list. All three are derived from one payload — the per-team lists are
  *  the combined list grouped by the `team` each row carries. */
-const CompetitionSection = ({ board, busy, onLeave }: {
-  board: CompetitionBoard;
+const CompetitionSection = ({ competition, busy, onLeave }: {
+  competition: string;
   busy: boolean;
   onLeave: (team: string) => void;
 }) => {
+  const { board, loading } = useBoard<CompetitionBoard>(
+    { type: 'SERVER_COMPETITION_BOARD', competition }, competition);
   const [metric, setMetric] = useState<Metric>('live');
   const [selected, setSelected] = useState<string | null>(null);
   // A Set, so teams open and close independently: comparing two rosters side by side
@@ -977,7 +1004,7 @@ const CompetitionSection = ({ board, busy, onLeave }: {
   });
 
   const byTeam = new Map<string, MemberScore[]>();
-  for (const m of board.members) {
+  for (const m of board?.members ?? []) {
     const t = m.team ?? '—';
     if (!byTeam.has(t)) byTeam.set(t, []);
     byTeam.get(t)!.push(m);
@@ -988,7 +1015,7 @@ const CompetitionSection = ({ board, busy, onLeave }: {
   // is where rank is expressed.
   const teamNames = [...byTeam.keys()].sort((a, b) => a.localeCompare(b));
   // Withdrawing is per-team, since you can have more than one team in a competition.
-  const myTeams = board.teams.filter((t) => t.is_mine).map((t) => t.team);
+  const myTeams = (board?.teams ?? []).filter((t) => t.is_mine).map((t) => t.team);
 
   if (selected) return <MemberProfileView userId={selected} onBack={() => setSelected(null)} />;
 
@@ -996,9 +1023,15 @@ const CompetitionSection = ({ board, busy, onLeave }: {
     <div className="space-y-3">
       <h3 className="flex min-w-0 items-center gap-1.5 text-sm font-bold text-slate-700">
         <Trophy size={14} className="flex-shrink-0 text-amber-500" />
-        <span className="truncate">{board.competition}</span>
+        <span className="truncate">{competition}</span>
       </h3>
 
+      {loading && !board ? <BoardLoading /> : !board ? (
+        <p className="py-6 text-center text-[10px] text-slate-400">
+          Couldn't load this competition.
+        </p>
+      ) : (
+      <>
       <MetricTabs value={metric} onChange={setMetric} />
       <BarLegend />
 
@@ -1061,6 +1094,8 @@ const CompetitionSection = ({ board, busy, onLeave }: {
           );
         })}
       </div>
+      </>
+      )}
 
       {myTeams.map((t) => (
         <button
@@ -1069,7 +1104,7 @@ const CompetitionSection = ({ board, busy, onLeave }: {
           disabled={busy}
           className="w-full cursor-pointer rounded-lg border border-slate-100 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-40"
         >
-          Withdraw {t} from {board.competition}
+          Withdraw {t} from {competition}
         </button>
       ))}
     </div>
@@ -1139,17 +1174,17 @@ const FlagBadge = ({ available, small }: { available: boolean; small?: boolean }
   </span>
 );
 
-/** The boards, read from the cache the server overwrites on every reply. Watching
- *  storage rather than asking means a membership change or the 1-minute post floor
- *  repaints an open popup with no request of its own. */
-function useBoards() {
-  const [boards, setBoards] = useState<{ teams: TeamBoard[]; competitions: CompetitionBoard[] }>(
+/** Which sections to offer, read from the cache the server overwrites on every
+ *  reply. NAMES ONLY — the boards themselves are fetched when a section is opened,
+ *  so the once-a-minute check-in no longer carries every visible member's scores. */
+function useMemberships() {
+  const [m, setM] = useState<{ teams: string[]; competitions: string[] }>(
     { teams: [], competitions: [] },
   );
   useEffect(() => {
     const load = () => chrome.storage.local.get([TEAMS_KEY], (r) => {
-      const b = r[TEAMS_KEY] as { teams?: TeamBoard[]; competitions?: CompetitionBoard[] } | undefined;
-      setBoards({ teams: b?.teams ?? [], competitions: b?.competitions ?? [] });
+      const b = r[TEAMS_KEY] as { teams?: string[]; competitions?: string[] } | undefined;
+      setM({ teams: b?.teams ?? [], competitions: b?.competitions ?? [] });
     });
     load();
     const listener = (changes: Record<string, unknown>, area: string) => {
@@ -1158,8 +1193,51 @@ function useBoards() {
     chrome.storage.onChanged.addListener(listener);
     return () => chrome.storage.onChanged.removeListener(listener);
   }, []);
-  return boards;
+  return m;
 }
+
+/** Fetch a board when its section opens, and keep it fresh while you are looking.
+ *
+ *  The refresh interval is the whole point of the split: a board costs a request
+ *  only while someone is actually watching it, instead of riding along on every
+ *  check-in from every user whether or not any popup is open. */
+const BOARD_REFRESH_MS = 60_000;
+
+function useBoard<T>(message: MessageType, key: string): { board: T | null; loading: boolean } {
+  const [board, setBoard] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let live = true;
+    // Only the FIRST load shows the spinner. A refresh that blanked the board every
+    // minute would be worse than a number a few seconds stale.
+    const get = (first: boolean) => {
+      if (first) setLoading(true);
+      chrome.runtime.sendMessage(message, (res?: T | null) => {
+        void chrome.runtime.lastError;
+        if (!live) return;
+        setLoading(false);
+        if (res) setBoard(res);
+        else if (first) setBoard(null);
+      });
+    };
+    get(true);
+    const timer = setInterval(() => get(false), BOARD_REFRESH_MS);
+    return () => { live = false; clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  return { board, loading };
+}
+
+/** Shown while a board is on its way. Deliberately the same height as a short
+ *  board, so opening a section does not jump the page as it lands. */
+const BoardLoading = () => (
+  <div className="flex items-center justify-center gap-2 py-8 text-[10px] text-slate-400">
+    <Loader2 size={13} className="animate-spin" />
+    Loading standings…
+  </div>
+);
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
 const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelistToggle, onSettingsChange }: {
@@ -1170,7 +1248,7 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
   onWhitelistToggle: () => void;
   onSettingsChange: (s: Settings) => void;
 }) => {
-  const boards = useBoards();
+  const memberships = useMemberships();
   const flagAvailable = useWeeklyFlag();
   // Sections are one-at-a-time rather than stacked. Personal alone is roughly a
   // popup's height, and every team and competition adds several boards behind it;
@@ -1199,8 +1277,8 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
   const isWhitelisted = currentTabUrl.length > 0 &&
     settings.allowedDomains.some(d => d.trim() !== '' && currentTabUrl.includes(d.trim()));
 
-  const teamSection = boards.teams.find((t) => `team:${t.team}` === section);
-  const compSection = boards.competitions.find((c) => `comp:${c.competition}` === section);
+  const teamSection = memberships.teams.find((t) => `team:${t}` === section);
+  const compSection = memberships.competitions.find((c) => `comp:${c}` === section);
   // Leaving the team you were looking at removes its pill; fall back rather than
   // rendering a section that no longer exists.
   const active = teamSection || compSection ? section : 'personal';
@@ -1229,8 +1307,8 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
       <div className="flex items-start gap-2">
         <div className="flex flex-1 flex-wrap items-center gap-1">
           {pill('personal', 'Personal')}
-          {boards.teams.map((t) => pill(`team:${t.team}`, t.team, <Users size={10} />))}
-          {boards.competitions.map((c) => pill(`comp:${c.competition}`, c.competition, <Trophy size={10} />))}
+          {memberships.teams.map((t) => pill(`team:${t}`, t, <Users size={10} />))}
+          {memberships.competitions.map((c) => pill(`comp:${c}`, c, <Trophy size={10} />))}
           <button
             onClick={() => { setJoinOpen((v) => !v); setError(''); }}
             title="Create a team, or join one that exists"
@@ -1262,23 +1340,23 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
 
     {teamSection && active !== 'personal' ? (
       <TeamSection
-        board={teamSection}
+        team={teamSection}
         busy={busy}
         error={error}
         onEnroll={(competition, create, password) =>
-          act({ type: 'SERVER_ENROLL_TEAM', team: teamSection.team, competition, create, password },
+          act({ type: 'SERVER_ENROLL_TEAM', team: teamSection, competition, create, password },
               () => setSection(`comp:${competition}`))
         }
         onLeave={() =>
-          act({ type: 'SERVER_LEAVE_TEAM', team: teamSection.team }, () => setSection('personal'))
+          act({ type: 'SERVER_LEAVE_TEAM', team: teamSection }, () => setSection('personal'))
         }
       />
     ) : compSection && active !== 'personal' ? (
       <CompetitionSection
-        board={compSection}
+        competition={compSection}
         busy={busy}
         onLeave={(team) =>
-          act({ type: 'SERVER_LEAVE_COMPETITION', team, competition: compSection.competition },
+          act({ type: 'SERVER_LEAVE_COMPETITION', team, competition: compSection },
               () => setSection('personal'))
         }
       />

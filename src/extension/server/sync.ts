@@ -110,17 +110,21 @@ export interface CompetitionBoard {
   members: MemberScore[];
 }
 
-/** The full payload from apply_score_delta / get_state. The server is the source of
- *  truth for every part; the local copies are caches it overwrites. */
+/** The routine payload from apply_score_delta / get_state, sent on every check-in.
+ *
+ *  Deliberately does NOT carry leaderboards. They used to ride along here, which
+ *  meant every user downloaded every visible member's scores once a minute whether
+ *  or not a board was on screen — egress that grew with competition size × users.
+ *  Only the NAMES travel now, enough to draw the section pills; the boards are
+ *  fetched when a section is opened. See fetchTeamBoard / fetchCompetitionBoard. */
 export interface ServerState {
   summary: ServerSummary | null;
   domains: string[];
   /** The same domains with their global flag tally. Display only — `domains` above
    *  is the copy that drives whether the extension activates on a page. */
   domain_flags: { domain: string; flag_count: number }[];
-  days: ServerDay[];
-  teams: TeamBoard[];
-  competitions: CompetitionBoard[];
+  my_teams: string[];
+  my_competitions: string[];
   /** This week's red-flag budget. One per user, granted each Monday 01:00 local. */
   flag: { available: boolean } | null;
 }
@@ -284,26 +288,12 @@ async function applyState(next: ServerState | null): Promise<void> {
     });
   });
 
-  // Completed days → HISTORY_KEY, in the DayScore shape the popup already renders.
-  // weekday is re-derived rather than sent over the wire: it is a pure function of
-  // the date, and deriving it locally means the two can never contradict each other.
-  const days = Array.isArray(next.days) ? next.days : [];
-  const history: DayScore[] = days
-    .map((d) => ({
-      date: d.day,
-      weekday: weekdayName(d.day),
-      focusScore: Number(d.focus_score) || 0,
-      distractedScore: Number(d.distracted_score) || 0,
-    }))
-    .sort((a, b) => a.date.localeCompare(b.date)); // oldest-first, as stored locally
-  chrome.storage.local.set({ [HISTORY_KEY]: history });
-
-  // Leaderboards → their own key. Written unconditionally, including when empty:
-  // leaving your last team has to clear the board, not leave the old one on screen.
+  // Which sections to offer — names only. Written unconditionally, including when
+  // empty: leaving your last team has to remove the pill, not leave a stale one.
   chrome.storage.local.set({
     [TEAMS_KEY]: {
-      teams: Array.isArray(next.teams) ? next.teams : [],
-      competitions: Array.isArray(next.competitions) ? next.competitions : [],
+      teams: Array.isArray(next.my_teams) ? next.my_teams : [],
+      competitions: Array.isArray(next.my_competitions) ? next.my_competitions : [],
     },
   });
 
@@ -611,6 +601,24 @@ async function readRpc<T>(fn: string, body: Record<string, unknown>): Promise<T 
     console.warn(`Focus: ${fn} unreachable:`, String(err).slice(0, 120));
     return null;
   }
+}
+
+/** The caller's own 30 completed days, fetched when the history is on screen rather
+ *  than pushed with every post. It changes once a day, at the 01:00 rollover. */
+export function fetchMyDays(): Promise<ServerDay[] | null> {
+  return readRpc<ServerDay[]>('get_my_days', {});
+}
+
+/** One team's board, fetched when its section is opened rather than pushed with
+ *  every post. Refused unless the caller is a member. */
+export function fetchTeamBoard(team: string): Promise<TeamBoard | null> {
+  return readRpc<TeamBoard>('get_team_board', { p_team: team });
+}
+
+/** One competition's board — team totals plus every participant across it. Refused
+ *  unless one of the caller's own teams is entered in it. */
+export function fetchCompetitionBoard(competition: string): Promise<CompetitionBoard | null> {
+  return readRpc<CompetitionBoard>('get_competition_board', { p_competition: competition });
 }
 
 /** Open a participant's profile. The server refuses anyone the caller cannot

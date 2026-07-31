@@ -14,6 +14,7 @@ import {
 import {
   initSync, queueDelta, queueDomains, flush, getCachedSummary,
   joinTeam, leaveTeam, enrollTeam, leaveCompetition, fetchMemberProfile, flagDomain,
+  fetchTeamBoard, fetchCompetitionBoard, fetchMyDays,
 } from './server/sync';
 import { signIn, signOut, getSession } from './server/auth';
 import { isServerConfigured } from './server/config';
@@ -541,6 +542,18 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
 
     // Both reply with the raw payload (or null) rather than a status: they are reads
     // of somebody else's data, so nothing is written to the local caches.
+    case 'SERVER_MY_DAYS':
+      fetchMyDays().then(sendResponse);
+      break;
+
+    case 'SERVER_TEAM_BOARD':
+      fetchTeamBoard(message.team).then(sendResponse);
+      break;
+
+    case 'SERVER_COMPETITION_BOARD':
+      fetchCompetitionBoard(message.competition).then(sendResponse);
+      break;
+
     case 'SERVER_MEMBER_PROFILE':
       fetchMemberProfile(message.userId).then(sendResponse);
       break;
