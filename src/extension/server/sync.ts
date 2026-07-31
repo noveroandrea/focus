@@ -80,6 +80,9 @@ export interface MemberScore {
   display_name: string;
   is_self: boolean;
   team?: string;
+  /** Position in the full field, not in the returned slice — boards are topped, so
+   *  row 1 of the array can legitimately be rank 1 while the last is rank 4,312. */
+  rank?: number;
   live_focus: number; live_distracted: number;
   avg7_focus: number; avg7_distracted: number;
   avg30_focus: number; avg30_distracted: number;
@@ -88,13 +91,24 @@ export interface MemberScore {
 /** A team's board: everyone in it, including you. */
 export interface TeamBoard {
   team: string;
+  metric: Metric;
+  /** Size of the whole team, which may be far larger than `members`. */
+  member_count: number;
+  /** The caller's rank in it, present even when they are below the cut. */
+  my_rank: number | null;
   members: MemberScore[];
 }
+
+/** Which score a board is ranked by. Boards are topped, so the metric has to travel
+ *  with the request: the top 20 by live score is a different set of people from the
+ *  top 20 by 30-day average. */
+export type Metric = 'live' | 'avg7' | 'avg30';
 
 /** One team's summed scores, for the team-vs-team board inside a competition. */
 export interface CompetitionTeam {
   team: string;
   is_mine: boolean;
+  rank?: number;
   member_count: number;
   live_focus: number; live_distracted: number;
   avg7_focus: number; avg7_distracted: number;
@@ -106,6 +120,13 @@ export interface CompetitionTeam {
  *  `team`, and the popup groups by it. */
 export interface CompetitionBoard {
   competition: string;
+  /** Fixed when the competition was created. 'individual' has no team board;
+   *  'team' has no individual entrants. */
+  kind: 'individual' | 'team';
+  metric: Metric;
+  member_count: number;
+  team_count: number;
+  my_rank: number | null;
   teams: CompetitionTeam[];
   members: MemberScore[];
 }
@@ -124,7 +145,14 @@ export interface ServerState {
    *  is the copy that drives whether the extension activates on a page. */
   domain_flags: { domain: string; flag_count: number }[];
   my_teams: string[];
+  /** Competitions the user entered as themselves. */
   my_competitions: string[];
+  /** Competitions one of the user's teams entered. Separate from the above so the
+   *  popup can show the same competition twice — once per entry, which is what
+   *  having two entries looks like. */
+  my_team_competitions: { competition: string; team: string }[];
+  /** Incoming friend requests waiting on the user — drives the badge on the pill. */
+  friend_requests: number;
   /** This week's red-flag budget. One per user, granted each Monday 01:00 local. */
   flag: { available: boolean } | null;
 }
@@ -294,6 +322,8 @@ async function applyState(next: ServerState | null): Promise<void> {
     [TEAMS_KEY]: {
       teams: Array.isArray(next.my_teams) ? next.my_teams : [],
       competitions: Array.isArray(next.my_competitions) ? next.my_competitions : [],
+      teamCompetitions: Array.isArray(next.my_team_competitions) ? next.my_team_competitions : [],
+      friendRequests: Number(next.friend_requests) || 0,
     },
   });
 
@@ -540,6 +570,21 @@ export function enrollTeam(
   });
 }
 
+/** Enter a competition as yourself, creating it if asked. Independent of any team
+ *  entry: you can hold both, and leaving one leaves the other alone. */
+export function joinCompetition(
+  competition: string, create: boolean, password: string,
+): Promise<TeamActionResult> {
+  return teamRpc('join_competition', {
+    p_competition: competition, p_create: create, p_password: password,
+  });
+}
+
+/** Withdraw yourself from a competition, leaving any team entry untouched. */
+export function leaveCompetitionSolo(competition: string): Promise<TeamActionResult> {
+  return teamRpc('leave_competition_solo', { p_competition: competition });
+}
+
 /** Withdraw one of your teams from a competition. Mirrors enrolling, including who
  *  is allowed to do it: any member of the team. */
 export function leaveCompetition(team: string, competition: string): Promise<TeamActionResult> {
@@ -580,6 +625,9 @@ export interface MemberProfile {
   user_id: string;
   display_name: string;
   is_self: boolean;
+  /** Where the caller stands with this person, so the profile can offer the right
+   *  button without a second call. */
+  friend_status: FriendStatus;
   live_focus: number; live_distracted: number;
   avg7_focus: number; avg7_distracted: number;
   avg30_focus: number; avg30_distracted: number;
@@ -603,6 +651,60 @@ async function readRpc<T>(fn: string, body: Record<string, unknown>): Promise<T 
   }
 }
 
+// ── Friends ───────────────────────────────────────────────────────────────────
+// A second route to seeing another participant, alongside teams, and the only one
+// that needs both sides to agree. A PENDING request shows nothing: the server's
+// can_see_user() requires status = 'accepted'.
+
+/** Someone waiting on the user to accept. */
+export interface FriendRequest {
+  user_id: string;
+  display_name: string;
+  created_at: string;
+}
+
+/** What the caller can do about a given person. */
+export type FriendStatus = 'none' | 'sent' | 'received' | 'friends' | 'self';
+
+/** A search hit. Deliberately no email: search matches the local part and returns
+ *  only that, so a searcher learns a name exists and nothing more. */
+export interface UserHit {
+  user_id: string;
+  display_name: string;
+  status: FriendStatus;
+}
+
+/** Same shape as a team board, plus whoever is waiting on you. */
+export interface FriendsBoard {
+  metric: Metric;
+  member_count: number;
+  my_rank: number | null;
+  members: MemberScore[];
+  requests: FriendRequest[];
+}
+
+export function fetchFriendsBoard(metric: Metric, limit = 20): Promise<FriendsBoard | null> {
+  return readRpc<FriendsBoard>('get_friends_board', { p_metric: metric, p_limit: limit });
+}
+
+/** Type-ahead over other participants. Returns [] under 3 characters — the server
+ *  enforces that floor so an empty query cannot enumerate the study. */
+export function searchUsers(query: string): Promise<UserHit[] | null> {
+  return readRpc<UserHit[]>('search_users', { p_query: query, p_limit: 10 });
+}
+
+export function sendFriendRequest(userId: string): Promise<{ status: FriendStatus } | null> {
+  return readRpc('send_friend_request', { p_user: userId });
+}
+
+export function respondFriendRequest(requester: string, accept: boolean): Promise<{ status: FriendStatus } | null> {
+  return readRpc('respond_friend_request', { p_requester: requester, p_accept: accept });
+}
+
+export function removeFriend(userId: string): Promise<{ status: FriendStatus } | null> {
+  return readRpc('remove_friend', { p_user: userId });
+}
+
 /** The caller's own 30 completed days, fetched when the history is on screen rather
  *  than pushed with every post. It changes once a day, at the 01:00 rollover. */
 export function fetchMyDays(): Promise<ServerDay[] | null> {
@@ -611,14 +713,17 @@ export function fetchMyDays(): Promise<ServerDay[] | null> {
 
 /** One team's board, fetched when its section is opened rather than pushed with
  *  every post. Refused unless the caller is a member. */
-export function fetchTeamBoard(team: string): Promise<TeamBoard | null> {
-  return readRpc<TeamBoard>('get_team_board', { p_team: team });
+export function fetchTeamBoard(team: string, metric: Metric, limit = 20): Promise<TeamBoard | null> {
+  return readRpc<TeamBoard>('get_team_board', { p_team: team, p_metric: metric, p_limit: limit });
 }
 
 /** One competition's board — team totals plus every participant across it. Refused
  *  unless one of the caller's own teams is entered in it. */
-export function fetchCompetitionBoard(competition: string): Promise<CompetitionBoard | null> {
-  return readRpc<CompetitionBoard>('get_competition_board', { p_competition: competition });
+export function fetchCompetitionBoard(
+  competition: string, metric: Metric, limit = 20,
+): Promise<CompetitionBoard | null> {
+  return readRpc<CompetitionBoard>('get_competition_board',
+    { p_competition: competition, p_metric: metric, p_limit: limit });
 }
 
 /** Open a participant's profile. The server refuses anyone the caller cannot

@@ -189,10 +189,17 @@ export type MessageType =
   | { type: 'SERVER_LEAVE_TEAM'; team: string }
   | { type: 'SERVER_ENROLL_TEAM'; team: string; competition: string; create: boolean; password: string }
   | { type: 'SERVER_LEAVE_COMPETITION'; team: string; competition: string }
+  | { type: 'SERVER_JOIN_COMPETITION'; competition: string; create: boolean; password: string }
+  | { type: 'SERVER_LEAVE_COMPETITION_SOLO'; competition: string }
   // Profile detail. Fetched on demand and never cached — it is somebody else's data.
   | { type: 'SERVER_MY_DAYS' }
-  | { type: 'SERVER_TEAM_BOARD'; team: string }
-  | { type: 'SERVER_COMPETITION_BOARD'; competition: string }
+  | { type: 'SERVER_FRIENDS_BOARD'; metric: 'live' | 'avg7' | 'avg30' }
+  | { type: 'SERVER_SEARCH_USERS'; query: string }
+  | { type: 'SERVER_FRIEND_REQUEST'; userId: string }
+  | { type: 'SERVER_FRIEND_RESPOND'; requester: string; accept: boolean }
+  | { type: 'SERVER_FRIEND_REMOVE'; userId: string }
+  | { type: 'SERVER_TEAM_BOARD'; team: string; metric: 'live' | 'avg7' | 'avg30' }
+  | { type: 'SERVER_COMPETITION_BOARD'; competition: string; metric: 'live' | 'avg7' | 'avg30' }
   | { type: 'SERVER_MEMBER_PROFILE'; userId: string }
   | { type: 'SERVER_FLAG_DOMAIN'; domain: string };
 

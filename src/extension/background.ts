@@ -14,7 +14,9 @@ import {
 import {
   initSync, queueDelta, queueDomains, flush, getCachedSummary,
   joinTeam, leaveTeam, enrollTeam, leaveCompetition, fetchMemberProfile, flagDomain,
+  joinCompetition, leaveCompetitionSolo,
   fetchTeamBoard, fetchCompetitionBoard, fetchMyDays,
+  fetchFriendsBoard, searchUsers, sendFriendRequest, respondFriendRequest, removeFriend,
 } from './server/sync';
 import { signIn, signOut, getSession } from './server/auth';
 import { isServerConfigured } from './server/config';
@@ -546,12 +548,40 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       fetchMyDays().then(sendResponse);
       break;
 
+    case 'SERVER_JOIN_COMPETITION':
+      joinCompetition(message.competition, message.create, message.password).then(sendResponse);
+      break;
+
+    case 'SERVER_LEAVE_COMPETITION_SOLO':
+      leaveCompetitionSolo(message.competition).then(sendResponse);
+      break;
+
+    case 'SERVER_FRIENDS_BOARD':
+      fetchFriendsBoard(message.metric).then(sendResponse);
+      break;
+
+    case 'SERVER_SEARCH_USERS':
+      searchUsers(message.query).then(sendResponse);
+      break;
+
+    case 'SERVER_FRIEND_REQUEST':
+      sendFriendRequest(message.userId).then(sendResponse);
+      break;
+
+    case 'SERVER_FRIEND_RESPOND':
+      respondFriendRequest(message.requester, message.accept).then(sendResponse);
+      break;
+
+    case 'SERVER_FRIEND_REMOVE':
+      removeFriend(message.userId).then(sendResponse);
+      break;
+
     case 'SERVER_TEAM_BOARD':
-      fetchTeamBoard(message.team).then(sendResponse);
+      fetchTeamBoard(message.team, message.metric).then(sendResponse);
       break;
 
     case 'SERVER_COMPETITION_BOARD':
-      fetchCompetitionBoard(message.competition).then(sendResponse);
+      fetchCompetitionBoard(message.competition, message.metric).then(sendResponse);
       break;
 
     case 'SERVER_MEMBER_PROFILE':

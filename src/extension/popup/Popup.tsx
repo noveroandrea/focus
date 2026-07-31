@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SessionState, Settings, DayScore, ServerStatus, ServerActionResult, MessageType, HISTORY_KEY, localDateKey, weekdayName, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
-import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogOut, Users, Trophy, ChevronLeft, ChevronRight, Flag, Loader2 } from 'lucide-react';
+import { FileText, Activity, Settings2, Plus, X, Zap, ZapOff, Check, Copy, ClipboardPaste, Volume2, VolumeX, Info, LogOut, Users, Trophy, ChevronLeft, ChevronRight, Flag, Loader2, UserPlus, UserCheck, Clock } from 'lucide-react';
 import { SUMMARY_KEY, TEAMS_KEY, FLAG_KEY, DOMAIN_FLAGS_KEY } from '../server/config';
 // Type-only: erased at compile time, so the popup bundle does not pull in sync.ts
 // (and through it auth.ts and the whole fetch path) just to name a shape.
 import type {
   ServerSummary, ServerDay, MemberScore, TeamBoard, CompetitionTeam, CompetitionBoard,
-  MemberProfile, FlagResult,
+  MemberProfile, FlagResult, FriendsBoard, UserHit, FriendStatus,
 } from '../server/sync';
 import '../../index.css';
 
@@ -678,8 +678,53 @@ const ProfileStat = ({ label, focus, distracted }: {
  *  to grey the button before the click, so the two must be changed together. */
 const MAX_FLAGS_PER_DOMAIN = 3;
 
+/** The friend control on a profile. Four states, four different sentences — a single
+ *  "Add friend" that silently did nothing on the other three would be worse than no
+ *  button. Never shown for yourself. */
+const FriendButton = ({ status, busy, onSend, onAccept }: {
+  status: FriendStatus;
+  busy: boolean;
+  onSend: () => void;
+  onAccept: () => void;
+}) => {
+  if (status === 'self') return null;
+
+  const base = 'flex flex-shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider transition-colors disabled:opacity-40';
+
+  if (status === 'friends') {
+    return (
+      <span title="You are friends — you can see each other's scores" className={`${base} bg-green-100 text-green-700`}>
+        <UserCheck size={10} /> Friends
+      </span>
+    );
+  }
+  if (status === 'sent') {
+    return (
+      <span title="Request sent — you'll see their scores once they accept" className={`${base} bg-slate-100 text-slate-400`}>
+        <Clock size={10} /> Sent
+      </span>
+    );
+  }
+  if (status === 'received') {
+    return (
+      <button onClick={onAccept} disabled={busy} title="They asked to be friends — accept" className={`${base} cursor-pointer bg-green-500 text-white hover:bg-green-600`}>
+        <UserCheck size={10} /> Accept
+      </button>
+    );
+  }
+  return (
+    <button onClick={onSend} disabled={busy} title="Send a friend request" className={`${base} cursor-pointer bg-blue-500 text-white hover:bg-blue-600`}>
+      <UserPlus size={10} /> Add
+    </button>
+  );
+};
+
 const MemberProfileView = ({ userId, onBack }: { userId: string; onBack: () => void }) => {
   const [profile, setProfile] = useState<MemberProfile | null>(null);
+  // Held separately from `profile` so a friend action repaints the button without
+  // refetching the whole profile — the scores and domains have not changed.
+  const [friendStatus, setFriendStatus] = useState<FriendStatus>('none');
+  const [friendBusy, setFriendBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [flagging, setFlagging] = useState('');
   const [flagError, setFlagError] = useState('');
@@ -691,8 +736,18 @@ const MemberProfileView = ({ userId, onBack }: { userId: string; onBack: () => v
       void chrome.runtime.lastError;
       setLoading(false);
       setProfile(res ?? null);
+      setFriendStatus(res?.friend_status ?? 'none');
     });
   }, [userId]);
+
+  const friendAct = (msg: MessageType) => {
+    setFriendBusy(true);
+    chrome.runtime.sendMessage(msg, (res?: { status: FriendStatus } | null) => {
+      void chrome.runtime.lastError;
+      setFriendBusy(false);
+      if (res?.status) setFriendStatus(res.status);
+    });
+  };
 
   // Flagging returns the domain's new global tally, so only that one row is patched
   // rather than refetching the whole profile. The badge updates independently: the
@@ -743,9 +798,17 @@ const MemberProfileView = ({ userId, onBack }: { userId: string; onBack: () => v
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-2">
         {back}
-        <span className={`min-w-0 truncate text-sm font-bold ${profile.is_self ? 'text-blue-700' : 'text-slate-700'}`}>
-          {profile.display_name}
-        </span>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className={`min-w-0 truncate text-sm font-bold ${profile.is_self ? 'text-blue-700' : 'text-slate-700'}`}>
+            {profile.display_name}
+          </span>
+          <FriendButton
+            status={friendStatus}
+            busy={friendBusy}
+            onSend={() => friendAct({ type: 'SERVER_FRIEND_REQUEST', userId })}
+            onAccept={() => friendAct({ type: 'SERVER_FRIEND_RESPOND', requester: userId, accept: true })}
+          />
+        </div>
       </div>
 
       <div className="divide-y divide-slate-100 rounded-xl border border-slate-100">
@@ -910,6 +973,195 @@ const NameForm = ({ placeholder, hint, busy, error, withPassword, passwordPlaceh
   );
 };
 
+// ── Friends ───────────────────────────────────────────────────────────────────
+// The same board a team gets, over people who have each agreed individually. A
+// PENDING request shows nothing — the server's can_see_user() requires 'accepted',
+// so asking to see someone is never permission to.
+
+/** How long to wait after the last keystroke before searching. Long enough to cover
+ *  a whole name typed at normal speed, so spelling "andrea" costs one request rather
+ *  than eight — and eight racing replies can't land out of order and leave the
+ *  answer to the third letter on screen. The cost is that results feel deliberate
+ *  rather than instant, which is the right trade for a search that reads other
+ *  participants' names out of the database. */
+const FRIEND_SEARCH_DEBOUNCE_MS = 1000;
+
+/** Type-ahead search. Debounced, because a keystroke is not a question. */
+const FriendSearch = ({ onAdded }: { onAdded: () => void }) => {
+  const [query, setQuery] = useState('');
+  const [hits, setHits] = useState<UserHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [busy, setBusy] = useState('');
+
+  const clean = query.trim().toLowerCase();
+  const tooShort = clean.length > 0 && clean.length < 3;
+
+  useEffect(() => {
+    if (clean.length < 3) { setHits([]); return; }
+    setSearching(true);
+    const t = setTimeout(() => {
+      chrome.runtime.sendMessage({ type: 'SERVER_SEARCH_USERS', query: clean }, (res?: UserHit[] | null) => {
+        void chrome.runtime.lastError;
+        setSearching(false);
+        setHits(Array.isArray(res) ? res : []);
+      });
+    }, FRIEND_SEARCH_DEBOUNCE_MS);
+    return () => { clearTimeout(t); setSearching(false); };
+  }, [clean]);
+
+  const add = (h: UserHit) => {
+    setBusy(h.user_id);
+    chrome.runtime.sendMessage({ type: 'SERVER_FRIEND_REQUEST', userId: h.user_id }, (res?: { status: FriendStatus } | null) => {
+      void chrome.runtime.lastError;
+      setBusy('');
+      if (!res) return;
+      setHits((prev) => prev.map((x) => (x.user_id === h.user_id ? { ...x, status: res.status } : x)));
+      onAdded();
+    });
+  };
+
+  const label: Record<FriendStatus, string> = {
+    none: 'Add', sent: 'Sent', received: 'Accept', friends: 'Friends', self: 'You',
+  };
+
+  return (
+    <div className="space-y-1.5 rounded-xl bg-slate-50 p-2">
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="search by name or email…"
+        className="w-full rounded-lg border border-slate-200 px-2 py-1 text-[11px] focus:border-slate-400 focus:outline-none"
+      />
+      {tooShort && <p className="text-[9px] text-slate-400">Keep typing — at least 3 characters.</p>}
+      {searching && clean.length >= 3 && (
+        <p className="flex items-center gap-1 text-[9px] text-slate-400">
+          <Loader2 size={9} className="animate-spin" /> Searching…
+        </p>
+      )}
+      {!searching && clean.length >= 3 && hits.length === 0 && (
+        <p className="text-[9px] text-slate-400">Nobody found.</p>
+      )}
+      {hits.length > 0 && (
+        <div className="divide-y divide-slate-200 overflow-y-auto rounded-lg bg-white" style={{ maxHeight: DAY_MAX_HEIGHT_PX }}>
+          {hits.map((h) => (
+            <div key={h.user_id} className="flex items-center gap-2 px-2 py-1">
+              <span className="min-w-0 flex-1 truncate text-[11px] text-slate-700">{h.display_name}</span>
+              <button
+                onClick={() => add(h)}
+                disabled={busy === h.user_id || h.status === 'sent' || h.status === 'friends' || h.status === 'self'}
+                className={`flex-shrink-0 rounded-lg px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider transition-colors ${
+                  h.status === 'none' || h.status === 'received'
+                    ? 'cursor-pointer bg-blue-500 text-white hover:bg-blue-600'
+                    : 'cursor-not-allowed bg-slate-100 text-slate-400'
+                }`}
+              >
+                {label[h.status]}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="text-[9px] text-slate-400">
+        They see your scores only once they accept — and you see theirs.
+      </p>
+    </div>
+  );
+};
+
+const FriendsSection = () => {
+  const [metric, setMetric] = useState<Metric>('live');
+  const [addOpen, setAddOpen] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [nonce, setNonce] = useState(0);   // bumped by any change, to refetch
+  const [busy, setBusy] = useState('');
+  const { board, loading } = useBoard<FriendsBoard>(
+    { type: 'SERVER_FRIENDS_BOARD', metric }, `friends:${metric}:${nonce}`);
+
+  if (selected) return <MemberProfileView userId={selected} onBack={() => setSelected(null)} />;
+
+  const respond = (requester: string, accept: boolean) => {
+    setBusy(requester);
+    chrome.runtime.sendMessage({ type: 'SERVER_FRIEND_RESPOND', requester, accept }, () => {
+      void chrome.runtime.lastError;
+      setBusy('');
+      setNonce((n) => n + 1);
+    });
+  };
+
+  const requests = board?.requests ?? [];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="flex min-w-0 items-center gap-1.5 text-sm font-bold text-slate-700">
+          <UserPlus size={14} className="flex-shrink-0 text-slate-400" />
+          <span className="truncate">Friends</span>
+        </h3>
+        <button
+          onClick={() => setAddOpen((v) => !v)}
+          title="Find someone to add"
+          className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
+            addOpen ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+          }`}
+        >
+          <Plus size={11} /> Friend
+        </button>
+      </div>
+
+      {addOpen && <FriendSearch onAdded={() => setNonce((n) => n + 1)} />}
+
+      {loading && !board ? <BoardLoading /> : (
+        <>
+          <MetricTabs value={metric} onChange={setMetric} />
+          <BarLegend />
+          <BarBoard
+            title="Friends standings"
+            rows={(board?.members ?? []).map((x) => memberRow(x, metric, false))}
+            empty={board ? 'No friends yet — add someone above.' : "Couldn't load your friends."}
+            onSelect={setSelected}
+          />
+          <BoardFooter board={board} noun="friend" />
+        </>
+      )}
+
+      {/* Requests below the board, not above it: the board is what you came for, and
+          a pending request is somebody else's business with you. */}
+      {requests.length > 0 && (
+        <div className="space-y-1">
+          <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
+            Friend requests
+          </h4>
+          <div className="divide-y divide-slate-100 rounded-xl border border-slate-100">
+            {requests.map((r) => (
+              <div key={r.user_id} className="flex items-center gap-2 px-2 py-1.5">
+                <span className="min-w-0 flex-1 truncate text-[11px] text-slate-700">
+                  {r.display_name}
+                </span>
+                <button
+                  onClick={() => respond(r.user_id, true)}
+                  disabled={busy === r.user_id}
+                  className="flex-shrink-0 cursor-pointer rounded-lg bg-green-500 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-white hover:bg-green-600 disabled:opacity-40"
+                >
+                  Accept
+                </button>
+                <button
+                  onClick={() => respond(r.user_id, false)}
+                  disabled={busy === r.user_id}
+                  title="Decline — they can ask again later"
+                  className="flex-shrink-0 cursor-pointer rounded-lg bg-slate-100 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-slate-500 hover:bg-slate-200 disabled:opacity-40"
+                >
+                  Decline
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 /** One of the caller's own teams: everyone in it ranked against them. */
 const TeamSection = ({ team, busy, error, onEnroll, onLeave }: {
   team: string;
@@ -918,8 +1170,12 @@ const TeamSection = ({ team, busy, error, onEnroll, onLeave }: {
   onEnroll: (competition: string, create: boolean, password: string) => void;
   onLeave: () => void;
 }) => {
-  const { board, loading } = useBoard<TeamBoard>({ type: 'SERVER_TEAM_BOARD', team }, team);
+  // Metric first: boards are TOPPED server-side, so the top 20 by live score is a
+  // different set of people from the top 20 by 30-day average. Switching tabs is a
+  // new question, not a re-sort of the same answer.
   const [metric, setMetric] = useState<Metric>('live');
+  const { board, loading } = useBoard<TeamBoard>(
+    { type: 'SERVER_TEAM_BOARD', team, metric }, `${team}:${metric}`);
   const [addOpen, setAddOpen] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -948,7 +1204,7 @@ const TeamSection = ({ team, busy, error, onEnroll, onLeave }: {
       {addOpen && (
         <NameForm
           placeholder="competition name"
-          hint="Name and password both needed — sharing a competition is what lets rival teams see each other."
+          hint="Creating makes a TEAM competition — teams enter, individuals are refused."
           withPassword
           passwordPlaceholder="competition password (min 4)"
           busy={busy}
@@ -967,6 +1223,7 @@ const TeamSection = ({ team, busy, error, onEnroll, onLeave }: {
             empty={board ? 'No members yet.' : "Couldn't load this team."}
             onSelect={setSelected}
           />
+          <BoardFooter board={board} noun="member" />
         </>
       )}
 
@@ -984,14 +1241,18 @@ const TeamSection = ({ team, busy, error, onEnroll, onLeave }: {
 /** A competition: teams against teams, then everyone against everyone, then each
  *  team's own list. All three are derived from one payload — the per-team lists are
  *  the combined list grouped by the `team` each row carries. */
-const CompetitionSection = ({ competition, busy, onLeave }: {
+const CompetitionSection = ({ competition, viaTeam, busy, onLeaveTeam, onLeaveSolo }: {
   competition: string;
+  /** Set when this pill is a TEAM's entry; absent when it is your own. Only changes
+   *  what you can withdraw from here — the board itself is the same competition. */
+  viaTeam?: string;
   busy: boolean;
-  onLeave: (team: string) => void;
+  onLeaveTeam: (team: string) => void;
+  onLeaveSolo: () => void;
 }) => {
-  const { board, loading } = useBoard<CompetitionBoard>(
-    { type: 'SERVER_COMPETITION_BOARD', competition }, competition);
   const [metric, setMetric] = useState<Metric>('live');
+  const { board, loading } = useBoard<CompetitionBoard>(
+    { type: 'SERVER_COMPETITION_BOARD', competition, metric }, `${competition}:${metric}`);
   const [selected, setSelected] = useState<string | null>(null);
   // A Set, so teams open and close independently: comparing two rosters side by side
   // is the whole reason to expand one, and an accordion would forbid it.
@@ -1003,17 +1264,15 @@ const CompetitionSection = ({ competition, busy, onLeave }: {
     return next;
   });
 
-  const byTeam = new Map<string, MemberScore[]>();
-  for (const m of board?.members ?? []) {
-    const t = m.team ?? '—';
-    if (!byTeam.has(t)) byTeam.set(t, []);
-    byTeam.get(t)!.push(m);
-  }
   // Alphabetical, NOT by rank. These are navigation controls, so their job is to be
   // findable: a list that reorders itself as scores move means hunting for the same
   // team in a different place every time you open the popup. The Teams chart above
   // is where rank is expressed.
-  const teamNames = [...byTeam.keys()].sort((a, b) => a.localeCompare(b));
+  //
+  // Taken from board.teams rather than by grouping board.members: that list is only
+  // the top N of the whole field now, so grouping it would silently show partial
+  // rosters. Each panel fetches its own team instead.
+  const teamNames = (board?.teams ?? []).map((t) => t.team).sort((a, b) => a.localeCompare(b));
   // Withdrawing is per-team, since you can have more than one team in a competition.
   const myTeams = (board?.teams ?? []).filter((t) => t.is_mine).map((t) => t.team);
 
@@ -1024,6 +1283,9 @@ const CompetitionSection = ({ competition, busy, onLeave }: {
       <h3 className="flex min-w-0 items-center gap-1.5 text-sm font-bold text-slate-700">
         <Trophy size={14} className="flex-shrink-0 text-amber-500" />
         <span className="truncate">{competition}</span>
+        <span className="flex-shrink-0 text-[9px] font-medium uppercase tracking-wider text-slate-400">
+          {viaTeam ? `as ${viaTeam}` : 'as yourself'}
+        </span>
       </h3>
 
       {loading && !board ? <BoardLoading /> : !board ? (
@@ -1037,17 +1299,24 @@ const CompetitionSection = ({ competition, busy, onLeave }: {
 
       {/* The chosen metric, drawn three ways: teams against teams, then the whole
           field, then each team's own roster. */}
+      {/* An individual competition has no teams, so it gets no team board and no
+          per-team panels — an empty "Teams" chart would imply teams could enter. */}
+      {board.kind === 'team' && (
+        <BarBoard
+          title="Teams"
+          rows={board.teams.map((t) => teamRow(t, metric))}
+          empty="No teams entered yet."
+        />
+      )}
       <BarBoard
-        title="Teams"
-        rows={board.teams.map((t) => teamRow(t, metric))}
-        empty="No teams entered yet."
-      />
-      <BarBoard
-        title="Everyone"
-        rows={board.members.map((x) => memberRow(x, metric, true))}
+        title={board.kind === 'team' ? 'Everyone' : 'Standings'}
+        rows={board.members.map((x) => memberRow(x, metric, board.kind === 'team'))}
         empty="No participants yet."
         onSelect={setSelected}
       />
+      <BoardFooter board={board} noun="participant" />
+      {board.kind === 'team' && (
+      <>
       {/* One collapsed button per team rather than every roster at once. A
           competition with eight teams would otherwise be eight charts deep before
           you reached anything, three times over. Expansion state is held here and
@@ -1056,7 +1325,7 @@ const CompetitionSection = ({ competition, busy, onLeave }: {
         <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-400">By team</h4>
         {teamNames.map((t) => {
           const open = openTeams.has(t);
-          const members = byTeam.get(t) ?? [];
+          const size = board.teams.find((x) => x.team === t)?.member_count ?? 0;
           const mine = myTeams.includes(t);
           return (
             <div key={t} className="space-y-1.5">
@@ -1077,17 +1346,14 @@ const CompetitionSection = ({ competition, busy, onLeave }: {
                 />
                 <span className="min-w-0 flex-1 truncate">{t}</span>
                 <span className={`flex-shrink-0 font-medium tabular-nums ${open ? 'text-slate-300' : 'text-slate-400'}`}>
-                  {members.length}
+                  {size}
                 </span>
               </button>
               {open && (
-                // No title: the button above is the heading, and repeating the team
-                // name inside its own panel is noise.
+                // Its own fetch, mounted only while expanded. No title: the button
+                // above is the heading, and repeating the name is noise.
                 <div className="pl-2">
-                  <BarBoard
-                    rows={members.map((x) => memberRow(x, metric, false))}
-                    onSelect={setSelected}
-                  />
+                  <TeamPanel team={t} metric={metric} onSelect={setSelected} />
                 </div>
               )}
             </div>
@@ -1096,17 +1362,29 @@ const CompetitionSection = ({ competition, busy, onLeave }: {
       </div>
       </>
       )}
+      </>
+      )}
 
-      {myTeams.map((t) => (
+      {/* Only the entry you arrived through. Offering both here would let a team
+          pill withdraw your personal entry, which is a different membership and
+          rarely what the click meant. */}
+      {viaTeam ? (
         <button
-          key={t}
-          onClick={() => onLeave(t)}
+          onClick={() => onLeaveTeam(viaTeam)}
           disabled={busy}
           className="w-full cursor-pointer rounded-lg border border-slate-100 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-40"
         >
-          Withdraw {t} from {competition}
+          Withdraw {viaTeam} from {competition}
         </button>
-      ))}
+      ) : (
+        <button
+          onClick={onLeaveSolo}
+          disabled={busy}
+          className="w-full cursor-pointer rounded-lg border border-slate-100 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-40"
+        >
+          Withdraw yourself from {competition}
+        </button>
+      )}
     </div>
   );
 };
@@ -1178,13 +1456,26 @@ const FlagBadge = ({ available, small }: { available: boolean; small?: boolean }
  *  reply. NAMES ONLY — the boards themselves are fetched when a section is opened,
  *  so the once-a-minute check-in no longer carries every visible member's scores. */
 function useMemberships() {
-  const [m, setM] = useState<{ teams: string[]; competitions: string[] }>(
-    { teams: [], competitions: [] },
-  );
+  const [m, setM] = useState<{
+    teams: string[];
+    competitions: string[];
+    teamCompetitions: { competition: string; team: string }[];
+    friendRequests: number;
+  }>({ teams: [], competitions: [], teamCompetitions: [], friendRequests: 0 });
   useEffect(() => {
     const load = () => chrome.storage.local.get([TEAMS_KEY], (r) => {
-      const b = r[TEAMS_KEY] as { teams?: string[]; competitions?: string[] } | undefined;
-      setM({ teams: b?.teams ?? [], competitions: b?.competitions ?? [] });
+      const b = r[TEAMS_KEY] as {
+        teams?: string[];
+        competitions?: string[];
+        teamCompetitions?: { competition: string; team: string }[];
+        friendRequests?: number;
+      } | undefined;
+      setM({
+        teams: b?.teams ?? [],
+        competitions: b?.competitions ?? [],
+        teamCompetitions: b?.teamCompetitions ?? [],
+        friendRequests: b?.friendRequests ?? 0,
+      });
     });
     load();
     const listener = (changes: Record<string, unknown>, area: string) => {
@@ -1239,6 +1530,52 @@ const BoardLoading = () => (
   </div>
 );
 
+/** Says what the board above is a slice OF. Boards are topped server-side, so
+ *  without this the leader of a 10,000-person competition and the leader of a
+ *  three-person team look identical — and someone in 487th place, whose row is
+ *  always included, would appear to be one of only a handful of participants. */
+const BoardFooter = ({ board, noun }: {
+  board: { member_count?: number; my_rank?: number | null; members: unknown[] } | null;
+  noun: string;
+}) => {
+  if (!board) return null;
+  const total = board.member_count ?? board.members.length;
+  const shown = board.members.length;
+  if (total <= shown) return null;   // the whole field is on screen; nothing to explain
+  return (
+    <p className="text-[9px] text-slate-400">
+      Top {shown - (board.my_rank && board.my_rank > shown ? 1 : 0)} of {total.toLocaleString()} {noun}
+      {total === 1 ? '' : 's'}
+      {board.my_rank ? ` · you are #${board.my_rank.toLocaleString()}` : ''}
+    </p>
+  );
+};
+
+/** One team's roster inside a competition, fetched on expand.
+ *
+ *  A separate component precisely so the hook mounts with the panel: the competition
+ *  board no longer carries every member, so a roster has to be asked for, and asking
+ *  for all of them up front is the cost this whole design avoids. */
+const TeamPanel = ({ team, metric, onSelect }: {
+  team: string;
+  metric: Metric;
+  onSelect: (userId: string) => void;
+}) => {
+  const { board, loading } = useBoard<TeamBoard>(
+    { type: 'SERVER_TEAM_BOARD', team, metric }, `${team}:${metric}`);
+  if (loading && !board) return <BoardLoading />;
+  return (
+    <>
+      <BarBoard
+        rows={(board?.members ?? []).map((x) => memberRow(x, metric, false))}
+        empty={board ? 'No members yet.' : "Couldn't load this team."}
+        onSelect={onSelect}
+      />
+      <BoardFooter board={board} noun="member" />
+    </>
+  );
+};
+
 // ── Main tab ──────────────────────────────────────────────────────────────────
 const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelistToggle, onSettingsChange }: {
   state: SessionState;
@@ -1256,6 +1593,7 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
   // anything. The pills keep all of them one tap away.
   const [section, setSection] = useState('personal');
   const [joinOpen, setJoinOpen] = useState(false);
+  const [joinCompOpen, setJoinCompOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -1278,12 +1616,22 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
     settings.allowedDomains.some(d => d.trim() !== '' && currentTabUrl.includes(d.trim()));
 
   const teamSection = memberships.teams.find((t) => `team:${t}` === section);
-  const compSection = memberships.competitions.find((c) => `comp:${c}` === section);
+  // A competition pill is `comp:<name>` for your own entry and `comp:<name>:<team>`
+  // for a team's. Both open the same board; the suffix says which entry you arrived
+  // through, which decides what you can withdraw from here.
+  const compMatch = section.startsWith('comp:') ? section.slice(5).split(':') : null;
+  const compName = compMatch?.[0] ?? '';
+  const compTeam = compMatch?.[1];
+  const compSection =
+    (compTeam
+      ? memberships.teamCompetitions.some((tc) => tc.competition === compName && tc.team === compTeam)
+      : memberships.competitions.includes(compName))
+      ? compName : undefined;
   // Leaving the team you were looking at removes its pill; fall back rather than
   // rendering a section that no longer exists.
-  const active = teamSection || compSection ? section : 'personal';
+  const active = section === 'friends' || teamSection || compSection ? section : 'personal';
 
-  const pill = (key: string, label: string, icon?: React.ReactNode) => (
+  const pill = (key: string, label: string, icon?: React.ReactNode, badge = 0) => (
     <button
       key={key}
       onClick={() => { setSection(key); setError(''); }}
@@ -1293,6 +1641,13 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
     >
       {icon}
       <span className="truncate">{label}</span>
+      {/* Someone is waiting on you. On the pill rather than inside the section,
+          because the whole point is to be seen without opening it. */}
+      {badge > 0 && (
+        <span className="flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-1 text-[8px] font-bold text-white">
+          {badge}
+        </span>
+      )}
     </button>
   );
 
@@ -1307,10 +1662,17 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
       <div className="flex items-start gap-2">
         <div className="flex flex-1 flex-wrap items-center gap-1">
           {pill('personal', 'Personal')}
+          {pill('friends', 'Friends', <UserPlus size={10} />, memberships.friendRequests)}
           {memberships.teams.map((t) => pill(`team:${t}`, t, <Users size={10} />))}
+          {/* Two entries into one competition are two pills, because they are two
+              things you are doing: your own score against other individuals, and
+              your team's total against other teams. */}
           {memberships.competitions.map((c) => pill(`comp:${c}`, c, <Trophy size={10} />))}
+          {memberships.teamCompetitions.map((tc) =>
+            pill(`comp:${tc.competition}:${tc.team}`, `${tc.competition} · ${tc.team}`,
+                 <Trophy size={10} />))}
           <button
-            onClick={() => { setJoinOpen((v) => !v); setError(''); }}
+            onClick={() => { setJoinOpen((v) => !v); setJoinCompOpen(false); setError(''); }}
             title="Create a team, or join one that exists"
             className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold transition-colors ${
               joinOpen ? 'bg-blue-500 text-white' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
@@ -1318,9 +1680,34 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
           >
             <Plus size={11} /> Team
           </button>
+          <button
+            onClick={() => { setJoinCompOpen((v) => !v); setJoinOpen(false); setError(''); }}
+            title="Enter a competition as yourself — separate from any team entry"
+            className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold transition-colors ${
+              joinCompOpen ? 'bg-amber-500 text-white' : 'bg-amber-50 text-amber-700 hover:bg-amber-100'
+            }`}
+          >
+            <Plus size={11} /> Competition
+          </button>
         </div>
         <FlagBadge available={flagAvailable} />
       </div>
+      {joinCompOpen && (
+        <NameForm
+          placeholder="competition name"
+          hint="Creating makes an INDIVIDUAL competition — people enter themselves, teams are refused."
+          withPassword
+          passwordPlaceholder="competition password (min 4)"
+          busy={busy}
+          error={error}
+          onSubmit={(name, create, password) =>
+            act({ type: 'SERVER_JOIN_COMPETITION', competition: name, create, password }, () => {
+              setJoinCompOpen(false);
+              setSection(`comp:${name}`);
+            })
+          }
+        />
+      )}
       {joinOpen && (
         <NameForm
           placeholder="team name"
@@ -1338,7 +1725,9 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
       )}
     </div>
 
-    {teamSection && active !== 'personal' ? (
+    {active === 'friends' ? (
+      <FriendsSection />
+    ) : teamSection && active !== 'personal' ? (
       <TeamSection
         team={teamSection}
         busy={busy}
@@ -1354,9 +1743,14 @@ const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelist
     ) : compSection && active !== 'personal' ? (
       <CompetitionSection
         competition={compSection}
+        viaTeam={compTeam}
         busy={busy}
-        onLeave={(team) =>
+        onLeaveTeam={(team) =>
           act({ type: 'SERVER_LEAVE_COMPETITION', team, competition: compSection },
+              () => setSection('personal'))
+        }
+        onLeaveSolo={() =>
+          act({ type: 'SERVER_LEAVE_COMPETITION_SOLO', competition: compSection },
               () => setSection('personal'))
         }
       />
