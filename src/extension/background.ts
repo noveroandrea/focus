@@ -15,7 +15,7 @@ import {
   initSync, queueDelta, queueDomains, flush, getCachedSummary,
   joinTeam, leaveTeam, enrollTeam, leaveCompetition, fetchMemberProfile, flagDomain,
   joinCompetition, leaveCompetitionSolo,
-  fetchTeamBoard, fetchCompetitionBoard, fetchMyDays,
+  fetchTeamBoard, fetchCompetitionBoard, fetchMyDays, fetchTeamDays, fetchFriendsDays,
   fetchFriendsBoard, searchUsers, sendFriendRequest, respondFriendRequest, removeFriend,
 } from './server/sync';
 import { signIn, signOut, getSession } from './server/auth';
@@ -546,6 +546,14 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
     // of somebody else's data, so nothing is written to the local caches.
     case 'SERVER_MY_DAYS':
       fetchMyDays().then(sendResponse);
+      break;
+
+    case 'SERVER_TEAM_DAYS':
+      fetchTeamDays(message.team).then(sendResponse);
+      break;
+
+    case 'SERVER_FRIENDS_DAYS':
+      fetchFriendsDays().then(sendResponse);
       break;
 
     case 'SERVER_JOIN_COMPETITION':

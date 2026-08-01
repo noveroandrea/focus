@@ -193,6 +193,10 @@ export type MessageType =
   | { type: 'SERVER_LEAVE_COMPETITION_SOLO'; competition: string }
   // Profile detail. Fetched on demand and never cached — it is somebody else's data.
   | { type: 'SERVER_MY_DAYS' }
+  // Averaged day series for a group. Separate from the board messages because it is
+  // fetched once per section open, while a board refreshes every minute.
+  | { type: 'SERVER_TEAM_DAYS'; team: string }
+  | { type: 'SERVER_FRIENDS_DAYS' }
   | { type: 'SERVER_FRIENDS_BOARD'; metric: 'live' | 'avg7' | 'avg30' }
   | { type: 'SERVER_SEARCH_USERS'; query: string }
   | { type: 'SERVER_FRIEND_REQUEST'; userId: string }

@@ -711,6 +711,36 @@ export function fetchMyDays(): Promise<ServerDay[] | null> {
   return readRpc<ServerDay[]>('get_my_days', {});
 }
 
+/** The 7-day and 30-day means a chart needs, and nothing else. ServerSummary
+ *  satisfies it structurally, so the same chart draws a person and a group. */
+export interface AvgSummary {
+  avg7_focus: number; avg7_distracted: number;
+  avg30_focus: number; avg30_distracted: number;
+}
+
+/** A day series averaged over a group — a team, or you and your friends.
+ *
+ *  Same two charts the Personal section draws, over a set of people instead of one.
+ *  `summary.live_*` is the group's mean live score, which becomes today's bar; the
+ *  server documents which of the two averaging conventions each field uses. */
+export interface GroupHistory {
+  member_count: number;
+  summary: AvgSummary & { live_focus: number; live_distracted: number };
+  days: ServerDay[];
+}
+
+/** Averaged history for one of the caller's teams. Fetched ONCE when the section
+ *  opens, not on the boards' 60-second refresh: a completed day changes once a day.
+ *  Same reasoning as fetchMyDays. */
+export function fetchTeamDays(team: string): Promise<GroupHistory | null> {
+  return readRpc<GroupHistory>('get_team_days', { p_team: team });
+}
+
+/** The same, over the caller and everyone who has accepted them. */
+export function fetchFriendsDays(): Promise<GroupHistory | null> {
+  return readRpc<GroupHistory>('get_friends_days', {});
+}
+
 /** One team's board, fetched when its section is opened rather than pushed with
  *  every post. Refused unless the caller is a member. */
 export function fetchTeamBoard(team: string, metric: Metric, limit = 20): Promise<TeamBoard | null> {

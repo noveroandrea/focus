@@ -95,6 +95,9 @@ export default defineConfig(() => {
           sprite:     path.resolve(__dirname, 'src/extension/content/sprite.ts'),
           popup:      path.resolve(__dirname, 'popup.html'),
           pip:        path.resolve(__dirname, 'pip.html'),
+          // The full-tab dashboard. Its own entry so the wide-only charts never
+          // ship inside the popup bundle.
+          dashboard:  path.resolve(__dirname, 'dashboard.html'),
         },
         output: {
           entryFileNames: (chunkInfo) => {
