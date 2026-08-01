@@ -185,6 +185,35 @@ $$;
 revoke all on function public.enroll_team(text, text, boolean, text) from anon, public;
 grant execute on function public.enroll_team(text, text, boolean, text) to authenticated;
 
+-- ── Existing entries reconciled to the kind ───────────────────────────────────
+-- Typing a competition retroactively invalidates entries made by the other route,
+-- and they must go BEFORE the ranked table is rebuilt: (competition, user_id) is
+-- unique from here on, and someone entered twice would fail the insert. This is not
+-- a cache — it deletes real opt-ins — so it reports what it removed.
+--
+-- Everything that existed before this migration was reachable only by enroll_team
+-- OR by join_competition into the same name; the backfill calls them all 'team', so
+-- in practice the first delete is the one that fires.
+do $$
+declare
+  v_solo int;
+  v_team int;
+begin
+  delete from public.competition_members cm
+  using public.competitions c
+  where c.name = cm.competition and c.kind <> 'individual';
+  get diagnostics v_solo = row_count;
+
+  delete from public.team_competitions tc
+  using public.competitions c
+  where c.name = tc.competition and c.kind <> 'team';
+  get diagnostics v_team = row_count;
+
+  raise notice 'competition kind: removed % individual entr(ies) from team competitions, % team entr(ies) from individual competitions',
+    v_solo, v_team;
+end;
+$$;
+
 -- ── The ranked member table now covers both routes ────────────────────────────
 -- Rebuilt rather than altered: it is a cache with a one-minute lifetime, so dropping
 -- it costs nothing and avoids a migration that has to reason about existing rows.
@@ -255,6 +284,15 @@ begin
   -- A competition is one kind, so in practice only one branch of the union
   -- contributes to any given competition. The union is what keeps that a property of
   -- the data rather than an assumption in the query.
+  --
+  -- `distinct on (competition, user_id)` is a seatbelt, not the rule. The rule lives
+  -- at the doors (kinds, plus one-team-per-person-per-competition), and legal data
+  -- never produces a second row. But this runs from pg_cron every minute, and a
+  -- duplicate slipping in — legacy rows, a future route added without the check —
+  -- would abort the refresh and freeze EVERY board on the last good snapshot. Losing
+  -- one duplicate row beats losing all the leaderboards. `team nulls last` makes the
+  -- choice deterministic and prefers the team route, which is the one whose totals
+  -- another table depends on.
   truncate public.rank_competition_member;
   insert into public.rank_competition_member
   select competition, team, user_id, display_name,
@@ -265,32 +303,36 @@ begin
          rank() over (partition by competition order by avg30_focus + avg30_distracted desc),
          count(*) over (partition by competition)
   from (
-    select tc.competition, m.team, m.user_id,
-           coalesce(nullif(split_part(u.email, '@', 1), ''), 'participant') as display_name,
-           coalesce(s.live_focus, 0)::numeric(12,2)       as live_focus,
-           coalesce(s.live_distracted, 0)::numeric(12,2)  as live_distracted,
-           coalesce(s.avg7_focus, 0)::numeric(12,2)       as avg7_focus,
-           coalesce(s.avg7_distracted, 0)::numeric(12,2)  as avg7_distracted,
-           coalesce(s.avg30_focus, 0)::numeric(12,2)      as avg30_focus,
-           coalesce(s.avg30_distracted, 0)::numeric(12,2) as avg30_distracted
-    from team_competitions tc
-    join team_members m on m.team = tc.team
-    left join user_summary s on s.user_id = m.user_id
-    left join auth.users   u on u.id      = m.user_id
+    select distinct on (e.competition, e.user_id) e.*
+    from (
+      select tc.competition, m.team, m.user_id,
+             coalesce(nullif(split_part(u.email, '@', 1), ''), 'participant') as display_name,
+             coalesce(s.live_focus, 0)::numeric(12,2)       as live_focus,
+             coalesce(s.live_distracted, 0)::numeric(12,2)  as live_distracted,
+             coalesce(s.avg7_focus, 0)::numeric(12,2)       as avg7_focus,
+             coalesce(s.avg7_distracted, 0)::numeric(12,2)  as avg7_distracted,
+             coalesce(s.avg30_focus, 0)::numeric(12,2)      as avg30_focus,
+             coalesce(s.avg30_distracted, 0)::numeric(12,2) as avg30_distracted
+      from team_competitions tc
+      join team_members m on m.team = tc.team
+      left join user_summary s on s.user_id = m.user_id
+      left join auth.users   u on u.id      = m.user_id
 
-    union all
+      union all
 
-    select cm.competition, null::text, cm.user_id,
-           coalesce(nullif(split_part(u.email, '@', 1), ''), 'participant'),
-           coalesce(s.live_focus, 0)::numeric(12,2),
-           coalesce(s.live_distracted, 0)::numeric(12,2),
-           coalesce(s.avg7_focus, 0)::numeric(12,2),
-           coalesce(s.avg7_distracted, 0)::numeric(12,2),
-           coalesce(s.avg30_focus, 0)::numeric(12,2),
-           coalesce(s.avg30_distracted, 0)::numeric(12,2)
-    from competition_members cm
-    left join user_summary s on s.user_id = cm.user_id
-    left join auth.users   u on u.id      = cm.user_id
+      select cm.competition, null::text, cm.user_id,
+             coalesce(nullif(split_part(u.email, '@', 1), ''), 'participant'),
+             coalesce(s.live_focus, 0)::numeric(12,2),
+             coalesce(s.live_distracted, 0)::numeric(12,2),
+             coalesce(s.avg7_focus, 0)::numeric(12,2),
+             coalesce(s.avg7_distracted, 0)::numeric(12,2),
+             coalesce(s.avg30_focus, 0)::numeric(12,2),
+             coalesce(s.avg30_distracted, 0)::numeric(12,2)
+      from competition_members cm
+      left join user_summary s on s.user_id = cm.user_id
+      left join auth.users   u on u.id      = cm.user_id
+    ) e
+    order by e.competition, e.user_id, e.team nulls last
   ) t;
 
   -- ── Per-competition team totals ────────────────────────────────────────────
@@ -429,3 +471,17 @@ grant execute on function public.get_competition_board(text, text, int) to authe
 --
 --   -- Creation sets the kind from the door used:
 --   select name, kind from public.competitions order by created_at desc limit 5;
+--
+--   -- Nobody reaches a competition twice any more (must return no rows):
+--   select competition, user_id, count(*)
+--   from (select tc.competition, m.user_id
+--         from public.team_competitions tc
+--         join public.team_members m on m.team = tc.team
+--         union all
+--         select competition, user_id from public.competition_members) e
+--   group by 1, 2 having count(*) > 1;
+--
+--   -- If it DOES return rows, they are the legacy two-teams-one-competition case
+--   -- the doors now refuse. Pick which team that person keeps and remove them from
+--   -- the other with leave_team — the refresh will not fail meanwhile, it just drops
+--   -- one of the two rows.
