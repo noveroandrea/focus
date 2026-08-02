@@ -1,0 +1,18 @@
+{
+  "name": "focus-agent",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Reports the foreground program to the Focus browser extension over the loopback interface. No account, no session, no UI — the extension decides what it all means.",
+  "license": "GPL-3.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "npm run build && node dist/index.js",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "~5.8.2"
+  }
+}

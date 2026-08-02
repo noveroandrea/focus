@@ -38,6 +38,7 @@ import {
 import {
   IDLE_POLL_MS, OS_IDLE_FLOOR_S, OS_IDLE_COUNTDOWN_S, HEARTBEAT_THROTTLE_MS, PAGE_INPUT_FRESH_MS,
 } from './timings';
+import { refreshProgram, currentProgram, isBrowserProgram, isAllowedProgram } from './agent';
 
 /** What this module needs from background.ts, which still owns the state itself. */
 export interface HeartbeatHost {
@@ -225,6 +226,47 @@ function pollOsIdle() {
   if (!settings.enabled || settings.forceActive) return;
   const idleSec = clampIdleTime(settings.idleTime);
 
+  // Ask the optional desktop agent which program is in front. Throttled and fire-
+  // and-forget inside; with no agent installed this never resolves to anything and
+  // every branch below falls through to the original, browser-only behaviour.
+  refreshProgram();
+  const program = currentProgram();
+
+  // ── The agent is running and a NON-BROWSER program is in front ──────────────
+  // This is the case chrome.idle alone could never resolve. "Input happened
+  // somewhere" now has a name attached, so the answer is no longer a guess:
+  //
+  //   whitelisted program  → this IS work. Count it, even though no tab is
+  //                          involved and no page heartbeat can ever arrive.
+  //   anything else        → this is NOT work. Generate nothing and let the
+  //                          session expire, even though the OS says the user is
+  //                          busy — being busy in a game is precisely the state
+  //                          the extension is meant to notice.
+  //
+  // A browser is deliberately not handled here; see below.
+  if (program && !isBrowserProgram(program.id)) {
+    if (!isAllowedProgram(program.id, settings.allowedPrograms)) {
+      // Drop the anchor so that returning to work restarts the countdown from a
+      // clean state rather than from a stale reading taken minutes ago.
+      osIdleSince = 0;
+      return;
+    }
+    chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
+      if (idleState !== 'active') { applyOsIdleReading(idleSec); return; }
+      osIdleSince = 0;
+      // Work is happening in another application — exactly what osHeld was always
+      // meant to say. Now it is a statement rather than an inference.
+      host.touchState({ osHeld: true });
+      markActiveNow();
+    });
+    return;
+  }
+
+  // ── No agent, or a BROWSER is in front: the active tab decides ─────────────
+  // Unchanged from before the agent existed, and it must stay that way. The agent
+  // can only see "Chrome is in front", which says nothing about whether that
+  // window is on Overleaf or on Instagram — the extension already knows, and this
+  // is the path where it applies what it knows.
   withTrackedActiveTab(() => {
     chrome.idle.queryState(OS_IDLE_FLOOR_S, (idleState) => {
       if (idleState !== 'active') { applyOsIdleReading(idleSec); return; }

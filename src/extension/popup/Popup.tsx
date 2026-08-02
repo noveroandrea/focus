@@ -350,14 +350,23 @@ const SettingsTab = ({ settings, onChange }: {
             </p>
             <ul className="space-y-1">
               <li>
-                <strong>Windows</strong> — install <a href="https://learn.microsoft.com/windows/powertoys/" target="_blank" rel="noreferrer" className="text-blue-600 underline">PowerToys</a>,
+                <strong>Linux / GNOME</strong> — <strong>automatic</strong>, if you installed the
+                companion bridge (<code className="rounded bg-slate-200 px-1">desktop/gnome-extension/install.sh</code>).
+                It runs inside the compositor, which is the only thing that can raise a window
+                on Wayland, and it pins this one for you.
+              </li>
+              <li>
+                <strong>Windows</strong> — <strong>automatic</strong> while the desktop agent is
+                running; it pins the window for you. Without the agent, install <a href="https://learn.microsoft.com/windows/powertoys/" target="_blank" rel="noreferrer" className="text-blue-600 underline">PowerToys</a>,
                 focus the window and press <code className="rounded bg-slate-200 px-1">Win+Ctrl+T</code>.
               </li>
               <li>
-                <strong>macOS</strong> — no built-in option; use a helper such as <a href="https://rectangleapp.com/" target="_blank" rel="noreferrer" className="text-blue-600 underline">Rectangle</a> or Amethyst to pin it.
+                <strong>macOS</strong> — manual: no app may raise another app's window, so use a
+                helper such as <a href="https://rectangleapp.com/" target="_blank" rel="noreferrer" className="text-blue-600 underline">Rectangle</a> (enable
+                <em> Always on Top</em>) or Amethyst, and grant it Accessibility.
               </li>
               <li>
-                <strong>Linux / GNOME</strong> — run once:<br />
+                <strong>Linux / GNOME, without the bridge</strong> — run once:<br />
                 <code className="mt-0.5 inline-block break-all rounded bg-slate-200 px-1">gsettings set org.gnome.desktop.wm.keybindings toggle-above "['&lt;Primary&gt;backslash']"</code><br />
                 then focus the window and press <code className="rounded bg-slate-200 px-1">Ctrl+\</code>.
               </li>

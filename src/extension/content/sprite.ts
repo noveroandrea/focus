@@ -770,6 +770,14 @@ function init() {
   });
   document.body.appendChild(rootEl);
 
+  // Clamp the random starting position into the viewport before the sprite is
+  // built. px/py are seeded up to (400, 300), which is off-screen in any viewport
+  // smaller than that — a narrow or half-height browser window — and nothing would
+  // correct it until the first heartbeat moved the sprite. On a page that never
+  // goes active, that is a sprite you never see.
+  px = Math.min(px, Math.max(0, window.innerWidth - SIZE));
+  py = Math.min(py, Math.max(0, window.innerHeight - SIZE));
+
   spriteEl = buildSprite();
   rootEl.appendChild(spriteEl);
 

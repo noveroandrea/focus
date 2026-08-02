@@ -1,4 +1,4 @@
-import { SessionState, MessageType, Settings, ServerStatus, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, round2 } from '../types';
+import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, round2 } from '../types';
 import {
   STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS,
   IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
@@ -20,6 +20,12 @@ import {
 } from './server/sync';
 import { signIn, signOut, getSession } from './server/auth';
 import { isServerConfigured } from './server/config';
+// The optional desktop agent — reports which PROGRAM is in front. Purely a sensor:
+// every decision about what that means lives in ./heartbeats.
+import {
+  currentProgram, recentProgram, isAgentOnline, isAllowedProgram, isBrowserProgram,
+  normaliseProgram, programNames, setNamedPrograms, agentNote, refreshProgram,
+} from './agent';
 
 /** Assemble the account snapshot the popup renders. */
 async function replyServerStatus(sendResponse: (r: ServerStatus) => void) {
@@ -115,6 +121,7 @@ chrome.storage.local.get(['focusFlowState', 'focusFlowSettings'], (result) => {
     chrome.storage.local.set({ focusFlowSettings: DEFAULT_SETTINGS });
   }
   state.enabled = settings.enabled;
+  setNamedPrograms(settings.allowedPrograms ?? []);
   if (settings.forceActive) state.isHeartbeatActive = true;
   updateActionIcon();
   chrome.windows.getLastFocused((win) => {
@@ -172,6 +179,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (whitelistChanged) {
       void queueDomains(settings.allowedDomains);
     }
+    // Only whitelisted programs get their display name written to disk.
+    setNamedPrograms(settings.allowedPrograms ?? []);
   }
 });
 
@@ -491,6 +500,45 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
 
     case 'CLASSIFY_PAGE': {
       classifyPage(message.url, message.title).then(sendResponse);
+      break;
+    }
+
+    // The optional desktop agent, answered from the poller's cache so opening the
+    // popup costs no extra request. The nudge matters on a service worker that has
+    // just been woken: its setInterval did not survive suspension, so the cache can
+    // be a moment stale and the popup would flash "agent off" until the next poll.
+    case 'AGENT_STATUS': {
+      refreshProgram();
+      const program = currentProgram();
+      const recent = recentProgram();
+      sendResponse({
+        running: isAgentOnline(),
+        program,
+        allowed: !!program && isAllowedProgram(program.id, settings.allowedPrograms),
+        recent,
+        recentAllowed: !!recent && isAllowedProgram(recent.id, settings.allowedPrograms),
+        names: programNames(),
+        note: agentNote(),
+      } satisfies AgentStatus);
+      break;
+    }
+
+    // Adding a program from the companion window, which has no settings UI of its
+    // own. Routed through here rather than written straight to storage because the
+    // background already holds the authoritative `settings`; a writer that knew only
+    // this one field would have to read-modify-write and could clobber a concurrent
+    // edit made in the popup.
+    case 'ADD_PROGRAM': {
+      const id = normaliseProgram(message.program);
+      const programs = settings.allowedPrograms ?? [];
+      // A browser is never evidence of work on its own — the page whitelist decides
+      // those — so the door is shut here as well, not only in the UI that offers it.
+      if (id && !isBrowserProgram(id) && !programs.includes(id)) {
+        settings = { ...settings, allowedPrograms: [...programs, id] };
+        chrome.storage.local.set({ focusFlowSettings: settings });
+        setNamedPrograms(settings.allowedPrograms);   // its name may now be saved
+      }
+      sendResponse({});
       break;
     }
 

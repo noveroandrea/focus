@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { SessionState, Settings, DayScore, MessageType, HISTORY_KEY, localDateKey, weekdayName } from '../../types';
-import { Plus, X, Check, Copy, ClipboardPaste, Users, Trophy, ChevronLeft, ChevronRight, Flag, Loader2, UserPlus, UserCheck, Clock } from 'lucide-react';
+import { SessionState, Settings, DayScore, MessageType, AgentStatus, HISTORY_KEY, localDateKey, weekdayName } from '../../types';
+import { Plus, X, Check, Copy, ClipboardPaste, Users, Trophy, ChevronLeft, ChevronRight, Flag, Loader2, UserPlus, UserCheck, Clock, Monitor } from 'lucide-react';
 import { SUMMARY_KEY, TEAMS_KEY, FLAG_KEY, DOMAIN_FLAGS_KEY } from '../server/config';
+// Pure predicates — the same two the background applies, so the list the popup
+// writes and the list the poll reads can never disagree about what a browser is.
+import { isBrowserProgram, normaliseProgram } from '../agent';
 // Type-only: erased at compile time, so the popup bundle does not pull in sync.ts
 // (and through it auth.ts and the whole fetch path) just to name a shape.
 import type { ServerSummary, ServerDay, MemberScore, TeamBoard, CompetitionTeam, CompetitionBoard, MemberProfile, FlagResult, FriendsBoard, UserHit, FriendStatus, AvgSummary, GroupHistory as GroupHistoryPayload } from '../server/sync';
@@ -1790,6 +1793,182 @@ export const TeamPanel = ({ team, metric, onSelect }: {
  *  On this branch the list is a CACHE of the server's copy: an edit here goes out
  *  through apply_score_delta and the reply overwrites it. It still works offline,
  *  because heartbeat.ts reads the same local key. */
+/** The PROGRAM whitelist — the desktop agent's half of "am I working?".
+ *
+ *  Sits directly under Allowed pages because it is the same question asked about
+ *  the other half of the machine, but it is a genuinely separate list: a domain is
+ *  matched by substring against a URL, a program by an exact platform identifier.
+ *
+ *  The whole section is inert without the agent running, which is why it leads with
+ *  the agent's status rather than a bare text box: an empty list and no explanation
+ *  would look broken. When the agent IS running it offers the program you are using
+ *  right now, because typing `gnome-terminal-` from memory is nobody's idea of
+ *  configuration. */
+export const AllowedPrograms = ({ settings, onChange }: {
+  settings: Settings;
+  onChange: (s: Settings) => void;
+}) => {
+  const [agent, setAgent] = useState<AgentStatus | null>(null);
+  const [newProgram, setNewProgram] = useState('');
+  const [rejected, setRejected] = useState('');
+
+  // Polled while the popup is open: the point of the panel is to show what is in
+  // front of you *now*, and the answer changes as you alt-tab.
+  useEffect(() => {
+    let alive = true;
+    const ask = () => {
+      chrome.runtime.sendMessage({ type: 'AGENT_STATUS' }, (res?: AgentStatus) => {
+        if (chrome.runtime.lastError || !alive) return;
+        if (res) setAgent(res);
+      });
+    };
+    ask();
+    const t = setInterval(ask, 1000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+
+  const set = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
+  const programs = settings.allowedPrograms ?? [];
+  const names = agent?.names ?? {};
+
+  const add = (raw: string) => {
+    const p = normaliseProgram(raw);
+    if (!p || programs.includes(p)) return;
+    // Typed by hand, a browser would otherwise slip past the rule the offered
+    // button already respects — and counting one as work counts every distraction
+    // site as work. Refused with a reason rather than silently dropped.
+    if (isBrowserProgram(p)) { setRejected(p); return; }
+    setRejected('');
+    set({ allowedPrograms: [...programs, p] });
+    setNewProgram('');
+  };
+
+  const remove = (p: string) =>
+    set({ allowedPrograms: programs.filter((x) => x !== p) });
+
+  // The last NON-browser program, never the live reading: the popup is part of the
+  // browser, so while it is open the live answer is always "a browser is in front".
+  const current = agent?.recent ?? null;
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-slate-500">Allowed programs</span>
+        <span
+          title={agent?.running
+            ? 'The desktop agent is running and reporting the foreground program'
+            : 'Start the desktop agent (see desktop/) to track programs outside the browser'}
+          className={`flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider ${
+            agent?.running ? 'text-green-600' : 'text-slate-400'
+          }`}
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${agent?.running ? 'bg-green-500' : 'bg-slate-300'}`} />
+          {agent?.running ? 'agent on' : 'agent off'}
+        </span>
+      </div>
+
+      {!agent?.running && (
+        <p className="rounded-lg bg-slate-50 px-2 py-1.5 text-[9px] leading-relaxed text-slate-500">
+          Without the desktop agent this list does nothing — the extension cannot see
+          outside the browser. Click the <span className="font-medium">Focus agent</span> icon
+          to start it (install it once with{' '}
+          <span className="font-mono">desktop/install-icon.sh</span>).
+        </p>
+      )}
+      {agent?.running && agent.note && (
+        <p className="rounded-lg bg-amber-50 px-2 py-1.5 text-[9px] leading-relaxed text-amber-700">
+          {agent.note}
+        </p>
+      )}
+
+      {/* The one-click path. Far more usable than asking someone to recall that
+          GNOME truncates process names to 15 characters. */}
+      {current && (
+        <div className="flex items-center gap-2 rounded-lg border border-slate-100 bg-white px-2 py-1.5">
+          <Monitor size={12} className="flex-shrink-0 text-slate-400" />
+          <span className="min-w-0 flex-1 truncate">
+            <span className="text-[11px] text-slate-700">{current.name}</span>
+            <span className="ml-1 font-mono text-[9px] text-slate-400">{current.id}</span>
+          </span>
+          {agent?.recentAllowed ? (
+            <span className="flex-shrink-0 text-[9px] font-bold uppercase tracking-wider text-green-600">
+              on the list
+            </span>
+          ) : (
+            <button
+              onClick={() => add(current.id)}
+              className="flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-lg bg-blue-500 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-blue-600"
+            >
+              <Plus size={10} /> This is work
+            </button>
+          )}
+        </div>
+      )}
+
+      <div
+        className="space-y-0.5 overflow-y-auto rounded-xl border border-slate-100 bg-white p-1"
+        style={{ maxHeight: DAY_MAX_HEIGHT_PX }}
+      >
+        {programs.length === 0 && (
+          <p className="py-2 text-center text-[10px] text-slate-400">
+            No programs — nothing outside the browser counts as work.
+          </p>
+        )}
+        {/* Named where a name is known, identifier alongside it in fine print — the
+            identifier is what actually matches, so it stays visible, but `code` on
+            its own tells nobody they whitelisted Visual Studio Code. */}
+        {programs.map((p) => (
+          <div key={p} className="flex items-center gap-2 rounded-lg px-2 py-1 hover:bg-slate-50">
+            <span className="min-w-0 flex-1 truncate">
+              {names[p] ? (
+                <>
+                  <span className="text-[11px] text-slate-700">{names[p]}</span>
+                  <span className="ml-1 font-mono text-[9px] text-slate-400">{p}</span>
+                </>
+              ) : (
+                <span className="font-mono text-[11px] text-slate-700">{p}</span>
+              )}
+            </span>
+            <button
+              onClick={() => remove(p)}
+              title={`Stop counting ${names[p] ?? p} as work`}
+              className="flex-shrink-0 cursor-pointer text-slate-300 transition-colors hover:text-red-500"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          type="text"
+          placeholder="e.g. code, winword, com.apple.preview"
+          value={newProgram}
+          onChange={(e) => setNewProgram(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && add(newProgram)}
+          className="flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-[11px] focus:outline-none focus:ring-2 focus:ring-blue-300"
+        />
+        <button
+          onClick={() => add(newProgram)}
+          className="flex cursor-pointer items-center gap-1 rounded-lg bg-blue-500 px-3 py-1.5 text-[11px] text-white transition-colors hover:bg-blue-600"
+        >
+          <Plus size={12} /> Add
+        </button>
+      </div>
+      {rejected && (
+        <p className="text-[9px] text-red-500">
+          <span className="font-mono">{rejected}</span> is a browser — the page whitelist
+          above decides those.
+        </p>
+      )}
+      <p className="text-[9px] text-slate-400">
+        Browsers are ignored on purpose — the page whitelist above already decides those.
+      </p>
+    </div>
+  );
+};
+
 export const AllowedPages = ({ settings, onChange }: {
   settings: Settings;
   onChange: (s: Settings) => void;
@@ -2021,6 +2200,8 @@ export const PersonalSection = ({ state, settings, currentTabDomain, isWhitelist
     <DailyHistory state={state} />
 
     <AllowedPages settings={settings} onChange={onSettingsChange} />
+
+    <AllowedPrograms settings={settings} onChange={onSettingsChange} />
 
   </div>
   );

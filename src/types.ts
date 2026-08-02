@@ -89,6 +89,16 @@ export interface Settings {
   companionEnabled: boolean;
   /** Full list of allowed domain strings — pre-populated with defaults, fully editable */
   allowedDomains: string[];
+  /** Foreground PROGRAMS that count as work, reported by the optional desktop agent.
+   *
+   *  A separate list from allowedDomains, and not a variant of it: a domain is a
+   *  place inside the browser matched by substring against a URL, while a program is
+   *  an OS-level identity matched exactly against the agent's identifier (executable
+   *  name on Windows, bundle id on macOS, process name on Linux).
+   *
+   *  Empty by default. There is no useful cross-platform default list, and the popup
+   *  offers the program you are actually using with one click to add it. */
+  allowedPrograms: string[];
   /** Base address of the AI backend (Ollama-compatible HTTP API).
    *  Local: just host:port, e.g. http://localhost:11434. Remote: the full base URL. */
   classifyUrl: string;
@@ -163,6 +173,7 @@ export const DEFAULT_SETTINGS: Settings = {
     'mail.google.com', 'outlook.live.com', 'outlook.office.com',
     'scholar.google.com', 'wikipedia.org', 'unipd.it',
   ],
+  allowedPrograms: [],
   classifyUrl: 'http://localhost:11434',
   classifyApiKey: '',
   classifyModel: 'qwen-yesno',
@@ -178,6 +189,12 @@ export type MessageType =
   | { type: 'ADD_DOMAIN'; domain: string }
   | { type: 'REMOVE_DOMAIN'; domain: string }
   | { type: 'CLASSIFY_PAGE'; url: string; title: string; snippet: string }
+  // The optional desktop agent: is it running, and what program is in front?
+  // Asked by the popup so the program whitelist can offer what you're using now.
+  | { type: 'AGENT_STATUS' }
+  // Whitelist a program from a surface that has no settings UI — the companion
+  // window's one-click button. The background owns `settings`, so it does the write.
+  | { type: 'ADD_PROGRAM'; program: string }
   // Server sync. Sign-in runs in the background, never in the popup: opening the
   // Google consent window closes the popup, which would abort the flow mid-way.
   | { type: 'SERVER_SIGN_IN' }
@@ -212,6 +229,31 @@ export type MessageType =
 export interface ServerActionResult {
   ok: boolean;
   error?: string;
+}
+
+/** Reply to AGENT_STATUS. `program` is null when the agent is not running, or is
+ *  running but has not resolved a foreground window yet. */
+export interface AgentStatus {
+  running: boolean;
+  program: { id: string; name: string } | null;
+  /** Whether that program is on `Settings.allowedPrograms`. */
+  allowed: boolean;
+  /** The most recent foreground program that was NOT a browser, which is what any
+   *  UI offering "whitelist this app" must show: the popup and the companion window
+   *  are both parts of the browser, so while you are looking at either of them
+   *  `program` above reads as the browser — the one answer that may never go on the
+   *  list. Null until a non-browser program has been in front. */
+  recent: { id: string; name: string } | null;
+  /** Whether `recent` is on `Settings.allowedPrograms`. */
+  recentAllowed: boolean;
+  /** Learned identifier → human name (`code` → `Visual Studio Code`), so a list keyed
+   *  by the exact platform identifier can still be read by a human. An identifier is
+   *  a matching key, not a label: Linux truncates it to 15 characters and macOS gives
+   *  a bundle id. Missing until the agent has seen that program in the foreground. */
+  names: Record<string, string>;
+  /** Set when the agent reported it cannot see the foreground (Wayland without the
+   *  GNOME bridge). Shown in the popup so the failure names its own fix. */
+  note: string | null;
 }
 
 /** Reply to SERVER_STATUS / SERVER_SIGN_IN — what the popup needs to render the

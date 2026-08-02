@@ -5,6 +5,7 @@
   "description": "Focus companion that helps you stay on task while studying or working.",
   "permissions": ["tabs", "storage", "scripting", "activeTab", "windows", "idle", "identity", "alarms"],
   "host_permissions": [
+    "http://127.0.0.1:47317/*",
     "https://*.supabase.co/*",
     "*://*.overleaf.com/*",
     "*://overleaf.dei.unipd.it/*",

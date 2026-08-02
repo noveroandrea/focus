@@ -25,6 +25,12 @@ on your machine. An **optional** local AI helper (Ollama) can auto-detect study 
 - [The sprite](#the-sprite)
 - [The popup menu](#the-popup-menu)
 - [Floating companion](#floating-companion)
+- [Desktop agent (Windows, macOS, Linux)](#desktop-agent-windows-macos-linux)
+  - [Run it](#run-it)
+  - [How the extension uses it](#how-the-extension-uses-it)
+  - [What the agent does not do](#what-the-agent-does-not-do)
+  - [Platforms](#platforms)
+  - [Wayland](#wayland)
 - [Optional: Ollama AI auto-classify](#optional-ollama-ai-auto-classify)
   - [Working without Ollama](#working-without-ollama)
   - [Limiting Ollama CPU usage](#limiting-ollama-cpu-usage)
@@ -240,18 +246,58 @@ A small **companion window** mirroring the sprite — the character, the focus/d
 score and the phase countdown — so you can keep an eye on it while working in another
 program that covers the browser.
 
+> **Pairs with the [desktop agent](#desktop-agent-windows-macos-linux).** The agent tells
+> the extension which program you are actually in, so this window keeps showing a live,
+> *correct* score while you work outside the browser — instead of one frozen by an idle
+> timer that cannot tell a LaTeX editor from a game.
+
 **How to open it:** click the **Working** button in the popup header.
 
-**How to keep it on top:** it is an ordinary browser window, so pinning it above other
-apps is your window manager's job, not the extension's. Close it like any window.
+**The program bar.** Under the character and the score, the companion names the program you
+are working in and whether it counts, with a one-click **+ Whitelist** button — so you can
+add an app the moment you notice it isn't being counted, without going back to the browser
+for the popup. It shows the last **non-browser** program, never the live reading: this
+window *is* the browser, so while you look at it the live answer is always "Brave is in
+front" — and browsers are exactly what may never go on that list.
 
-- **Windows** — right-click the companion in the taskbar; if "Always on top" isn't
-  offered, use a free utility such as [Microsoft PowerToys](https://learn.microsoft.com/windows/powertoys/)
-  ("Always On Top", default shortcut **Win+Ctrl+T**) or AutoHotkey.
-- **macOS** — the system has no built-in per-window always-on-top. Use a helper such as
-  [Rectangle](https://rectangleapp.com/), Amethyst, or the paid *Afloat*/*Ontop* utilities,
-  and pin the companion window through it.
-- **Linux / GNOME (X11 or Wayland)** — GNOME no longer shows "Always on Top" in the
+If the agent is **not running**, that same strip turns red: *"Focus agent is off — double-click
+the Focus agent icon to run it."* Opening this window is the moment work moves outside the
+browser, so a stopped agent means everything you are about to do goes uncounted, and nothing
+else on screen would say so.
+
+**How to keep it on top:** it is an ordinary browser window, so pinning it above other
+apps is your window manager's job, not the extension's — no browser can raise its own
+window on Wayland. Close it like any window.
+
+- **Linux / GNOME — automatic.** If you installed the
+  [companion bridge](#wayland), it pins the window for you. The bridge runs *inside*
+  the compositor, which is the only thing that can raise a window on Wayland, so it can
+  do what the browser cannot. It matches the window by its exact title (`Focus
+  companion`) and only pins it while it is small — under 900×700 — so a page that
+  happens to share that title can't drag a whole browser window on top, and a companion
+  stretched across the screen never becomes an overlay you can't work under. Nothing to
+  configure, and it works on GNOME/X11 too.
+- **Windows — automatic.** If the [desktop agent](#desktop-agent-windows-macos-linux) is
+  running, it pins the window for you: on Windows one program may raise another's window
+  (`SetWindowPos(HWND_TOPMOST)`), needing no elevation, no injection and no extra process.
+  Same guards as GNOME — the title must start with `Focus companion` and the window stay
+  under 900×700 — and a window you unpin by hand is left unpinned. Without the agent, use
+  [Microsoft PowerToys](https://learn.microsoft.com/windows/powertoys/) ("Always On Top",
+  default shortcut **Win+Ctrl+T**) or AutoHotkey.
+- **macOS — manual, and unavoidably so.** No process may change another application's
+  window level: there is no public API for it at all, which is why every utility that does
+  this is a window-manager helper you install and grant Accessibility to. The agent
+  therefore does not try — asking for Accessibility is precisely what it is built to avoid.
+  Install one of these, then pin the companion window with it:
+  - [Rectangle](https://rectangleapp.com/) (free) — enable **Always on Top** in its
+    preferences, give it a shortcut, then focus the companion window and press it.
+  - [Amethyst](https://ianyh.com/amethyst/) (free) — a tiling manager with a float-on-top
+    layer; add the companion to it and use **Toggle float for focused window**.
+  - *Afloat* or *Ontop* (paid) — single-purpose always-on-top utilities.
+
+  Each will ask for **System Settings → Privacy & Security → Accessibility**, because
+  moving another app's window is exactly what that permission governs.
+- **Linux / GNOME without the bridge** — GNOME no longer shows "Always on Top" in the
   title-bar menu, so bind the built-in action to a key once:
   ```bash
   gsettings set org.gnome.desktop.wm.keybindings toggle-above "['<Primary>backslash']"
@@ -264,8 +310,9 @@ apps is your window manager's job, not the extension's. Close it like any window
   set a permanent Window Rule matching the companion window.
 
 > **Note for Chromium-on-Wayland users:** a browser window cannot raise *itself* above
-> others on Wayland — the compositor decides — which is why this is handled by the WM
-> keybinding above rather than by the extension. See [Why it no longer uses
+> others on Wayland — the compositor decides — which is why this is never done by the
+> extension. It is either the compositor doing it (the GNOME bridge, above) or you doing
+> it with a WM shortcut. See [Why it no longer uses
 > picture-in-picture](#why-it-no-longer-uses-picture-in-picture).
 
 ### Why it's a separate extension window
@@ -299,6 +346,164 @@ pinned above other apps by the window manager instead (see **How to keep it on t
 the same result with none of the coupling, and consistent across platforms. Sites that
 disable PiP via `Permissions-Policy` (many Overleaf deployments send `picture-in-picture=()`)
 are likewise no longer a concern.
+
+---
+
+## Desktop agent (Windows, macOS, Linux)
+
+A tiny background program in **[`desktop/`](desktop/)** that tells the extension **which
+program is in the foreground**. That is all it does — plus, on Windows only, keeping the
+[floating companion](#floating-companion) on top, because nothing else there can.
+
+The extension can only see inside the browser. Everything else — a thesis in a local LaTeX
+editor, a paper in a desktop PDF reader, a compile in a terminal — reaches it only as a
+`chrome.idle` reading, which says *input happened somewhere* and nothing more. That is why
+`osHeld` and the violet countdown exist. The agent attaches a name to "somewhere", so the
+extension can finally tell working in a local editor apart from playing a game.
+
+**The extension stays the central node.** It owns the program whitelist, the heartbeats,
+the score, the sprite, the floating companion and any sync. The agent has **no account, no
+session, no settings file, no window and no tray** — it is a sensor with an HTTP socket.
+Stop it and the extension behaves exactly as it did before the agent existed.
+
+### Run it
+
+```bash
+cd desktop
+npm install     # three packages, all TypeScript tooling — no runtime dependencies
+npm start       # builds, then serves on http://127.0.0.1:47317
+```
+
+Then open the popup: under **Allowed pages** there is now an **Allowed programs** list,
+showing a green *agent on* dot and the program you are using right now, with one button to
+add it. Nothing outside the browser counts as work until it is on that list.
+
+### Start it by clicking an icon
+
+So you never have to open a terminal for it again:
+
+```bash
+cd desktop
+./install-icon.sh              # Linux: applications menu + desktop icon
+                               # macOS: ~/Applications/Focus agent.app
+./install-icon.sh --autostart  # …and start it at login as well
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install-icon.ps1    # Desktop + Start menu
+```
+
+Clicking it starts the agent. Nothing appears — it has no window — so it tells you with a
+desktop notification, and the popup's dot turns green. Clicking again while it runs does
+nothing; on Linux, **right-click → Stop the agent** stops it.
+
+> **The extension cannot start the agent itself.** No extension API can run a local
+> program; the only one that can is native messaging, whose host manifest must name an
+> exact extension ID — the installer step this transport exists to avoid. Hence the icon.
+
+Full detail is in **[`desktop/README.md`](desktop/README.md)**.
+
+### How the extension uses it
+
+Folded into the existing `chrome.idle` poll, twice a second:
+
+| `chrome.idle` | Foreground program | Result |
+|---|---|---|
+| idle | anything | **idle** — you are away from the machine |
+| active | on the program whitelist | **working** — counts, with no tab involved |
+| active | a **browser** | the **active tab** decides, exactly as before |
+| active | anything else | **idle** — busy, but not at work |
+| active | agent not running | the **active tab** decides, exactly as before |
+
+**Browsers are excluded on purpose and cannot be whitelisted.** The agent only knows
+"Chrome is in front", which says nothing about whether that window is on Overleaf or on
+Instagram. The extension already knows, and the page whitelist is where that judgement
+belongs — so when a browser is in front the agent steps out of the way entirely.
+
+The program list is a **separate list from the site whitelist**, not a variant of it: a
+domain is matched by substring against a URL, a program by an exact platform identifier
+(executable name on Windows, bundle id on macOS, process name on Linux).
+
+### What the agent does not do
+
+- **No window title is ever reported.** They leak document names, message contents and
+  page titles; application identity is all a whitelist ever needed, so no reading contains
+  one. The single exception looks but never tells: on Windows the helper compares titles
+  with the fixed string `Focus companion` to find the extension's own companion window and
+  keep it on top — a lookup key, discarded at once, never printed and never sent.
+- **Nothing is written to disk.** The agent holds one reading in memory and forgets it on
+  exit. The program list itself lives in the extension, like every other setting.
+- **No history of what you have opened is kept.** The extension remembers each program's
+  proper name — so the list can read *Visual Studio Code* rather than `code` — but saves
+  only the names of programs **already on your list**. Anything else it sees is held in
+  memory and gone when the browser closes it.
+- **No web page can read the agent.** The socket binds to `127.0.0.1` only; **no CORS
+  headers are sent**, so a page's `fetch` is blocked from reading the response by the
+  browser itself while the extension — which holds an explicit host permission — is
+  exempt; and requests carrying a web `Origin` are refused with `403`.
+
+### Platforms
+
+- **Windows** — nothing to install, no permission prompt. Identifier: executable name
+  (`winword`, `code`); the `.exe` is optional when typing a rule. Its helper also pins the
+  [floating companion](#floating-companion) on top, which nothing else on Windows does
+  without a third-party tool.
+- **macOS** — nothing to install, and **no permission prompt of any kind**: `lsappinfo`
+  needs no entitlement. Window *titles* are what would require Accessibility, which is
+  exactly why none are read. Identifier: bundle id (`com.microsoft.vscode`).
+- **Linux / X11** — needs `xprop` (`x11-utils` on Debian/Ubuntu, `xorg-x11-utils` on
+  Fedora, `xorg-xprop` on Arch). Identifier: process name from `/proc/<pid>/comm`, which
+  the kernel caps at 15 characters — which is why `gnome-terminal-server` appears as
+  `gnome-terminal-`.
+- **Linux / Wayland** — see below.
+
+### Wayland
+
+A Wayland client **cannot** see which other application has focus. That is a security
+property of the protocol, not a gap — under Xwayland, `xprop -root _NET_ACTIVE_WINDOW`
+answers `0x0` forever. The only way through is to ask something already **inside** the
+compositor.
+
+**GNOME's bridge is bundled**, since GNOME/Wayland is the default on Ubuntu, Fedora and
+Debian. It is a small Shell extension exporting one D-Bus object, needed because
+`org.gnome.Shell.Eval` has been locked down since GNOME 41 and there is no other general
+hook. It sends the application name and process name only — never a window title.
+
+Because it runs inside the compositor it also **keeps the [floating
+companion](#floating-companion) above other windows automatically**, which no browser can
+do for itself on Wayland. That is the one place in this project that looks at a window
+title, and it only ever compares it with the fixed string `Focus companion`.
+
+```bash
+desktop/gnome-extension/install.sh   # copies in, and marks it enabled for next login
+#  → log out and back in             ← the only remaining step
+```
+
+**Do not run `gnome-extensions enable` first.** It answers *"Extension does not exist"*
+however many times you try, because the running Shell has never scanned the extension — it
+looks in that directory only at start-up. The installer writes the `enabled-extensions`
+setting directly, which is what that command would have done. Nor is there a way around
+the logout: GNOME Shell restarts in place on X11 (`Alt+F2`, `r`) but **not on Wayland**,
+where it *is* the compositor.
+
+Check it afterwards:
+
+```bash
+gdbus call --session --dest org.gnome.Shell \
+  --object-path /dev/focus/Companion --method dev.focus.Companion.GetFocused
+# ('code|Visual Studio Code|1240',)
+```
+
+The bridge emits the same line the X11 helper prints, so a program list written under Xorg
+keeps working after logging into Wayland.
+
+**Other compositors** are the same shape and not implemented: KDE would need a KWin script
+exporting an equivalent D-Bus object; Sway and Hyprland already expose the information
+(`swaymsg -t get_tree`, `hyprctl activewindow`). On those the agent reports no program and
+the extension falls back to browser-only tracking, which is exactly its behaviour without
+the agent.
+
+**Or skip all of it:** log out and pick **"Ubuntu on Xorg"** at the login screen.
 
 ---
 
@@ -512,6 +717,10 @@ focus/
 │   │   └── SpriteSimulation.tsx
 │   ├── App.tsx / main.tsx # mount the demo for `npm run dev`
 │   └── index.css          # Tailwind entry (popup + demo only)
+├── desktop/               # the foreground-program agent — its OWN npm package  ← see desktop/README.md
+│   ├── src/foreground.ts  # per-OS: which program is in front. Nothing else.
+│   ├── src/index.ts       # the loopback HTTP endpoint the extension polls
+│   └── gnome-extension/   # GNOME Shell bridge, required only on Wayland
 └── dist/                  # build output you load into Chrome
 ```
 
@@ -522,6 +731,12 @@ Each meaningful folder has its own `README.md` describing the modules inside it:
 - [`src/extension/content/README.md`](src/extension/content/README.md) — the two content scripts
 - [`src/extension/popup/README.md`](src/extension/popup/README.md) — the popup UI
 - [`src/components/README.md`](src/components/README.md) — the local demo
+- [`desktop/README.md`](desktop/README.md) — the foreground-program agent
+
+The agent **shares no code with the extension** and deliberately knows nothing about
+heartbeats, whitelists or scoring — it reports a program name over loopback and the
+extension decides what that means. The two packages are built and type-checked
+independently.
 
 ### Build entries (`vite.config.ts`)
 

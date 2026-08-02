@@ -28,5 +28,8 @@
     "noEmit": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules"]
+  // desktop/ is a separate package with its own tsconfigs (Electron main is
+  // CommonJS and needs node types); it imports FROM src/ but must never be
+  // compiled BY this project.
+  "exclude": ["node_modules", "desktop"]
 }

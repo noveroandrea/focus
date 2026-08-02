@@ -1,0 +1,8 @@
+{
+  "uuid": "focus-companion@focus.dev",
+  "name": "Focus companion bridge",
+  "description": "Reports which application has focus to the Focus agent, over D-Bus. Wayland gives no other way for an application to learn this. Sends the process name and the application's name only — never a window title.",
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://github.com/noveroandrea/focusflow-adhd",
+  "session-modes": ["user"]
+}
