@@ -1,4 +1,4 @@
-import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, round2 } from '../types';
+import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, round2 } from '../types';
 import {
   STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS,
   IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
@@ -95,9 +95,13 @@ function paintActionIcon(color: string) {
 // a whitelisted page, yellow on any other page. Because that depends on which tab
 // is in front, we look up the active tab of the last-focused window each time.
 function updateActionIcon() {
-  if (settings.forceActive) { paintActionIcon('#94a3b8'); return; } // grey
   try {
     chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+      // Piggy-backed here because this already runs on every event that can change
+      // which page is in front (tab activated, tab navigated, window focused), so
+      // the page the companion offers cannot drift from the one the icon describes.
+      rememberPage(tabs[0]);
+      if (settings.forceActive) { paintActionIcon('#94a3b8'); return; } // grey
       const url = tabs[0]?.url ?? '';
       const whitelisted = !!url && isAllowedUrl(url);
       paintActionIcon(whitelisted ? '#22c55e' : '#eab308'); // green | yellow
@@ -105,6 +109,29 @@ function updateActionIcon() {
   } catch {
     paintActionIcon('#22c55e');
   }
+}
+
+// ── The last ordinary web page ────────────────────────────────────────────────
+// Which page the companion window offers to whitelist. It cannot work that out for
+// itself: the companion IS a window, so "which tab is active?" answers "the
+// companion" exactly while you are looking at it — the same structural problem that
+// makes AgentStatus.recent necessary for programs. So the background remembers the
+// last http(s) page instead, and anything that is not one (the companion, the
+// dashboard, chrome:// pages) simply leaves the memory alone.
+let lastPageUrl = '';
+let lastPageTabId: number | null = null;
+
+function rememberPage(tab?: chrome.tabs.Tab): boolean {
+  const url = tab?.url ?? '';
+  if (typeof tab?.id !== 'number' || !/^https?:/i.test(url)) return false;
+  lastPageUrl = url;
+  lastPageTabId = tab.id;
+  return true;
+}
+
+/** Hostname without `www.` — the form the whitelist stores and the popup shows. */
+function pageDomain(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
 // ── Init from storage ─────────────────────────────────────────────────────────
@@ -157,10 +184,24 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (prev.enabled !== settings.enabled) {
       updateState({ enabled: settings.enabled });
     }
-    // Force-active toggled: snap the sprite into (or out of) the active state
+    // Either way round, the toggle snaps the session ACTIVE and restarts the idle
+    // clock. Switching to "Not working" pins the sprite active by definition; but
+    // switching back to "Working" has to as well, because it is a statement of
+    // intent — the user has just said they are working, so they get a full idleTime
+    // before anything can call them idle. Setting `isHeartbeatActive` to
+    // `settings.forceActive` (i.e. false on the way back) instead declared them idle
+    // at the exact moment they said the opposite, which cost a −10 and, once the
+    // lapse outran the nag, auto-paused them straight back to "Not working" — the
+    // "the first click does nothing but dock me 10 points" bug.
     if (prev.forceActive !== settings.forceActive) {
       resetOsAnchor(); // stale anchor would immediately re-idle on the way back
-      updateState({ isHeartbeatActive: settings.forceActive, lastHeartbeat: Date.now() });
+      updateState({ isHeartbeatActive: true, lastHeartbeat: Date.now() });
+      // Clear the lapse bookkeeping now rather than waiting for the next tick, so
+      // nothing left over from the previous lapse can land on this fresh one.
+      idleWasActive = true;
+      idleSince = 0;
+      idlePenaltyApplied = false;
+      autoPauseApplied = false;
       // The Working / Not-working button was clicked — one of the three moments the
       // client checks in. Hooked here rather than in the popup so it fires however
       // the toggle was flipped (the button, or the auto-pause after a long idle).
@@ -285,7 +326,21 @@ function trackIdlePenalty() {
     autoPauseApplied = false;
     return;
   }
-  if (idleWasActive) {          // just went idle → start timing this lapse
+  // Anchor the lapse. Two ways in: the active→idle edge, and finding ourselves
+  // already idle with no anchor at all (`idleSince` still 0).
+  //
+  // That second case is not hypothetical, and leaving it out was a real bug: an MV3
+  // worker starts fresh on every browser launch and every revival from suspension,
+  // so it routinely arrives mid-lapse having never seen the edge. `idleSince` is 0
+  // then, and 0 is a TIMESTAMP — it dates the lapse to 1970, so `now - idleSince` is
+  // decades and every threshold below fires on the very first tick: an instant −10
+  // and an instant auto-pause, seconds after opening the browser.
+  //
+  // Anchoring at `now` rather than at state.lastHeartbeat is deliberate too. The
+  // penalty is for a lapse this worker actually watched; time the extension spent
+  // suspended — or the browser spent closed — is not evidence that the user sat
+  // there doing nothing, and charging for it would dock people for going to bed.
+  if (idleWasActive || !idleSince) {
     idleWasActive = false;
     idleSince = now;
     idlePenaltyApplied = false;
@@ -358,6 +413,14 @@ initSync({ onServerScores: applyServerScores });
 // Mirrors heartbeat.ts: a URL is authorized when it matches a whitelisted domain.
 function isAllowedUrl(url: string): boolean {
   return settings.allowedDomains.some(d => d.trim() !== '' && url.includes(d.trim()));
+}
+
+/** The whitelist entries a URL matches — the same test as isAllowedUrl, kept beside
+ *  it so the two can never disagree about what "allowed" means. Which entries
+ *  matched is what removing a page has to act on, and what the companion's undo
+ *  button names, because it is rarely just the hostname. */
+function matchingDomains(url: string): string[] {
+  return settings.allowedDomains.filter(d => d.trim() !== '' && url.includes(d.trim()));
 }
 
 // ── AI classification ─────────────────────────────────────────────────────────
@@ -503,23 +566,27 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       break;
     }
 
-    // The optional desktop agent, answered from the poller's cache so opening the
-    // popup costs no extra request. The nudge matters on a service worker that has
-    // just been woken: its setInterval did not survive suspension, so the cache can
-    // be a moment stale and the popup would flash "agent off" until the next poll.
+    // The optional desktop agent. Answered AFTER the probe it triggers rather than
+    // from the cache: whoever asks is a UI with a human in front of it, and the
+    // difference shows exactly when it matters — someone reading "the agent is off",
+    // starting it, and waiting for that to clear. Replying from the cache made them
+    // wait for the following poll on top of the backoff. On loopback the probe costs
+    // a millisecond, and refreshProgram still enforces its own interval, so this
+    // cannot become a request per keystroke.
     case 'AGENT_STATUS': {
-      refreshProgram();
-      const program = currentProgram();
-      const recent = recentProgram();
-      sendResponse({
-        running: isAgentOnline(),
-        program,
-        allowed: !!program && isAllowedProgram(program.id, settings.allowedPrograms),
-        recent,
-        recentAllowed: !!recent && isAllowedProgram(recent.id, settings.allowedPrograms),
-        names: programNames(),
-        note: agentNote(),
-      } satisfies AgentStatus);
+      void refreshProgram(true).then(() => {
+        const program = currentProgram();
+        const recent = recentProgram();
+        sendResponse({
+          running: isAgentOnline(),
+          program,
+          allowed: !!program && isAllowedProgram(program.id, settings.allowedPrograms),
+          recent,
+          recentAllowed: !!recent && isAllowedProgram(recent.id, settings.allowedPrograms),
+          names: programNames(),
+          note: agentNote(),
+        } satisfies AgentStatus);
+      });
       break;
     }
 
@@ -537,6 +604,82 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
         settings = { ...settings, allowedPrograms: [...programs, id] };
         chrome.storage.local.set({ focusFlowSettings: settings });
         setNamedPrograms(settings.allowedPrograms);   // its name may now be saved
+      }
+      sendResponse({});
+      break;
+    }
+
+    case 'REMOVE_PROGRAM': {
+      const id = normaliseProgram(message.program);
+      const programs = settings.allowedPrograms ?? [];
+      if (id && programs.includes(id)) {
+        settings = { ...settings, allowedPrograms: programs.filter((p) => p !== id) };
+        chrome.storage.local.set({ focusFlowSettings: settings });
+        // Its name is no longer one we may keep on disk — see setNamedPrograms.
+        setNamedPrograms(settings.allowedPrograms);
+      }
+      sendResponse({});
+      break;
+    }
+
+    // The page half of the companion window's two one-click buttons.
+    case 'PAGE_STATUS': {
+      const reply = () => {
+        const domain = pageDomain(lastPageUrl);
+        const matched = lastPageUrl ? matchingDomains(lastPageUrl) : [];
+        sendResponse({
+          domain,
+          allowed: matched.length > 0,
+          matched,
+        } satisfies PageStatus);
+      };
+      if (lastPageUrl) { reply(); break; }
+      // Nothing remembered yet. A service worker that has just been revived has seen
+      // no tab events, and a user who is reading rather than browsing may not
+      // generate one for a long time — so look now rather than leave the bar blank.
+      // Every window's active tab, since the focused one may be the companion.
+      chrome.tabs.query({ active: true }, (tabs) => {
+        for (const tab of tabs) if (rememberPage(tab)) break;
+        reply();
+      });
+      break;
+    }
+
+    // Deliberately takes no argument: the caller does not know which page it means,
+    // which is the whole reason this lives here. Reloads the tab afterwards, exactly
+    // as the popup's own toggle does — heartbeat.ts decides whether to activate at
+    // document start, so an already-open page keeps ignoring itself until it does.
+    //
+    // NEVER_WHITELIST is deliberately NOT consulted. It exists to stop the AI
+    // classifier and the content script adding YouTube *by themselves*; this is a
+    // person deliberately pressing a button, which the popup's own per-page toggle
+    // already honours. Refusing here would mean the same page could be whitelisted
+    // from one surface and not the other.
+    case 'WHITELIST_PAGE': {
+      const domain = pageDomain(lastPageUrl);
+      if (domain && !settings.allowedDomains.includes(domain)) {
+        settings = { ...settings, allowedDomains: [...settings.allowedDomains, domain] };
+        chrome.storage.local.set({ focusFlowSettings: settings });
+        if (lastPageTabId != null) chrome.tabs.reload(lastPageTabId);
+      }
+      sendResponse({});
+      break;
+    }
+
+    // The undo. It drops EVERY whitelist entry that matches the page, not just an
+    // exact hostname match, because the rule that whitelisted it is a substring test:
+    // it is `unipd.it` that makes `overleaf.dei.unipd.it` count, and removing only
+    // the exact hostname would leave the page still counting and the companion still
+    // showing a tick — a button that visibly does nothing. Same rule the popup's own
+    // toggle applies, and it ends the session for the same reason REMOVE_DOMAIN does.
+    case 'UNWHITELIST_PAGE': {
+      const drop = lastPageUrl ? new Set(matchingDomains(lastPageUrl)) : new Set<string>();
+      if (drop.size) {
+        const keep = settings.allowedDomains.filter((d) => !drop.has(d));
+        settings = { ...settings, allowedDomains: keep };
+        chrome.storage.local.set({ focusFlowSettings: settings });
+        updateState({ isHeartbeatActive: false });
+        if (lastPageTabId != null) chrome.tabs.reload(lastPageTabId);
       }
       sendResponse({});
       break;

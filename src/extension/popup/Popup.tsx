@@ -613,8 +613,10 @@ function openCompanionWindow() {
   const url = chrome.runtime.getURL('pip.html');
   const create = () => chrome.windows.create(
     // Deliberately small — this sits in a screen corner while you work elsewhere.
-    // The canvas scales with the window, so it survives being shrunk further.
-    { url, type: 'popup', width: 300, height: 210 },
+    // The canvas scales with the window, so it survives being shrunk further. The
+    // height covers the two whitelist bars under the canvas without squeezing it;
+    // they collapse when they have nothing to say, and the window is resizable.
+    { url, type: 'popup', width: 300, height: 260 },
     (w) => { if (w?.id != null) chrome.storage.local.set({ pipWindowId: w.id }); },
   );
   chrome.storage.local.get(['pipWindowId'], ({ pipWindowId }) => {

@@ -36,6 +36,7 @@ on your machine. An **optional** local AI helper (Ollama) can auto-detect study 
   - [Limiting Ollama CPU usage](#limiting-ollama-cpu-usage)
 - [Code structure](#code-structure)
 - [Local development](#local-development)
+  - [Something behaving strangely? Read the bug log first](#something-behaving-strangely-read-the-bug-log-first)
 - [Publishing to the Chrome Web Store](#publishing-to-the-chrome-web-store)
 - [Privacy](#privacy)
 - [License](#license)
@@ -253,17 +254,36 @@ program that covers the browser.
 
 **How to open it:** click the **Working** button in the popup header.
 
-**The program bar.** Under the character and the score, the companion names the program you
-are working in and whether it counts, with a one-click **+ Whitelist** button — so you can
-add an app the moment you notice it isn't being counted, without going back to the browser
-for the popup. It shows the last **non-browser** program, never the live reading: this
-window *is* the browser, so while you look at it the live answer is always "Brave is in
-front" — and browsers are exactly what may never go on that list.
+**The two whitelist bars.** Under the character and the score, two strips answer the one
+question the sprite cannot: *is what I am doing right now being counted?*
 
-If the agent is **not running**, that same strip turns red: *"Focus agent is off — double-click
-the Focus agent icon to run it."* Opening this window is the moment work moves outside the
-browser, so a stopped agent means everything you are about to do goes uncounted, and nothing
-else on screen would say so.
+- **The page bar** — the site in the front tab, with a one-click **+ Whitelist** button, or
+  a green **✓ counts** and a **✕** to take it off again. Either way that tab is reloaded,
+  exactly as the popup's toggle does, so the sprite appears (or stops) straight away.
+- **The program bar** — the program you were last working in, same button, same tick, same
+  **✕**. Hidden when the agent cannot see the foreground.
+
+The **✕** is deliberately quiet rather than a second coloured button: removing something is
+the rarer action and the one you would least like to hit by accident. Hovering it says what
+it will drop — usually just that domain, but a page can be counting because of a *broader*
+entry (`unipd.it` is what makes `overleaf.dei.unipd.it` count), and removing the page
+removes that entry, so everything else under it stops counting too. The popup's toggle has
+always worked this way; here it says so before you click.
+
+They are here, and not only in the popup, because **this window is always visible**: the
+popup is several clicks away and covers the page it is describing, while the companion is
+already on screen, on top, beside the page you want to count.
+
+Neither bar can ask *"what is in front right now?"* — this window **is** a window of the
+browser, so at the moment you look at it the live answers are "the companion" and "a
+browser". They show the last ordinary **page** and the last **non-browser** program instead,
+which is also what a person means by "this page" and "this app", and both survive the click,
+which necessarily focuses the browser to happen at all.
+
+If the agent is **not running**, the program strip turns red: *"Focus agent is off —
+double-click the Focus agent icon to run it."* Opening this window is the moment work moves
+outside the browser, so a stopped agent means everything you are about to do goes uncounted,
+and nothing else on screen would say so.
 
 **How to keep it on top:** it is an ordinary browser window, so pinning it above other
 apps is your window manager's job, not the extension's — no browser can raise its own
@@ -766,6 +786,17 @@ npm run clean    # remove dist/
 
 The demo (`src/components/SpriteSimulation.tsx`) mirrors the sprite behaviour with a short
 heartbeat threshold so the shrink-and-change cycle is quick to watch.
+
+### Something behaving strangely? Read the bug log first
+
+**[`BUGS.md`](BUGS.md)** records every bug that cost real time on this project, what
+actually caused it, and how it was fixed or worked around — with the environment traps
+first, because several of them were not bugs in this code at all. The idle countdown
+freezing, in particular, has a one-line answer that is not in any source file: check how
+the browser was launched.
+
+It also records the fixes that are **decisions** rather than patches, so they are not
+undone by a later tidy-up. Please add an entry whenever a fix is not obvious from the diff.
 
 ---
 

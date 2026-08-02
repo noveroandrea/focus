@@ -52,6 +52,12 @@ const FRESH_MS = 3000;
  *  a machine with no agent would attempt a connection twice a second forever. */
 const OFFLINE_RETRY_MS = 15_000;
 
+/** …but 15 s is far too long when somebody is LOOKING at an "agent is off" message
+ *  and has just started the agent to clear it. A UI asking for status is a human
+ *  waiting for an answer, so those requests probe at this interval instead. Still a
+ *  floor, so a 1 s popup poll cannot turn into a connection attempt per poll. */
+const EAGER_RETRY_MS = 1500;
+
 /** Minimum gap between requests while the agent IS responding. The idle poll runs
  *  at 2 Hz; there is no value in asking faster than the agent samples. */
 const ONLINE_INTERVAL_MS = 500;
@@ -64,7 +70,7 @@ let programAt = 0;
 let lastTryAt = 0;
 let online = false;
 let note: string | null = null;
-let inFlight = false;
+let inFlight: Promise<void> | null = null;
 let recent: ForegroundProgram | null = null;
 let recentAt = 0;
 
@@ -148,21 +154,27 @@ try {
   });
 } catch { /* not in an extension context (the dev demo) */ }
 
-/** Ask the agent, at most as often as the intervals above allow. Fire and forget:
- *  callers read `currentProgram()`, which is updated whenever a reply lands. */
-export function refreshProgram(): void {
+/** Ask the agent, at most as often as the intervals above allow.
+ *
+ *  `eager` is for requests a human is waiting on (the popup and companion polling
+ *  AGENT_STATUS): it shortens only the OFFLINE retry, which is the one that makes
+ *  "I just started the agent" take up to fifteen seconds to show.
+ *
+ *  Returns the in-flight probe so a caller that wants THIS answer rather than the
+ *  cached one can await it; the poll ignores the promise and reads the cache. */
+export function refreshProgram(eager = false): Promise<void> {
   const now = Date.now();
-  if (inFlight) return;
-  if (now - lastTryAt < (online ? ONLINE_INTERVAL_MS : OFFLINE_RETRY_MS)) return;
+  if (inFlight) return inFlight;
+  const wait = online ? ONLINE_INTERVAL_MS : (eager ? EAGER_RETRY_MS : OFFLINE_RETRY_MS);
+  if (now - lastTryAt < wait) return Promise.resolve();
   lastTryAt = now;
-  inFlight = true;
 
   // A hung agent must not wedge the poll — abandon the request well inside the
   // freshness window so a stalled reply can never be mistaken for a live one.
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 1500);
 
-  fetch(AGENT_URL, { signal: abort.signal, cache: 'no-store' })
+  inFlight = fetch(AGENT_URL, { signal: abort.signal, cache: 'no-store' })
     .then((res) => (res.ok ? res.json() : null))
     .then((data: { program?: ForegroundProgram | null; note?: string | null } | null) => {
       if (!data) { online = false; return; }
@@ -184,8 +196,9 @@ export function refreshProgram(): void {
     })
     .finally(() => {
       clearTimeout(timer);
-      inFlight = false;
+      inFlight = null;
     });
+  return inFlight;
 }
 
 /** Lower-case, trim, drop a Windows `.exe`, so `Code.exe` and `code` are one key.

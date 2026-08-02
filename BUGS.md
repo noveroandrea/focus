@@ -1,0 +1,516 @@
+# Bug log
+
+Every bug that cost real time on this project, what actually caused it, and how it was
+fixed or worked around. Kept because several of these looked like something they were
+not — an extension bug that turned out to be a browser launch flag, a Wayland limitation
+that turned out to be the protocol working as designed — and re-deriving that from the
+code is far more expensive than reading it.
+
+**Entries never get deleted, only marked.** A fixed bug whose entry disappears is a bug
+somebody re-introduces. Where the fix is a *decision* rather than a patch, the entry says
+so, because those are the ones most likely to be "cleaned up" by a future change.
+
+Format: symptom → cause → fix. Newest first within each section.
+
+- [Environment traps](#environment-traps) — not our code, but our problem
+- [The idle model](#the-idle-model) — the longest-running source of bugs
+- [Scoring and status](#scoring-and-status)
+- [The desktop agent and the companion window](#the-desktop-agent-and-the-companion-window)
+- [Server, auth and database](#server-auth-and-database)
+- [Build, tooling and process](#build-tooling-and-process)
+- [Still open / accepted](#still-open--accepted)
+
+---
+
+## Environment traps
+
+### `--ozone-platform=x11` froze `chrome.idle` forever
+**Status: fixed (browser launch, not code) — 2157afb**
+
+*Symptom.* `chrome.idle.queryState()` answered `"active"` permanently, however long the
+machine was left alone. Every countdown built on it froze at its maximum, the sprite never
+cried, and no idle penalty ever landed.
+
+*Cause.* Brave was being launched with `--ozone-platform=x11` on a Wayland session — a
+leftover from the picture-in-picture always-on-top experiment. Under that flag the browser
+runs through **Xwayland**, whose idle signal comes from XScreenSaver's counter, and that
+counter **never advances on Wayland** because the compositor handles input, not the X
+server. So the browser was asking a clock that had stopped.
+
+*Fix.* Remove the flag from the `.desktop` file. Nothing in the extension changed.
+
+*Cost.* This is the most expensive bug in the project, because it was diagnosed as an
+extension bug three times before the real cause was found. It produced an entire subsystem
+built on the false premise that `chrome.idle` is unreliable:
+
+- `idleApiProven` — a persisted "has `chrome.idle` ever proven itself?" gate (27a3a16),
+- a `FOCUS_PING` staleness probe used to infer "the user is in another app" (460eaee),
+- a viewer-vs-observable split in the poll, so PDFs could bypass the untrusted API (8b3bd55),
+- per-transition diagnostic logging, and a heartbeat-weight mechanism that never did
+  anything because every call site passed `1`.
+
+All of it was deleted in 2157afb once the flag was found — about 130 lines of the
+heartbeat module, plus a storage key that is still explicitly removed on startup for
+anyone who ran an old build.
+
+> **If the idle countdown ever freezes again, check how the browser is launched before
+> touching any code.** This is written at the top of `CLAUDE.md` for the same reason.
+
+### GNOME refuses to run a `.desktop` file you just wrote
+**Status: fixed — `desktop/install-icon.sh`**
+
+*Symptom.* The Focus agent icon appeared on the desktop but double-clicking it did
+nothing, or GNOME showed it as untrusted text.
+
+*Cause.* GNOME requires the `metadata::trusted` attribute on desktop launchers placed in
+`~/Desktop`, and the executable bit.
+
+*Fix.* The installer sets both: `chmod +x` and `gio set … metadata::trusted true`. The
+copy in `~/.local/share/applications` needs neither, which is why the installer writes two
+separate files rather than a symlink — the trust flag is metadata on the file you click.
+
+### `gnome-extensions enable` says "Extension does not exist"
+**Status: worked around — `desktop/gnome-extension/install.sh`**
+
+*Symptom.* After installing the Shell bridge, `gnome-extensions enable
+focus-companion@focus.dev` fails with *"Extension does not exist"*, however many times it
+is run.
+
+*Cause.* That command asks the **running** Shell, which scans the extensions directory
+only at start-up. It has genuinely never heard of the extension. There is no way to make
+it look again: `ReloadExtension` answers *"deprecated and does not work"*,
+`EnableExtension` returns `false` for an unscanned extension, and
+`org.gnome.Shell.Introspect` is `AccessDenied` outside a fixed allowlist. On X11 you would
+restart the Shell in place (`Alt+F2`, `r`); on **Wayland the Shell is the compositor**, so
+restarting it takes the session down.
+
+*Workaround.* The installer writes the `enabled-extensions` GSetting itself — exactly what
+that command would have done — and the Shell reads it at next start-up. **A logout is
+unavoidable** and is stated up front in the installer output, both READMEs, and the agent's
+own error message.
+
+### Headless screenshots are impossible on this session
+**Status: accepted**
+
+`import -window root` and friends fail with *"Resource temporarily unavailable"* on
+Wayland: a client cannot capture the screen, by design. Visual bugs in the companion
+window had to be diagnosed by asking the user what they saw, and by polling the
+compositor over D-Bus for the state the UI was supposed to reflect.
+
+---
+
+## The idle model
+
+### The "I" countdown never moved
+**Status: fixed — c9b47fc, d9832b0**
+
+Two independent causes, found together:
+
+1. **Two different clocks.** `sprite.ts` counted down from page-local DOM activity while
+   `background.ts` decided idle from `chrome.idle`. The readout therefore predicted a
+   different event than the one that actually fired: it ignored input in other windows and
+   could reach zero with the session still active. Both the sprite and the companion now
+   derive the countdown from `state.lastHeartbeat` — the same field the idle rule reads.
+2. **`chrome.idle.queryState(N)` is binary.** Polling it at the user's own `idleTime`
+   refreshed `lastHeartbeat` to *now* right up until the instant it flipped, pinning every
+   countdown at its maximum and then dropping it to zero in one step. The poll now always
+   queries at **Chrome's 15 s floor** and anchors the last-input estimate at `now − 15s`,
+   so the tail of the wait ticks down for real. The flip still lands at `idleTime`.
+
+> `OS_IDLE_FLOOR_S` is not a tuning knob. Raising it to the user's `idleTime` restores the
+> binary flip and the frozen readout.
+
+### PDFs counted nothing at all
+**Status: fixed — 5f4dd7d (after a wrong first fix in 1cf4174)**
+
+*Symptom.* On an arXiv PDF, no heartbeats from any source while the mouse moved over the
+document. Nothing counted.
+
+*Cause.* Chrome serves a PDF as a small HTML wrapper around
+`<embed type="application/pdf">`, so the `<all_urls>` content script really does run
+there — but input goes to the viewer's own inner frame, which the wrapper can never
+observe. It saw the page and never saw a single event. The two heartbeat sources then
+**cancelled each other out**: the wrapper's `FOCUS_PING` marked the tab as "has a content
+script", so the background stood the OS source down and waited for `HEARTBEAT`s that could
+never arrive.
+
+*Fix.* `heartbeat.ts` detects a plugin-rendered document (`document.contentType !==
+'text/html'`, or an `embed[type="application/pdf"]`) and **stays completely silent** — no
+pings at all. That restores the meaning `contentTabs` always assumed: reporting in means
+*"I can observe input"*. A silent tab is picked up by the OS idle poll like any other
+viewer.
+
+*Related, earlier and wrong.* 1cf4174 tried to fix the opposite symptom — a focused PDF
+generating a heartbeat on every poll forever — by adding a `viewer` flag to `FOCUS_PING`
+so the wrapper could report focus without claiming observability. That was more machinery
+built on the `chrome.idle` false premise above, and 2157afb removed it. Silence was the
+answer all along.
+
+### A focused PDF could never go idle
+**Status: fixed — 8b3bd55, then simplified by 2157afb**
+
+*Symptom.* Walk away mid-paper with a PDF in the front tab and it kept earning points.
+
+*Cause.* A viewer tab runs no usable content script, so "this tab is in front" was the only
+positive evidence of work, and there was nothing to end the session.
+
+*Fix (at the time).* Use `chrome.idle` as a **veto**: its two readings are not equally
+trustworthy. `"active"` is the dangerous one — a stuck API asserting it holds the clock up
+forever. A non-active reading is a positive assertion that the OS saw no input, so acting
+on it can only ever end a session *earlier*. Safe to honour even from an API you do not
+trust. Once the launch flag was found, `chrome.idle` needed no special-casing at all and
+the veto became the ordinary path.
+
+### `chrome.windows` focus was a constant
+**Status: fixed — 460eaee**
+
+`win.focused` from `chrome.windows.getLastFocused()` came back `true` on every single poll,
+making "the browser has focus" a constant and rendering the entire unfocused branch
+unreachable — nothing could detect that the user had left the browser. Replaced with the
+page's own `document.hasFocus()`, which is accurate. The lesson generalises: **the page
+knows its own focus; `chrome.windows` evidently did not.**
+
+### A long `idleTime` stalled the OS-idle countdown for a minute
+**Status: fixed — 460eaee**
+
+By the time `chrome.idle` reports idle you have already been away at least 15 s, so
+replaying the *full* `idleTime` from that moment left a long setting sitting visibly still.
+The OS-idle countdown is now a fixed `OS_IDLE_COUNTDOWN_S` (5 s) from the anchor,
+regardless of `idleTime`.
+
+---
+
+## Scoring and status
+
+### Clicking "Working" docked 10 points and did nothing
+**Status: fixed — `background.ts`**
+
+*Symptom.* Open the browser (toolbar icon grey, i.e. "Not working"), click **Working**:
+the companion window opened correctly, but the status stayed grey **and** −10 distraction
+points landed immediately. A second click then worked.
+
+*Cause.* One tick of the status loop, with two faults stacked on it.
+
+1. The settings listener set `isHeartbeatActive: settings.forceActive`. Entering "Not
+   working" that is right — it pins the sprite active. Coming *back out* it evaluates to
+   `false`, so clicking **Working** declared the user idle at the exact moment they said
+   the opposite.
+2. `idleSince` starts at `0`, and `0` is a **timestamp**. An MV3 worker starts fresh on
+   every browser launch and every revival from suspension, so it routinely arrives
+   mid-lapse having never seen the `active → idle` edge that anchors the lapse. The lapse
+   was therefore dated to **1970**, making `now − idleSince` several decades — so on that
+   single tick both the penalty threshold *and* the auto-pause threshold fired at once:
+   −10, and an immediate switch back to "Not working" (grey). The second click appeared to
+   work only because the one-per-lapse flags were already spent.
+
+*Fix.* Both directions of the toggle now snap the session **active** with a fresh
+`lastHeartbeat` — clicking Working is a statement of intent, and earns a full `idleTime`
+before anything may call you idle — and the lapse bookkeeping is cleared there too. A lapse
+found without an anchor is anchored at **now**, deliberately not at `state.lastHeartbeat`:
+time the worker spent suspended, or the browser spent closed, is not evidence the user sat
+there doing nothing, and charging for it would dock people for going to bed.
+
+*Note.* Fault 2 alone also explains grey-on-startup: a worker that woke with the session
+already idle would auto-pause itself within a second of the browser opening.
+
+### The Working toggle needed two clicks to turn green
+**Status: fixed — 996885c**
+
+Opening the companion window focuses a new window, which **closes the popup**. Doing that
+in the same tick as the settings write raced the write and could lose it, so the toggle
+appeared not to apply. The write now completes first and the companion is opened from its
+storage callback. The companion also opens only when *resuming* work, never when pausing.
+
+### Counting stopped whenever the service worker slept
+**Status: fixed by design — `heartbeats.ts`**
+
+An MV3 service worker is suspended between events and its `setInterval` timers do not fire
+reliably while asleep, so any timer-driven counter silently loses time. Counting is
+therefore **event-driven**: `registerHeartbeat()` is called from every heartbeat source and
+throttled to ≈once per real second. An incoming heartbeat always wakes the worker and lands
+there. The same reasoning forces `chrome.alarms` (not `setTimeout`) for the sync floor.
+
+> Do not "simplify" the counter back into an interval. It will appear to work while the
+> worker happens to be awake.
+
+---
+
+## The desktop agent and the companion window
+
+### The Electron companion app — deleted, not fixed
+**Status: removed by decision**
+
+The first desktop app was an Electron overlay. Three bugs in a row, all Wayland,
+established that the design could not work:
+
+1. **No icon, no window.** It launched with no renderer process visible; `--enable-logging`
+   showed the app *was* loading. Diagnosis on Wayland was blind (see screenshots, above).
+2. **It flashed open and closed every second.** `refreshOverlayVisibility()` hid the
+   overlay when the compositor reported the overlay itself as focused — and on Wayland
+   mapping a window focuses it. A feedback loop: show → focus → hide → show. Confirmed by
+   polling the bridge and watching focus alternate between `electron` and `code`.
+3. **Always-on-top made the desktop unusable.** `setIgnoreMouseEvents` does not reach the
+   Wayland compositor, so the overlay swallowed every click meant for the window beneath
+   it. This killed an always-on-top change that was about to ship.
+
+*Resolution.* The whole app was deleted in favour of a ~350-line dependency-free Node
+**agent** that only reports the foreground program, with the extension remaining the single
+central node. The existing D-Bus contract was preserved deliberately, so no second GNOME
+logout was needed.
+
+### Video picture-in-picture disabled the very idle timeline it displayed
+**Status: removed by decision — c9b47fc**
+
+PiP needs a continuously playing `<video>`, and the browser holds a **screen wake lock**
+while video plays, which on Linux can stop the session ever being reported idle. The
+companion was suppressing the idle detection it existed to show. It also never stayed on
+top under Wayland. The only browser-side workaround for *that* was `--ozone-platform=x11`,
+which breaks `chrome.idle` — so the two fixes were **mutually exclusive**. Replaced with a
+plain extension window pinned by the window manager, and later pinned automatically (below).
+
+### The whitelist button offered you your own browser
+**Status: fixed — `AgentStatus.recent`**
+
+*Symptom.* The popup's "This is work" button, and later the companion's "+ Whitelist",
+offered whatever program was in front — which, while you are looking at the popup or the
+companion, is **always the browser**. Browsers are the one thing that must never go on the
+program whitelist: counting one as work counts every distraction site as work.
+
+*Cause.* Structural, not incidental. Both surfaces *are* the browser, so the live reading
+at the moment of the click is guaranteed to be the wrong answer.
+
+*Fix.* `AgentStatus.recent` — the last **non-browser** foreground program (5-minute
+freshness). Every surface that *offers* a program renders `recent`, never `program`. It is
+also what the user means by "this app", and it survives the click, which necessarily
+focuses the browser to happen at all. The door is shut a second time in the `ADD_PROGRAM`
+handler, which refuses a browser id whatever the UI sent.
+
+### The companion took up to 15 seconds to notice the agent had started
+**Status: fixed — `agent.ts`**
+
+*Symptom.* The companion said *"Focus agent is off"*, the user clicked the icon, got the
+"running" notification — and the window kept saying off for many seconds.
+
+*Cause.* Two delays stacked. `refreshProgram()` backs off to a **15 s** retry once the
+agent looks absent (otherwise a machine with no agent attempts a connection twice a second
+forever), and `AGENT_STATUS` answered from the *cache* before its own probe resolved,
+costing another poll on top.
+
+*Fix.* Requests from a UI pass `eager`, which shortens only the offline retry to 1.5 s — a
+UI asking for status is a human waiting for an answer — and `AGENT_STATUS` now replies
+*after* its probe resolves. The 0.5 s idle poll keeps the 15 s backoff, since nothing is
+waiting on it. Measured against the live agent: detection at ~2 s (bounded by the
+companion's own poll) instead of up to 15 s.
+
+### `pkill -f` killed the wrong process — twice, including my own shell
+**Status: fixed — `launch.sh` reads the pid from the agent's HTTP reply**
+
+*Symptom.* `pkill -f "electron \."` and later `pkill -f "dist/index.js"` returned exit code
+144 and took down the shell that ran them, because the pattern matched the shell's own
+command line.
+
+*Cause.* One agent has several possible command lines — `npm start`, the desktop icon, a
+hand-typed `node dist/index.js` — and a pattern loose enough to catch all three catches
+other things too.
+
+*Fix.* The agent reports `process.pid` in its JSON, and `launch.sh stop` kills exactly that
+process. `pkill -f` remains only as a fallback for an older agent that reports no pid.
+(Interactive rule of thumb from the same lesson: prefer `pkill -x`.)
+
+### Sprite could start off-screen in a small viewport
+**Status: fixed — `sprite.ts`**
+
+`px`/`py` are seeded up to (400, 300); in a smaller window the sprite sat outside the
+viewport until the first heartbeat moved it. Now clamped to
+`window.innerWidth/Height − SIZE` before the first paint.
+
+### Audio never unlocked on some SPAs
+**Status: fixed by design — `sprite.ts`**
+
+Web Audio must be unlocked inside a real user gesture, but some SPAs (Telegram Web, for
+one) call `stopPropagation()` on input events, so a bubble-phase listener never fires. The
+unlock listeners are registered in the **capture** phase, across four gesture types.
+
+### Content-script re-injection threw "Identifier already declared"
+**Status: fixed by design — `vite.config.ts`**
+
+Reloading the extension with tabs already open re-injects the content scripts into the same
+page context. Every content-script bundle is wrapped in an IIFE by a small Vite plugin so
+top-level names cannot clash with the previous injection.
+
+---
+
+## Server, auth and database
+
+### `SECURITY DEFINER` functions were callable with any `user_id`
+**Status: fixed — 408fcec (migration `20260729210000`)**
+
+*The serious one.* Postgres grants `EXECUTE` to `PUBLIC` by default on a new function. Four
+functions were created `SECURITY DEFINER` — so they run as the owner and **bypass RLS** —
+while taking a `user_id` **parameter**, and none had that default revoked.
+
+`build_state(uuid)` was the worst: any signed-in user, and `anon`, could call it with
+somebody else's UUID and receive their **entire state** — live score, 7- and 30-day
+averages, whitelisted domains and 30 days of history. A complete, read-only, total RLS
+bypass. `roll_forward(uuid)` let anyone end another user's day early; `refresh_rollup(uuid)`
+was an unauthorised write to another user's summary row.
+
+RLS on the tables was correct throughout and was never the weakness. `SECURITY DEFINER` is
+precisely the mechanism for stepping around it.
+
+*Fix.* `build_state` no longer takes a `user_id` at all: it reads `auth.uid()` itself and is
+`SECURITY INVOKER`, so it is **structurally unable** to return another user's rows rather
+than merely forbidden from doing so — a future careless `grant execute … to authenticated`
+cannot reopen it. The cross-user maintenance functions stay `DEFINER` (pg_cron must write
+across every user) with `EXECUTE` revoked from `anon`, `authenticated` and `PUBLIC`.
+
+> **The rule this leaves behind:** a `DEFINER` function must not take a user id.
+> `get_member_profile(p_user)` is the single deliberate exception, and it is safe *only*
+> because its body refuses any target `can_see_user()` rejects. Delete that check and it
+> becomes a full dump of any user by id.
+
+### The competition-kind migration failed on existing rows
+**Status: fixed — 4bea01d**
+
+*Symptom.* The migration adding competition *kinds* (individual vs team) aborted with a
+duplicate-key error on real data.
+
+*Cause.* Typing a competition retroactively invalidates entries made by the other route,
+and `(competition, user_id)` becomes unique from that migration onward. Anyone who had
+entered by both routes broke the insert.
+
+*Fix.* A reconciliation `do` block **before** the ranked table is rebuilt, deleting the
+entries the new type makes illegal and `raise notice`-ing how many — it deletes real
+opt-ins, so it says so. Plus a `distinct on (competition, user_id)` **seatbelt** in the
+refresh: the rule lives at the doors, but this runs from `pg_cron` every minute and one
+stray duplicate would abort the refresh and freeze **every** leaderboard on the last good
+snapshot. Losing a duplicate row beats losing all the boards.
+
+### Two parallel token refreshes signed the user out
+**Status: fixed by design — `server/auth.ts`**
+
+Supabase **rotates the refresh token on use**, so two concurrent refreshes race and the
+loser holds a token that no longer exists. Refreshes are collapsed into a single in-flight
+promise.
+
+### Google sign-in did not work in Brave
+**Status: fixed by design — `server/auth.ts`**
+
+`chrome.identity.getAuthToken` is Chrome-only and absent in Brave. Sign-in uses
+`launchWebAuthFlow` instead, exchanging Google's `id_token` for a Supabase session.
+
+### `/auth/v1/authorize` returned `400 … missing OAuth secret`
+**Status: fixed — design changed**
+
+The first sign-in design routed PKCE through Supabase's `/authorize`, which requires a
+Google **client secret** configured in the Supabase project. This project has none, so it
+failed with *"Unsupported provider: missing OAuth secret"*. Rewritten to the Google
+`response_type=id_token` → Supabase `grant_type=id_token` route, with the nonce sent
+**hashed to Google and raw to Supabase**. Caught by testing, not by reading — the failure
+mode was indistinguishable from a bad redirect URI until the error body was read.
+
+### The local rollover and the server rollover disagreed
+**Status: fixed — 79ace40**
+
+The extension ended the day at **local midnight**; the server ends it at **01:00 in the
+user's timezone**. The two boundaries are an hour apart, so the client zeroed the score at
+00:00 and the next server reply put it back. The local rollover was deleted outright: the
+server owns day boundaries, and `state.scoreDate` comes from the server's `live_day`.
+
+> **Consequence, by design:** with no server configured, or signed out, nothing ever ends a
+> day. The live score grows indefinitely and no history is banked.
+
+### Reconciled scores were posted straight back, compounding
+**Status: fixed — 5ad1e19**
+
+`applyServerScores()` writes through `writeState()`, **not** `updateState()`. `updateState`
+is the sync hook: it diffs `focusScore`/`distractedScore` and queues the difference — so
+feeding it the server's own reply posts that reply back as a delta, compounding on every
+round trip. The reconciled value is `server + still_pending`, because deltas queued
+mid-flight are not in the server's figure yet and dropping them makes the number jump twice.
+
+### `ArXiv.org` and `arxiv.org` would have been two different domains
+**Status: fixed before it could bite — `domain_flags`**
+
+`flag_domain` lower-cased its input; `user_domains` did not. Two tables that are joined on
+the domain string could therefore hold rows that never match, so a flagged domain would show
+no flags. Caught while writing the flag registry; domains are lower-cased on write
+everywhere now. Worth recording because the two writers are in different migrations and
+nothing in the schema forces them to agree.
+
+### One-team-per-competition has to be enforced at two doors
+**Status: by design — `enroll_team` *and* `join_team`**
+
+"At most one of your teams may be in any one competition" spans `team_members` and
+`team_competitions`, so **no table constraint can express it** — unlike every other
+duplicate rule here, which is a composite primary key and therefore impossible to forget.
+It is checked in both `enroll_team` and `join_team`, because guarding only enrolment leaves
+*joining a team that is already entered* as a way in. `enroll_team` must check **every**
+member of the team, since whoever presses the button is rarely the person the clash belongs
+to.
+
+### A password column cannot be hidden with RLS
+**Status: fixed by design**
+
+RLS filters **rows**, not columns, so a `password_hash` column on `teams`/`competitions` is
+visible to any client that can see the row. Withheld with column-level
+`GRANT SELECT (name, created_by, created_at)` instead. `join_team` and `enroll_team` are
+therefore `SECURITY DEFINER` (they must read that column) — which makes the explicit
+`user_id = auth.uid()` and membership predicates inside them **load-bearing, not
+redundant**.
+
+### The `*/5` cron cadence is a correctness property
+**Status: by design, do not "optimise"**
+
+`pg_cron` schedules are one wall-clock moment in UTC, while users are in every timezone. A
+`0 1 * * *` job would end the day at 01:00 UTC for everyone. The rollover and the weekly
+flag grant run **every five minutes**, each pass asking per user whether *their* local day
+or week has turned. That bounds how long after a user's local 01:00 their day turns — so
+the jobs are pruned to fit the cadence, not the other way round. `pg_cron` is **required**,
+not optional.
+
+---
+
+## Build, tooling and process
+
+### `$pid` is read-only in PowerShell
+Assigning to it in the Windows foreground helper silently broke the script. Renamed to
+`$procId`.
+
+### A backtick inside a TypeScript template literal
+A `` `state` `` written inside a comment *within* a template literal terminated the literal
+and produced a `TS1005` several lines later. The rule: nothing inside a template literal is
+a comment, including things that look like prose.
+
+### `ChildProcessWithoutNullStreams` does not describe `stdio: ['ignore','pipe','pipe']`
+The helper child ignores stdin, so its type is `ChildProcessByStdio<null, Readable,
+Readable>`. It must also be assigned to a local `const` before use, or the narrowing is
+lost across the closure boundaries.
+
+### `status` collides with the DOM global
+A variable named `status` in a renderer silently shadowed `window.status` (a string), so
+type errors appeared far from the declaration. Renamed to `appStatus`.
+
+### PowerShell 5.1 mis-reads a BOM-less script
+**Status: fixed pre-emptively**
+
+Windows PowerShell 5.1 reads a `.ps1` without a byte-order mark as the **system ANSI
+codepage**, so any non-ASCII byte comes back mangled — and a mangled character inside the
+embedded C# type definition would be a compile error on somebody else's machine and nowhere
+else. The generated script is written with a UTF-8 BOM *and* kept to plain ASCII.
+
+### `--disable-features=Vulkan` did not silence the Wayland/Vulkan error
+Reverted rather than shipped, because the comment justifying the flag would have claimed
+something untrue. Noise in the console is better than a lie in the source.
+
+---
+
+## Still open / accepted
+
+| | |
+|---|---|
+| **macOS cannot pin the companion window** | No public API lets a process change another application's window level. Every utility that does it is an Accessibility-granted window manager. The agent deliberately does not try — asking for that permission is what it is built to avoid. Documented with three helper apps in the README. |
+| **KDE and wlroots report no foreground program** | Same shape as the GNOME bridge (a KWin script; `swaymsg`/`hyprctl`) and simply not implemented. Those sessions fall back to browser-only tracking, which is exactly the behaviour with no agent installed. |
+| **Installing the GNOME bridge needs a logout** | Not fixable — see the entry above. |
+| **The Windows pin is untested on real hardware** | Written and reviewed, never run: there is no PowerShell on the development machine. The two things most likely to be wrong are the exact window title Chromium gives a popup window, and the script's encoding (handled pre-emptively above). |
+| **The extension ID is not pinned** | No `"key"` in `manifest.json`, so the ID changes when the unpacked folder moves. This is *why* the agent uses a loopback port rather than native messaging, and why the extension cannot start the agent itself. Pinning it is a deliberate open decision, not an oversight. |

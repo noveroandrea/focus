@@ -26,7 +26,7 @@
 // renderer — the two documents can't share a runtime, so the character roster and
 // draw code are duplicated here on purpose.
 
-import { clampIdleTime, type AgentStatus } from '../../types';
+import { clampIdleTime, type AgentStatus, type PageStatus } from '../../types';
 import { IDLE_WARNING_MS } from '../timings';
 
 interface State {
@@ -108,58 +108,171 @@ setTimeout(() => {
   setTimeout(() => { footer.style.display = 'none'; }, 700);
 }, 8000);
 
-// ── Foreground program bar ────────────────────────────────────────────────────
-// The one thing this window can say that the in-page sprite cannot. Sitting right
-// under the character and the score, it answers "is what I am doing right now being
-// counted?" for work that happens OUTSIDE the browser — which is the only work this
-// window is on screen for in the first place.
+// ── The two whitelist bars ────────────────────────────────────────────────────
+// Under the character and the score, two strips answer the only question this
+// window cannot already show you: "is what I am doing right now being counted?"
 //
-// It shows the last NON-browser program (AgentStatus.recent), never the live
-// reading: this window IS the browser, so while you are looking at it the live
-// answer is "Brave is in front" — the one answer that may never go on the list. The
-// program you were in a moment ago is what "this app" means here, and it survives
-// the click, which necessarily focuses the browser to happen at all.
+//   page bar     — the site in the front tab, and one click to whitelist it
+//   program bar  — the program you were last in, and one click to whitelist that
 //
-// With the agent stopped, the same strip turns into a red line saying so. Opening
-// this window IS the moment work moves outside the browser, so a stopped agent means
-// everything you are about to do goes uncounted — and nothing else on screen would
+// Both exist here rather than only in the popup because this window is ALWAYS
+// VISIBLE. The popup is three clicks and covers the page it is describing; the
+// companion is already on screen, on top, while you are reading the very page you
+// want to count. That is worth two rows of a 300px window.
+//
+// NEITHER bar can ask "what is in front right now?", for the same structural reason
+// in both cases: this window IS a window of the browser, so at the moment you look
+// at it the live answers are "the companion tab" and "a browser". The background
+// therefore hands out the last ordinary web PAGE (PageStatus) and the last
+// non-browser PROGRAM (AgentStatus.recent) — which is also what a person means by
+// "this page" and "this app", and both survive the click, which necessarily focuses
+// the browser to happen at all.
+
+/** One strip: a label, a green tick when it is already counted, and a button when it
+ *  is not. Built once for both rows so they cannot drift apart visually. */
+function makeBar(mark: string) {
+  const row = document.createElement('div');
+  Object.assign(row.style, {
+    display: 'none', alignItems: 'center', gap: '6px', flexShrink: '0',
+    padding: '5px 8px', borderTop: '1px solid rgba(148,163,184,0.18)',
+    fontSize: '11px', lineHeight: '1.2', minWidth: '0',
+  });
+
+  const label = document.createElement('span');
+  Object.assign(label.style, {
+    flex: '1', minWidth: '0', overflow: 'hidden',
+    textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#cbd5e1',
+  });
+
+  const tick = document.createElement('span');
+  Object.assign(tick.style, {
+    flexShrink: '0', fontSize: '9px', fontWeight: '700',
+    letterSpacing: '0.06em', textTransform: 'uppercase', color: '#4ade80',
+  });
+  tick.textContent = mark;
+
+  const button = document.createElement('button');
+  Object.assign(button.style, {
+    flexShrink: '0', cursor: 'pointer', border: 'none', borderRadius: '7px',
+    background: '#3b82f6', color: '#fff', padding: '3px 7px',
+    fontSize: '9px', fontWeight: '700', letterSpacing: '0.06em',
+    textTransform: 'uppercase', fontFamily: 'inherit',
+  });
+  button.textContent = '+ Whitelist';
+
+  // The undo, shown in place of the button once something is on the list. Quiet by
+  // design — a ✕ next to the tick rather than a second coloured button: taking
+  // something OFF the whitelist is the rarer action and the one you would rather not
+  // hit by accident, and this row is 300px wide with a domain already competing for
+  // it. The tick says what the state is; this changes it.
+  const remove = document.createElement('button');
+  Object.assign(remove.style, {
+    flexShrink: '0', cursor: 'pointer', border: 'none', borderRadius: '6px',
+    background: 'transparent', color: '#64748b', padding: '2px 5px',
+    fontSize: '12px', lineHeight: '1', fontFamily: 'inherit',
+  });
+  remove.textContent = '✕';
+  remove.addEventListener('mouseenter', () => { remove.style.color = '#f87171'; });
+  remove.addEventListener('mouseleave', () => { remove.style.color = '#64748b'; });
+
+  row.append(label, tick, button, remove);
+
+  /** Show `text`, with either the "+ Whitelist" button or the tick-and-✕ pair —
+   *  never both, since they are the two directions of one toggle. */
+  const show = (text: string, title: string, counted: boolean, undoTitle = '') => {
+    row.style.display = 'flex';
+    row.style.background = 'transparent';
+    label.style.color = '#cbd5e1';
+    label.style.whiteSpace = 'nowrap';
+    label.textContent = text;
+    label.title = title;
+    tick.style.display = counted ? 'inline' : 'none';
+    remove.style.display = counted ? 'inline-block' : 'none';
+    remove.title = undoTitle;
+    button.style.display = counted ? 'none' : 'inline-block';
+  };
+  const warn = (text: string, title: string) => {
+    row.style.display = 'flex';
+    row.style.background = 'rgba(248,113,113,0.12)';
+    label.style.color = '#fca5a5';
+    label.style.whiteSpace = 'normal';   // let it wrap; it must stay readable
+    label.textContent = text;
+    label.title = title;
+    tick.style.display = 'none';
+    remove.style.display = 'none';
+    button.style.display = 'none';
+  };
+  const hide = () => { row.style.display = 'none'; };
+
+  return { row, button, remove, show, warn, hide };
+}
+
+const pageBar = makeBar('✓ counts');
+const programBar = makeBar('✓ work');
+
+// Page first: this window is on top of the browser at least as often as it is beside
+// another app, and the page is the thing you are looking at when it is.
+root.append(stage, pageBar.row, programBar.row, footer);
+
+// ── Page bar ─────────────────────────────────────────────────────────────────
+// `shownPage` is whatever the row is describing, whitelisted or not — the two
+// buttons are never visible at the same time, so one subject serves both.
+let shownPage: string | null = null;
+
+function renderPageBar(page: PageStatus | null) {
+  // Hidden outright when there is no ordinary web page to talk about — only the
+  // companion open, or a chrome:// tab in front.
+  if (!page?.domain) { shownPage = null; pageBar.hide(); return; }
+  shownPage = page.domain;
+  // Name what removal will actually drop. A page usually counts because of its own
+  // domain, but it can be a broader entry doing the work — and dropping `unipd.it`
+  // to stop counting one Overleaf page also stops counting everything else under it.
+  // The button still does what the popup's toggle does; it just says so first.
+  const wider = page.matched.filter((d) => d !== page.domain);
+  pageBar.show(
+    page.domain,
+    page.allowed ? `${page.domain} counts as work` : `Count ${page.domain} as work`,
+    page.allowed,
+    wider.length
+      ? `Remove ${page.matched.join(', ')} from the whitelist — anything else matching stops counting too`
+      : `Stop counting ${page.domain} as work`,
+  );
+}
+
+// Neither of these names the page: the background decides which page is meant, for
+// the same reason it has to — this window cannot see which tab is in front.
+pageBar.button.addEventListener('click', () => {
+  if (!shownPage) return;
+  chrome.runtime.sendMessage({ type: 'WHITELIST_PAGE' }, () => {
+    try { if (chrome.runtime.lastError) return; } catch { /* ignore */ }
+    askPage();
+  });
+});
+
+pageBar.remove.addEventListener('click', () => {
+  if (!shownPage) return;
+  chrome.runtime.sendMessage({ type: 'UNWHITELIST_PAGE' }, () => {
+    try { if (chrome.runtime.lastError) return; } catch { /* ignore */ }
+    askPage();
+  });
+});
+
+function askPage() {
+  chrome.runtime.sendMessage({ type: 'PAGE_STATUS' }, (res?: PageStatus) => {
+    try { if (chrome.runtime.lastError) return; } catch { return; }
+    renderPageBar(res ?? null);
+  });
+}
+
+// ── Program bar ──────────────────────────────────────────────────────────────
+// With the agent stopped, this strip turns into a red line saying so. Opening this
+// window IS the moment work moves outside the browser, so a stopped agent means
+// everything you are about to do goes uncounted, and nothing else on screen would
 // tell you. It stays until fixed rather than fading like the footer hint, because it
 // describes a state, not a tip. The bar is hidden only when there is genuinely
 // nothing to say: agent running, but no program resolved yet (a Wayland session with
 // no bridge, say), which the popup's Allowed programs panel explains properly.
-const programBar = document.createElement('div');
-Object.assign(programBar.style, {
-  display: 'none', alignItems: 'center', gap: '6px', flexShrink: '0',
-  padding: '5px 8px', borderTop: '1px solid rgba(148,163,184,0.18)',
-  fontSize: '11px', lineHeight: '1.2', minWidth: '0',
-});
-
-const programName = document.createElement('span');
-Object.assign(programName.style, {
-  flex: '1', minWidth: '0', overflow: 'hidden',
-  textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#cbd5e1',
-});
-
-const programMark = document.createElement('span');
-Object.assign(programMark.style, {
-  flexShrink: '0', fontSize: '9px', fontWeight: '700',
-  letterSpacing: '0.06em', textTransform: 'uppercase', color: '#4ade80',
-});
-programMark.textContent = '✓ work';
-
-const addBtn = document.createElement('button');
-Object.assign(addBtn.style, {
-  flexShrink: '0', cursor: 'pointer', border: 'none', borderRadius: '7px',
-  background: '#3b82f6', color: '#fff', padding: '3px 7px',
-  fontSize: '9px', fontWeight: '700', letterSpacing: '0.06em',
-  textTransform: 'uppercase', fontFamily: 'inherit',
-});
-addBtn.textContent = '+ Whitelist';
-
-programBar.append(programName, programMark, addBtn);
-root.append(stage, programBar, footer);
-
-let offered: string | null = null;   // the id the button would add right now
+let shownProgram: string | null = null;
 let offSince = 0;                    // when the agent first looked absent
 
 // A woken service worker answers the first AGENT_STATUS from an empty cache — its
@@ -171,43 +284,42 @@ const OFF_GRACE_MS = 4000;
 
 function renderProgramBar(agent: AgentStatus | null) {
   // Nothing heard back yet — say nothing rather than accuse the agent of being off.
-  if (!agent) { programBar.style.display = 'none'; return; }
+  if (!agent) { programBar.hide(); return; }
 
   if (!agent.running) {
     if (!offSince) offSince = Date.now();
     if (Date.now() - offSince < OFF_GRACE_MS) return;   // leave the bar as it was
-    offered = null;
-    programBar.style.display = 'flex';
-    programBar.style.background = 'rgba(248,113,113,0.12)';
-    programName.style.color = '#fca5a5';
-    programName.style.whiteSpace = 'normal';   // let it wrap; it must stay readable
-    programName.textContent = 'Focus agent is off — double-click the Focus agent icon to run it';
-    programName.title = 'Without it, work outside the browser cannot be counted';
-    programMark.style.display = 'none';
-    addBtn.style.display = 'none';
+    shownProgram = null;
+    programBar.warn(
+      'Focus agent is off — double-click the Focus agent icon to run it',
+      'Without it, work outside the browser cannot be counted',
+    );
     return;
   }
 
   offSince = 0;
   const p = agent.recent;
-  offered = p?.id ?? null;
-  if (!p) { programBar.style.display = 'none'; return; }
-
-  programBar.style.display = 'flex';
-  programBar.style.background = 'transparent';
-  programName.style.color = '#cbd5e1';
-  programName.style.whiteSpace = 'nowrap';
-  programName.textContent = p.name;
-  programName.title = p.id;
-  const allowed = agent.recentAllowed;
-  programMark.style.display = allowed ? 'inline' : 'none';
-  addBtn.style.display = allowed ? 'none' : 'inline-block';
-  addBtn.title = `Count ${p.id} as work`;
+  shownProgram = p?.id ?? null;
+  if (!p) { programBar.hide(); return; }
+  programBar.show(
+    p.name,
+    agent.recentAllowed ? `${p.id} counts as work` : `Count ${p.id} as work`,
+    agent.recentAllowed,
+    `Stop counting ${p.id} as work`,
+  );
 }
 
-addBtn.addEventListener('click', () => {
-  if (!offered) return;
-  chrome.runtime.sendMessage({ type: 'ADD_PROGRAM', program: offered }, () => {
+programBar.button.addEventListener('click', () => {
+  if (!shownProgram) return;
+  chrome.runtime.sendMessage({ type: 'ADD_PROGRAM', program: shownProgram }, () => {
+    try { if (chrome.runtime.lastError) return; } catch { /* ignore */ }
+    askAgent();
+  });
+});
+
+programBar.remove.addEventListener('click', () => {
+  if (!shownProgram) return;
+  chrome.runtime.sendMessage({ type: 'REMOVE_PROGRAM', program: shownProgram }, () => {
     try { if (chrome.runtime.lastError) return; } catch { /* ignore */ }
     askAgent();
   });
@@ -220,12 +332,17 @@ function askAgent() {
   });
 }
 
-// Polled, because the answer changes as you alt-tab and nothing broadcasts it.
-// Skipped while the window is hidden: this window stays open for hours, and a
-// minimised companion asking twice a minute would wake the service worker for a bar
-// nobody can see.
-setInterval(() => { if (document.visibilityState === 'visible') askAgent(); }, 2000);
-askAgent();
+// Polled, because both answers change as you switch tab or alt-tab and nothing
+// broadcasts either. Skipped while the window is hidden: this window stays open for
+// hours, and a minimised companion asking twice a minute would wake the service
+// worker for two bars nobody can see.
+function poll() {
+  if (document.visibilityState !== 'visible') return;
+  askPage();
+  askAgent();
+}
+setInterval(poll, 2000);
+poll();
 
 // ── State / settings ─────────────────────────────────────────────────────────
 function applyState(s: State) {

@@ -195,6 +195,13 @@ export type MessageType =
   // Whitelist a program from a surface that has no settings UI — the companion
   // window's one-click button. The background owns `settings`, so it does the write.
   | { type: 'ADD_PROGRAM'; program: string }
+  | { type: 'REMOVE_PROGRAM'; program: string }
+  // The same one-click path for the page you are on, asked and answered by the
+  // background because the companion window cannot see which tab is in front —
+  // which is also why undoing it takes no argument.
+  | { type: 'PAGE_STATUS' }
+  | { type: 'WHITELIST_PAGE' }
+  | { type: 'UNWHITELIST_PAGE' }
   // Server sync. Sign-in runs in the background, never in the popup: opening the
   // Google consent window closes the popup, which would abort the flow mid-way.
   | { type: 'SERVER_SIGN_IN' }
@@ -254,6 +261,21 @@ export interface AgentStatus {
   /** Set when the agent reported it cannot see the foreground (Wayland without the
    *  GNOME bridge). Shown in the popup so the failure names its own fix. */
   note: string | null;
+}
+
+/** Reply to PAGE_STATUS: the last ordinary web page seen in front, for a surface
+ *  that cannot ask "which tab is active?" and get a useful answer — the companion
+ *  window is itself a window, so while you look at it the live answer is the
+ *  companion. `domain` is empty when there is no such page to offer. */
+export interface PageStatus {
+  domain: string;
+  /** Whether that page currently matches `Settings.allowedDomains`. */
+  allowed: boolean;
+  /** The whitelist entries making it count — usually just `domain`, but the match is
+   *  a substring test, so a broader entry (`unipd.it`) can be the one doing the work,
+   *  and removing the page removes *that*. Sent so the undo button can say what it
+   *  will actually drop instead of implying it only affects this hostname. */
+  matched: string[];
 }
 
 /** Reply to SERVER_STATUS / SERVER_SIGN_IN — what the popup needs to render the
