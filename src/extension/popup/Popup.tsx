@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, localDateKey, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle } from '../../types';
+import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, localDateKey, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle, SPRITE_MODES, clampSpriteMode } from '../../types';
 import { FileText, Activity, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus } from 'lucide-react';
+import { IDLE_WARNING_MS } from '../timings';
 import '../../index.css';
 // The sections themselves — shared verbatim with the dashboard page, which composes
 // the same components into a wide layout. See src/extension/ui/shared.tsx.
@@ -341,6 +342,16 @@ const SettingsTab = ({ settings, onChange }: {
             <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.companionEnabled ? 'translate-x-5' : ''}`} />
           </div>
         </div>
+        {/* Deliberately NOT a number to choose. How many companions you want is not a
+            preference, it is a fact about your desk, and the browser already knows it
+            — a slider you have to remember to change every time you plug a monitor in
+            is a slider that will be wrong. */}
+        {settings.companionEnabled && (
+          <p className="text-[10px] text-slate-400 leading-snug">
+            One opens <strong>on each screen</strong>, bottom-right, when you resume work.
+            The <strong>⧉</strong> button on a companion opens another.
+          </p>
+        )}
         {companionInfoOpen && (
           <div className="rounded-xl bg-slate-50 p-2.5 text-[10px] leading-snug text-slate-600 space-y-1.5">
             <p>
@@ -386,6 +397,84 @@ const SettingsTab = ({ settings, onChange }: {
             <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.aiRequestEnabled ? 'translate-x-5' : ''}`} />
           </div>
         </div>
+      </section>
+
+      {/* In-page sprite. Three shapes for the same information, because what makes a
+          companion work differs per person: some need it moving to notice it at all,
+          some can't read a page with something crawling over it, and some want the
+          whole companion — whitelist buttons included — without a second window to
+          keep on top. */}
+      <section className="space-y-3">
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Sprite on the page</h3>
+
+        {/* The kill switch. Nothing else changes when it is off — heartbeats, scoring
+            and the whitelist belong to the background, not to the sprite — so this is
+            purely "stop drawing on my pages", for people who watch the companion
+            window on another screen instead. */}
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] text-slate-600 leading-tight">
+            Show the sprite<br />
+            <span className="text-[10px] text-slate-400">off = nothing is drawn on your pages; tracking and scoring carry on</span>
+          </span>
+          <div
+            onClick={() => set({ spriteEnabled: !settings.spriteEnabled })}
+            className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.spriteEnabled ? 'bg-blue-500' : 'bg-slate-300'}`}
+          >
+            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.spriteEnabled ? 'translate-x-5' : ''}`} />
+          </div>
+        </div>
+
+        {settings.spriteEnabled && (
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-3 gap-1">
+            {SPRITE_MODES.map(m => {
+              const active = clampSpriteMode(settings.spriteMode) === m.id;
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => set({ spriteMode: m.id })}
+                  title={m.hint}
+                  className={`text-[10px] font-semibold rounded-lg px-1 py-1.5 border transition-colors ${
+                    active
+                      ? 'bg-blue-500 text-white border-blue-500'
+                      : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[9px] text-slate-400 leading-snug">
+            {SPRITE_MODES.find(m => m.id === clampSpriteMode(settings.spriteMode))?.hint}
+          </p>
+        </div>
+        )}
+
+        {/* Trembling is not offered as a choice: it IS the escalation, it starts
+            inside the warning window while there is still time to come back, and it
+            grows for as long as you are away. Growing is the half that takes over the
+            screen, so it is the half worth being able to refuse. Applies to all three
+            modes and to the companion window — the panel and the window are
+            fixed-size boxes, but the box does not have to grow; the character drawn
+            inside it does, with the score and the countdown painted over the top so
+            the thing you opened it for is never what gets covered. */}
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] text-slate-600 leading-tight">
+            Grow when idle<br />
+            <span className="text-[10px] text-slate-400">the crying character swells to fill the view — here and in the companion window</span>
+          </span>
+          <div
+            onClick={() => set({ idleGrow: !settings.idleGrow })}
+            className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.idleGrow ? 'bg-blue-500' : 'bg-slate-300'}`}
+          >
+            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.idleGrow ? 'translate-x-5' : ''}`} />
+          </div>
+        </div>
+        <p className="text-[9px] text-slate-400 leading-snug">
+          It <strong>trembles</strong> either way — visibly from the first second of the {IDLE_WARNING_MS / 1000}-second
+          warning, then shaking further and further the longer you stay away.
+        </p>
       </section>
 
       {/* Timers */}
@@ -605,28 +694,17 @@ const SettingsTab = ({ settings, onChange }: {
 };
 
 // Open (or focus) the floating-companion helper window — a small extension window
-// that mirrors the sprite while you work in another app. Deduped via a stored
-// window id so a repeat click focuses the existing window instead of stacking a
-// new one. Keep it above other apps with your window manager (see the README
-// "Floating companion" section).
+// that mirrors the sprite while you work in another app.
+//
+// Handed to the background rather than done here, because this popup closes the
+// instant the new window takes focus and every callback after that point is lost:
+// the window id was never recorded, so the next click opened another one. The
+// background also owns the per-screen placement (chrome.system.display) and the
+// list of open companions. Keeping it on top is your window manager's job — see the
+// README "Floating companion" section.
 function openCompanionWindow() {
-  const url = chrome.runtime.getURL('pip.html');
-  const create = () => chrome.windows.create(
-    // Deliberately small — this sits in a screen corner while you work elsewhere.
-    // The canvas scales with the window, so it survives being shrunk further. The
-    // height covers the two whitelist bars under the canvas without squeezing it;
-    // they collapse when they have nothing to say, and the window is resizable.
-    { url, type: 'popup', width: 300, height: 260 },
-    (w) => { if (w?.id != null) chrome.storage.local.set({ pipWindowId: w.id }); },
-  );
-  chrome.storage.local.get(['pipWindowId'], ({ pipWindowId }) => {
-    if (typeof pipWindowId === 'number') {
-      chrome.windows.update(pipWindowId, { focused: true, drawAttention: true }, () => {
-        if (chrome.runtime.lastError) create(); // stored window gone → make a new one
-      });
-    } else {
-      create();
-    }
+  chrome.runtime.sendMessage({ type: 'OPEN_COMPANION' }, () => {
+    try { void chrome.runtime.lastError; } catch { /* popup already gone */ }
   });
 }
 

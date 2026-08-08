@@ -87,6 +87,22 @@ export interface Settings {
   aiRequestEnabled: boolean;
   /** When true, resuming work opens the floating companion window; when false it never opens */
   companionEnabled: boolean;
+  /** When false, no sprite is injected into pages at all. For people who work with
+   *  the companion window instead: a character walking over the page is the single
+   *  most intrusive thing this extension does, and on a second monitor it is also
+   *  redundant. Nothing else changes — heartbeats, scoring and the whitelist are all
+   *  owned by the background and carry on exactly as before. */
+  spriteEnabled: boolean;
+  /** What the sprite injected into the page looks like and how it behaves (see SPRITE_MODES) */
+  spriteMode: SpriteMode;
+  /** Whether the crying character also SWELLS to fill its frame once the warning is
+   *  over. Trembling is not a choice and has no setting: it is the escalation, it
+   *  starts inside the warning window and it grows the whole time you are away.
+   *  Growing is the part that takes over the screen, so it is the part worth being
+   *  able to turn off. Applies to all three sprite modes and to the companion window
+   *  — the panel and the window are fixed-size boxes, but the drawing inside them is
+   *  not. */
+  idleGrow: boolean;
   /** Full list of allowed domain strings — pre-populated with defaults, fully editable */
   allowedDomains: string[];
   /** Foreground PROGRAMS that count as work, reported by the optional desktop agent.
@@ -149,6 +165,49 @@ export function clampCryBeepDuration(s: number): number {
   return Math.min(CRY_BEEP_DURATION_MAX, Math.max(CRY_BEEP_DURATION_MIN, Math.round(s)));
 }
 
+// ── The in-page sprite ────────────────────────────────────────────────────────
+// Three shapes for the same information, because the thing that makes a companion
+// work is different for different people: some need it moving to notice it at all,
+// some find a moving object on the page unusable, and some want the whole companion
+// panel — whitelist buttons included — without a second window to keep on top.
+export type SpriteMode = 'roam' | 'fixed' | 'panel';
+export const SPRITE_MODES: { id: SpriteMode; label: string; hint: string }[] = [
+  { id: 'roam',  label: 'Roaming',  hint: 'the small circle walks across the page, one step per heartbeat' },
+  { id: 'fixed', label: 'Fixed',    hint: 'the same small circle, parked where you drag it — it bounces on each heartbeat instead of walking' },
+  { id: 'panel', label: 'Panel',    hint: 'the whole companion, in the page: character, score, countdown and both whitelist buttons, dragged where you like' },
+];
+export function clampSpriteMode(s: unknown): SpriteMode {
+  return s === 'fixed' || s === 'panel' ? s : 'roam';
+}
+
+// What the character does when you go idle.
+//
+// TREMBLING is not optional and has no setting. It begins inside the five-second
+// warning window — while there is still time to come back, which is the only moment a
+// warning is worth anything — and grows for as long as you stay away. Making it a
+// choice would have meant offering to switch off the one thing that is *meant* to
+// catch your eye.
+//
+// GROWING is the part that takes over the screen, so that is the part worth being
+// able to refuse. One setting for every surface: the roaming and fixed circles grow
+// into the page, and the panel and the companion window grow inside their own frame —
+// a fixed-size box does not stop the drawing in it from swelling. In both frames the
+// score and the countdown are painted over the top, so a character big enough to fill
+// the view never hides the numbers.
+
+/** Where the user parked the sprite, per mode, as a FRACTION of the viewport rather
+ *  than pixels: the same page opened on a laptop and an external monitor has to put
+ *  the companion in the same visual place, and a pixel offset saved on the big screen
+ *  lands off the edge of the small one. Written by the content script on drop, read
+ *  by every tab. Kept out of `Settings` deliberately — a drag is not a preference,
+ *  and routing one through the settings object would fire the whole settings-changed
+ *  cascade (whitelist diff, server mirror, icon repaint) on every drop. */
+export const SPRITE_POS_KEY = 'focusSpritePos';
+export interface SpritePositions {
+  fixed?: { x: number; y: number };
+  panel?: { x: number; y: number };
+}
+
 /** Clamp the idle time. Minimum is 15 s — the floor Chrome's idle API allows. */
 export const IDLE_TIME_MIN = 15;
 export const IDLE_TIME_MAX = 300;
@@ -168,6 +227,9 @@ export const DEFAULT_SETTINGS: Settings = {
   soundEnabled: true,
   aiRequestEnabled: true,
   companionEnabled: true,
+  spriteEnabled: true,
+  spriteMode: 'roam',
+  idleGrow: true,
   allowedDomains: [
     'overleaf.com', 'arxiv.org', 'nature.com', 'ieee.org', 'claude.ai',
     'mail.google.com', 'outlook.live.com', 'outlook.office.com',
@@ -202,6 +264,13 @@ export type MessageType =
   | { type: 'PAGE_STATUS' }
   | { type: 'WHITELIST_PAGE' }
   | { type: 'UNWHITELIST_PAGE' }
+  // Open (or focus) a companion window. Owned by the background because both the
+  // popup's Working button and the companion's own "another one" button ask for it,
+  // and because placing it needs chrome.system.display, which a content script and a
+  // popup that closes mid-call have no business holding open.
+  //   extra = false — the Working button: focus the companion you already have.
+  //   extra = true  — the companion's button: put ANOTHER one on the next screen.
+  | { type: 'OPEN_COMPANION'; extra?: boolean }
   // Server sync. Sign-in runs in the background, never in the popup: opening the
   // Google consent window closes the popup, which would abort the flow mid-way.
   | { type: 'SERVER_SIGN_IN' }
@@ -253,6 +322,16 @@ export interface AgentStatus {
   recent: { id: string; name: string } | null;
   /** Whether `recent` is on `Settings.allowedPrograms`. */
   recentAllowed: boolean;
+  /** Whether `recent` is what is keeping the session alive *right now* — i.e. you are
+   *  working in it, as opposed to it merely being whitelisted and idle.
+   *
+   *  Being on the whitelist and being the thing currently earning points are two
+   *  different facts, and with a companion on each screen you can see both at once:
+   *  move from the editor to a whitelisted page in the browser and the program should
+   *  go quiet while the page lights up. `SessionState.osHeld` is exactly that
+   *  distinction — true when an application outside the browser is holding the
+   *  session open, false when a page heartbeat is. */
+  recentWorking: boolean;
   /** Learned identifier → human name (`code` → `Visual Studio Code`), so a list keyed
    *  by the exact platform identifier can still be read by a human. An identifier is
    *  a matching key, not a label: Linux truncates it to 15 characters and macOS gives
@@ -271,6 +350,10 @@ export interface PageStatus {
   domain: string;
   /** Whether that page currently matches `Settings.allowedDomains`. */
   allowed: boolean;
+  /** Whether that page is what is keeping the session alive *right now*, rather than
+   *  simply being whitelisted. The mirror of `AgentStatus.recentWorking`, off the same
+   *  `osHeld` flag: exactly one of the two can be true at a time. */
+  working: boolean;
   /** The whitelist entries making it count — usually just `domain`, but the match is
    *  a substring test, so a broader entry (`unipd.it`) can be the one doing the work,
    *  and removing the page removes *that*. Sent so the undo button can say what it

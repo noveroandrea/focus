@@ -4,6 +4,14 @@
 // covered by another app. It's a plain extension window (chrome-extension://
 // origin) drawing to a <canvas>.
 //
+// Almost nothing is drawn here: the character, the score, the countdown and the two
+// whitelist bars all live in ../ui/companion.ts, because the sprite's in-page
+// "panel" mode shows exactly the same thing and the two must not drift. What is
+// left in this file is what only a WINDOW has — the layout, the state and settings
+// subscriptions, the pin line, the title-bar icon (a window has one; a panel drawn
+// into a page does not) and the Working / Not-working toggle, which is here because
+// this window is what you can see while the browser holding the popup is covered up.
+//
 // Keeping it on top is never this code's job — no browser can raise its own window on
 // Wayland — so something outside the browser does it, and WHICH something differs by
 // platform. GNOME: the companion bridge, from inside the compositor. Windows: the
@@ -18,435 +26,372 @@
 // was to run the whole browser on the X11 backend (--ozone-platform=x11), and THAT
 // breaks chrome.idle under Xwayland (its idle counter never advances), freezing the
 // idle timeline this window exists to display. A normal window left on native
-// Wayland keeps idle working and is pinned on top by the WM instead. See the README
-// "Floating companion" section for the per-OS way to keep it on top.
-//
-// It mirrors the live SessionState (broadcast by background.ts) and settings
-// (chrome.storage.local). The <canvas> drawing is a standalone copy of the sprite's
-// renderer — the two documents can't share a runtime, so the character roster and
-// draw code are duplicated here on purpose.
+// Wayland keeps idle working and is pinned on top by the WM instead.
 
-import { clampIdleTime, type AgentStatus, type PageStatus } from '../../types';
-import { IDLE_WARNING_MS } from '../timings';
-
-interface State {
-  isHeartbeatActive: boolean;
-  currentIconId: number;
-  heartbeatCount: number;
-  focusScore: number;
-  distractedScore: number;
-  lastHeartbeat: number;
-  enabled: boolean;
-  osHeld: boolean;
-}
-
-const CHARS = [
-  { name: 'Mario',   icon: '🍄', color: '#ef4444' },
-  { name: 'Luigi',   icon: '🥬', color: '#22c55e' },
-  { name: 'Peach',   icon: '👑', color: '#ec4899' },
-  { name: 'Toad',    icon: '🍄', color: '#f87171' },
-  { name: 'Yoshi',   icon: '🥚', color: '#4ade80' },
-  { name: 'Bowser',  icon: '🐢', color: '#f97316' },
-  { name: 'Link',    icon: '🛡️', color: '#16a34a' },
-  { name: 'Zelda',   icon: '💎', color: '#eab308' },
-  { name: 'Kirby',   icon: '🎈', color: '#f472b6' },
-  { name: 'Pikachu', icon: '⚡', color: '#facc15' },
-  { name: 'DK',      icon: '🍌', color: '#92400e' },
-  { name: 'Samus',   icon: '🚀', color: '#ea580c' },
-  { name: 'Fox',     icon: '🦊', color: '#d97706' },
-  { name: 'Ness',    icon: '🧢', color: '#2563eb' },
-  { name: 'Falcon',  icon: '🏎️', color: '#1d4ed8' },
-];
-const CRYING = ['😭', '😢', '💧'];
-
-const PIP_W = 480, PIP_H = 240;
-
-let state: State | null = null;
-let forceActive = false;
-let idleTimeS = 20;
-let idleSince = 0;      // when the companion last went idle (for the W countdown)
-let wasActive = true;   // tracks the active→idle edge
-let bob = 0;            // canvas-px vertical bob offset, decays to 0
-let lastHb = -1;
+import { clampIdleTime, type AgentStatus } from '../../types';
+import { GROW_DURATION_MS, IDLE_WARNING_MS, WORKING_FRESH_MS } from '../timings';
+import {
+  CHARS, CRYING, createCompanionCanvas, createWhitelistBars, OFF_GRACE_MS,
+  type CompanionState,
+} from '../ui/companion';
 
 // ── DOM ────────────────────────────────────────────────────────────────────────
 const root = document.getElementById('root')!;
 
-// The canvas is a fixed 480×240 drawing that SCALES to whatever size the window
-// is dragged to: object-fit keeps its 2:1 aspect inside the stage, so every
-// element stays in proportion instead of the layout rearranging itself. The window
-// is meant to be shrunk down to a corner of the screen, so the stage takes all
-// remaining space and nothing else competes for height.
+// The canvas keeps its 2:1 aspect inside the stage whatever size the window is
+// dragged to. The window is meant to be shrunk down to a corner of the screen, so
+// the stage takes all remaining space and nothing else competes for height.
 const stage = document.createElement('div');
 Object.assign(stage.style, {
+  position: 'relative',
   flex: '1', display: 'flex', alignItems: 'center', justifyContent: 'center',
   minHeight: '0', minWidth: '0', padding: '6px',
 });
-const canvas = document.createElement('canvas');
-canvas.width = PIP_W; canvas.height = PIP_H;
-Object.assign(canvas.style, {
-  width: '100%', height: '100%', objectFit: 'contain',
-  borderRadius: '12px',
-});
-stage.appendChild(canvas);
 
-// One-time instruction. It's advice for the first few seconds, not a permanent
-// part of the UI — at the small sizes this window is meant to be used at, leaving
-// it on screen wraps to three lines and squeezes the companion into nothing. So it
-// fades out and is removed from the layout, handing its space back to the canvas.
+const companion = createCompanionCanvas({ idleWarningMs: IDLE_WARNING_MS, growDurationMs: GROW_DURATION_MS });
+stage.appendChild(companion.canvas);
+
+// One more companion, on the next screen that hasn't got one. On a two-monitor desk
+// the browser is on one screen and the work is on the other, so a single companion
+// is on the wrong one about half the time; the background places each new window
+// bottom-right of the first display with none, which is one click per extra monitor
+// and no dragging. Deliberately a ghost button in the corner of the drawing rather
+// than a row of its own: the whole design of this window is that nothing competes
+// with the character for space.
+const moreBtn = document.createElement('button');
+Object.assign(moreBtn.style, {
+  position: 'absolute', top: '10px', right: '10px',
+  cursor: 'pointer', border: 'none', borderRadius: '7px',
+  background: 'rgba(148,163,184,0.16)', color: '#94a3b8',
+  padding: '2px 6px', fontSize: '12px', lineHeight: '1.2',
+  fontFamily: 'inherit', opacity: '0.65', transition: 'opacity 0.15s ease',
+});
+moreBtn.textContent = '⧉';
+moreBtn.title = 'Open another companion — placed on the next screen that has none';
+moreBtn.addEventListener('mouseenter', () => { moreBtn.style.opacity = '1'; });
+moreBtn.addEventListener('mouseleave', () => { moreBtn.style.opacity = '0.65'; });
+moreBtn.addEventListener('click', () => {
+  chrome.runtime.sendMessage({ type: 'OPEN_COMPANION', extra: true }, () => {
+    try { void chrome.runtime.lastError; } catch { /* ignore */ }
+  });
+});
+stage.appendChild(moreBtn);
+
+// The two facts every remaining piece of this file needs. Both arrive by broadcast
+// (STATE_UPDATE / storage.onChanged) rather than being asked for, so nothing here
+// polls for them.
+let currentState: CompanionState | null = null;
+let paused = false;   // Settings.forceActive — "Not working"
+
+// ── Working / Not working ─────────────────────────────────────────────────────
+// The same toggle as the popup's, because this window is the surface you are looking
+// at while working outside the browser and the popup is three clicks away behind a
+// browser you have covered up: pausing had to mean raising Chrome, finding the
+// toolbar, opening the popup — with the companion sitting right there saying you are
+// still being counted.
+//
+// It writes `Settings.forceActive` to storage exactly as the popup does, and does
+// nothing else. Everything a toggle implies — snapping the session active, resetting
+// the OS anchor, clearing the lapse bookkeeping, repainting the toolbar icon, the
+// server check-in — belongs to the storage.onChanged listener in background.ts, and
+// goes through it identically however the flag was flipped. Deliberately NOT the
+// popup's whole behaviour, though: resuming there also opens a companion per screen,
+// which from inside a companion would be a button that spawns duplicates of itself.
+//
+// A ghost button in the corner of the drawing, like ⧉, for the reason this window has
+// no rows of controls: at the size it is meant to be used at, anything with a
+// background of its own is taken out of the character.
+const workBtn = document.createElement('button');
+Object.assign(workBtn.style, {
+  position: 'absolute', top: '10px', left: '10px',
+  cursor: 'pointer', border: 'none', borderRadius: '999px',
+  padding: '2px 8px', fontSize: '11px', lineHeight: '1.3', fontWeight: '700',
+  fontFamily: 'inherit', opacity: '0.75', transition: 'opacity 0.15s ease',
+  display: 'flex', alignItems: 'center', gap: '4px',
+});
+workBtn.addEventListener('mouseenter', () => { workBtn.style.opacity = '1'; });
+workBtn.addEventListener('mouseleave', () => { workBtn.style.opacity = '0.75'; });
+workBtn.addEventListener('click', () => {
+  // Read before writing rather than spreading a copy this window has been holding
+  // since it opened: a companion stays open for hours while the popup edits the
+  // whitelist, the beep and the classifier underneath it, and a stale spread would
+  // quietly undo all of it on the way past.
+  chrome.storage.local.get(['focusFlowSettings'], (r) => {
+    if (chrome.runtime.lastError) return;
+    const cur = (r.focusFlowSettings ?? {}) as Record<string, unknown>;
+    chrome.storage.local.set({
+      focusFlowSettings: { ...cur, forceActive: !(cur.forceActive === true) },
+    });
+  });
+});
+stage.appendChild(workBtn);
+
+function renderWorkBtn(): void {
+  workBtn.textContent = paused ? '⏸ Not working' : '⚡ Working';
+  workBtn.style.background = paused ? 'rgba(148,163,184,0.16)' : 'rgba(34,197,94,0.18)';
+  workBtn.style.color = paused ? '#94a3b8' : '#4ade80';
+  workBtn.title = paused
+    ? 'Not working — nothing is being counted. Click to resume.'
+    : 'Working — click to pause. Nothing is counted while paused, on any screen.';
+}
+renderWorkBtn();
+
+// ── The title-bar icon ────────────────────────────────────────────────────────
+// A companion window lives in a screen corner and spends most of its life partly
+// covered, or minimised, or one entry in a window list — and what is left of it then
+// is an icon and a title, nothing more. So the icon is made to answer the question
+// the window exists to answer: it is the character disc in miniature, drawn from the
+// same three inputs the canvas uses, so the taskbar and the window agree. Full colour
+// while the session is counting; grey and crying when it has gone idle; greyscale
+// over the top while "Not working", exactly as the drawing greys itself.
+const favicon = document.createElement('link');
+favicon.rel = 'icon';
+document.head.appendChild(favicon);
+
+const iconCanvas = document.createElement('canvas');
+iconCanvas.width = 64;
+iconCanvas.height = 64;
+let faviconKey = '';
+
+function paintFavicon(): void {
+  const idle = !currentState?.isHeartbeatActive;
+  const char = CHARS[(currentState?.currentIconId ?? 0) % CHARS.length] ?? CHARS[0];
+  // Repainting is a canvas encode plus a <link> swap, and STATE_UPDATE arrives about
+  // once a second while working — so the picture is redrawn only when one of the
+  // three things it is made of actually changes.
+  const key = `${idle}|${char.name}|${paused}`;
+  if (key === faviconKey) return;
+  faviconKey = key;
+
+  const c = iconCanvas.getContext('2d');
+  if (!c) return;
+  c.clearRect(0, 0, 64, 64);
+  c.filter = paused ? 'grayscale(1)' : 'none';
+  c.beginPath();
+  c.arc(32, 32, 30, 0, Math.PI * 2);
+  c.fillStyle = idle ? '#94a3b8' : char.color;
+  c.fill();
+  // One fixed crying frame, not the canvas's 450 ms cycle: a favicon that animates is
+  // a new data URL twice a second for a picture 16 px across.
+  c.font = '38px "Noto Color Emoji","Apple Color Emoji","Segoe UI Emoji",sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText(idle ? CRYING[0] : char.icon, 32, 34);
+  favicon.href = iconCanvas.toDataURL('image/png');
+}
+paintFavicon();
+
+// ── The pin line ──────────────────────────────────────────────────────────────
+// Keeping this window on top is THREE different answers, not one feature, and the
+// line below says whichever one applies to the machine it is running on:
+//
+//   Windows  — the desktop agent does it (SetWindowPos), so this is a progress
+//              message that gets out of the way, unless the agent is not running,
+//              in which case starting it IS the fix and the line says so.
+//   Linux    — the GNOME bridge does it, from inside the compositor. Same progress
+//              message; if the agent reports it cannot see the foreground at all
+//              (Wayland with no bridge) then the bridge is definitely absent, and
+//              the line names the installer instead.
+//   macOS    — nobody can. No public API lets a process raise another application's
+//              window, so the only honest thing to print is what the user has to do
+//              by hand. That one does not fade: it is an instruction, not a status.
+//
+// Anything that is a status disappears. At the sizes this window is meant to be used
+// at, a permanent three-line paragraph squeezes the companion into nothing — which is
+// why the old single "see the README" line faded, and why only the two lines that ask
+// something of the user stay.
+type Platform = 'windows' | 'macos' | 'linux' | 'other';
+
+function detectPlatform(): Platform {
+  const raw = String(
+    (navigator as unknown as { userAgentData?: { platform?: string } }).userAgentData?.platform
+    || navigator.platform
+    || navigator.userAgent,
+  ).toLowerCase();
+  if (raw.includes('win')) return 'windows';
+  if (raw.includes('mac') || raw.includes('darwin')) return 'macos';
+  if (raw.includes('linux') || raw.includes('x11') || raw.includes('cros')) return 'linux';
+  return 'other';
+}
+
+const PLATFORM = detectPlatform();
+
+/** How long the automatic pinners get before the progress line stops claiming to be
+ *  working on it. The GNOME bridge pins on `window-created`/`notify::title`, so it is
+ *  effectively instant; the Windows agent samples every fourth tick, ~2 s. Six covers
+ *  both with room for a slow start, and nothing depends on the number being right —
+ *  it only decides when a message stops being interesting. */
+const PIN_WAIT_MS = 6000;
+
 const footer = document.createElement('div');
 Object.assign(footer.style, {
-  padding: '7px 10px', textAlign: 'center', flexShrink: '0',
+  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px',
+  padding: '7px 10px', textAlign: 'center', flexShrink: '0', cursor: 'pointer',
   borderTop: '1px solid rgba(148,163,184,0.18)',
   fontSize: '10px', color: '#94a3b8', lineHeight: '1.35',
   transition: 'opacity 0.6s ease',
 });
-footer.textContent = 'Pin me on top — see the README “Floating companion” section';
-footer.title = 'Keep this window above other apps with your OS: Windows PowerToys “Always On Top”, macOS Rectangle, GNOME toggle-above keybinding, KDE “Keep Above Others”.';
-setTimeout(() => {
-  footer.style.opacity = '0';
-  setTimeout(() => { footer.style.display = 'none'; }, 700);
-}, 8000);
+const spinner = document.createElement('span');
+Object.assign(spinner.style, {
+  flexShrink: '0', width: '9px', height: '9px', borderRadius: '50%',
+  border: '2px solid rgba(148,163,184,0.35)', borderTopColor: '#93c5fd',
+  animation: 'ff-spin 0.8s linear infinite',
+});
+const footerText = document.createElement('span');
+footer.append(spinner, footerText);
 
-// ── The two whitelist bars ────────────────────────────────────────────────────
-// Under the character and the score, two strips answer the only question this
-// window cannot already show you: "is what I am doing right now being counted?"
-//
-//   page bar     — the site in the front tab, and one click to whitelist it
-//   program bar  — the program you were last in, and one click to whitelist that
-//
-// Both exist here rather than only in the popup because this window is ALWAYS
-// VISIBLE. The popup is three clicks and covers the page it is describing; the
-// companion is already on screen, on top, while you are reading the very page you
-// want to count. That is worth two rows of a 300px window.
-//
-// NEITHER bar can ask "what is in front right now?", for the same structural reason
-// in both cases: this window IS a window of the browser, so at the moment you look
-// at it the live answers are "the companion tab" and "a browser". The background
-// therefore hands out the last ordinary web PAGE (PageStatus) and the last
-// non-browser PROGRAM (AgentStatus.recent) — which is also what a person means by
-// "this page" and "this app", and both survive the click, which necessarily focuses
-// the browser to happen at all.
+const spinStyle = document.createElement('style');
+spinStyle.textContent = '@keyframes ff-spin { to { transform: rotate(360deg); } }';
+document.head.appendChild(spinStyle);
 
-/** One strip: a label, a green tick when it is already counted, and a button when it
- *  is not. Built once for both rows so they cannot drift apart visually. */
-function makeBar(mark: string) {
-  const row = document.createElement('div');
-  Object.assign(row.style, {
-    display: 'none', alignItems: 'center', gap: '6px', flexShrink: '0',
-    padding: '5px 8px', borderTop: '1px solid rgba(148,163,184,0.18)',
-    fontSize: '11px', lineHeight: '1.2', minWidth: '0',
-  });
+/** Which line is showing. Only ever moves toward a more definite answer, so a late
+ *  AGENT_STATUS cannot drag a resolved instruction back to "pinning…". */
+type PinState = 'pinning' | 'settled' | 'manual';
+let pinState: PinState = 'pinning';
+let fadeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const label = document.createElement('span');
-  Object.assign(label.style, {
-    flex: '1', minWidth: '0', overflow: 'hidden',
-    textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#cbd5e1',
-  });
-
-  const tick = document.createElement('span');
-  Object.assign(tick.style, {
-    flexShrink: '0', fontSize: '9px', fontWeight: '700',
-    letterSpacing: '0.06em', textTransform: 'uppercase', color: '#4ade80',
-  });
-  tick.textContent = mark;
-
-  const button = document.createElement('button');
-  Object.assign(button.style, {
-    flexShrink: '0', cursor: 'pointer', border: 'none', borderRadius: '7px',
-    background: '#3b82f6', color: '#fff', padding: '3px 7px',
-    fontSize: '9px', fontWeight: '700', letterSpacing: '0.06em',
-    textTransform: 'uppercase', fontFamily: 'inherit',
-  });
-  button.textContent = '+ Whitelist';
-
-  // The undo, shown in place of the button once something is on the list. Quiet by
-  // design — a ✕ next to the tick rather than a second coloured button: taking
-  // something OFF the whitelist is the rarer action and the one you would rather not
-  // hit by accident, and this row is 300px wide with a domain already competing for
-  // it. The tick says what the state is; this changes it.
-  const remove = document.createElement('button');
-  Object.assign(remove.style, {
-    flexShrink: '0', cursor: 'pointer', border: 'none', borderRadius: '6px',
-    background: 'transparent', color: '#64748b', padding: '2px 5px',
-    fontSize: '12px', lineHeight: '1', fontFamily: 'inherit',
-  });
-  remove.textContent = '✕';
-  remove.addEventListener('mouseenter', () => { remove.style.color = '#f87171'; });
-  remove.addEventListener('mouseleave', () => { remove.style.color = '#64748b'; });
-
-  row.append(label, tick, button, remove);
-
-  /** Show `text`, with either the "+ Whitelist" button or the tick-and-✕ pair —
-   *  never both, since they are the two directions of one toggle. */
-  const show = (text: string, title: string, counted: boolean, undoTitle = '') => {
-    row.style.display = 'flex';
-    row.style.background = 'transparent';
-    label.style.color = '#cbd5e1';
-    label.style.whiteSpace = 'nowrap';
-    label.textContent = text;
-    label.title = title;
-    tick.style.display = counted ? 'inline' : 'none';
-    remove.style.display = counted ? 'inline-block' : 'none';
-    remove.title = undoTitle;
-    button.style.display = counted ? 'none' : 'inline-block';
-  };
-  const warn = (text: string, title: string) => {
-    row.style.display = 'flex';
-    row.style.background = 'rgba(248,113,113,0.12)';
-    label.style.color = '#fca5a5';
-    label.style.whiteSpace = 'normal';   // let it wrap; it must stay readable
-    label.textContent = text;
-    label.title = title;
-    tick.style.display = 'none';
-    remove.style.display = 'none';
-    button.style.display = 'none';
-  };
-  const hide = () => { row.style.display = 'none'; };
-
-  return { row, button, remove, show, warn, hide };
+function setPin(text: string, title: string, o: { spin?: boolean; warn?: boolean; fade?: boolean }) {
+  if (fadeTimer) { clearTimeout(fadeTimer); fadeTimer = null; }
+  footer.style.display = 'flex';
+  footer.style.opacity = '1';
+  footer.style.color = o.warn ? '#fbbf24' : '#94a3b8';
+  spinner.style.display = o.spin ? 'block' : 'none';
+  footerText.textContent = text;
+  footer.title = title;
+  if (o.fade) {
+    fadeTimer = setTimeout(() => {
+      footer.style.opacity = '0';
+      fadeTimer = setTimeout(() => { footer.style.display = 'none'; }, 700);
+    }, 4000);
+  }
 }
 
-const pageBar = makeBar('✓ counts');
-const programBar = makeBar('✓ work');
-
-// Page first: this window is on top of the browser at least as often as it is beside
-// another app, and the page is the thing you are looking at when it is.
-root.append(stage, pageBar.row, programBar.row, footer);
-
-// ── Page bar ─────────────────────────────────────────────────────────────────
-// `shownPage` is whatever the row is describing, whitelisted or not — the two
-// buttons are never visible at the same time, so one subject serves both.
-let shownPage: string | null = null;
-
-function renderPageBar(page: PageStatus | null) {
-  // Hidden outright when there is no ordinary web page to talk about — only the
-  // companion open, or a chrome:// tab in front.
-  if (!page?.domain) { shownPage = null; pageBar.hide(); return; }
-  shownPage = page.domain;
-  // Name what removal will actually drop. A page usually counts because of its own
-  // domain, but it can be a broader entry doing the work — and dropping `unipd.it`
-  // to stop counting one Overleaf page also stops counting everything else under it.
-  // The button still does what the popup's toggle does; it just says so first.
-  const wider = page.matched.filter((d) => d !== page.domain);
-  pageBar.show(
-    page.domain,
-    page.allowed ? `${page.domain} counts as work` : `Count ${page.domain} as work`,
-    page.allowed,
-    wider.length
-      ? `Remove ${page.matched.join(', ')} from the whitelist — anything else matching stops counting too`
-      : `Stop counting ${page.domain} as work`,
-  );
-}
-
-// Neither of these names the page: the background decides which page is meant, for
-// the same reason it has to — this window cannot see which tab is in front.
-pageBar.button.addEventListener('click', () => {
-  if (!shownPage) return;
-  chrome.runtime.sendMessage({ type: 'WHITELIST_PAGE' }, () => {
-    try { if (chrome.runtime.lastError) return; } catch { /* ignore */ }
-    askPage();
-  });
+// The two lines that ask something of you stay put, which in a window this small is
+// a real cost once you have done the thing (or decided not to). One click retires it
+// for this window — it comes back with the next companion you open.
+footer.addEventListener('click', () => {
+  if (fadeTimer) { clearTimeout(fadeTimer); fadeTimer = null; }
+  footer.style.display = 'none';
+  pinState = 'manual';   // dismissed — nothing may put another line here
 });
 
-pageBar.remove.addEventListener('click', () => {
-  if (!shownPage) return;
-  chrome.runtime.sendMessage({ type: 'UNWHITELIST_PAGE' }, () => {
-    try { if (chrome.runtime.lastError) return; } catch { /* ignore */ }
-    askPage();
-  });
-});
-
-function askPage() {
-  chrome.runtime.sendMessage({ type: 'PAGE_STATUS' }, (res?: PageStatus) => {
-    try { if (chrome.runtime.lastError) return; } catch { return; }
-    renderPageBar(res ?? null);
-  });
+/** The permanent instruction, for the platforms where pinning is the user's job. */
+function pinManually(): void {
+  pinState = 'manual';
+  if (PLATFORM === 'macos') {
+    setPin(
+      'Pin me on top: macOS needs a helper — Rectangle → Always on Top',
+      'No macOS API lets one program raise another program\'s window, so no app (including the Focus agent) can do this for you. '
+      + 'Install Rectangle (free), enable "Always on Top" in its preferences and give it a shortcut, then focus this window and press it. '
+      + 'Amethyst works too. See the README, "Floating companion".',
+      { warn: true },
+    );
+  } else {
+    setPin(
+      'Pin me on top with your window manager — see the README',
+      'Keep this window above other apps: KDE — right-click the title bar → More Actions → Keep Above Others. '
+      + 'GNOME — gsettings set org.gnome.desktop.wm.keybindings toggle-above "[\'<Primary>backslash\']", then press Ctrl+\\ here.',
+      { warn: true },
+    );
+  }
 }
 
-// ── Program bar ──────────────────────────────────────────────────────────────
-// With the agent stopped, this strip turns into a red line saying so. Opening this
-// window IS the moment work moves outside the browser, so a stopped agent means
-// everything you are about to do goes uncounted, and nothing else on screen would
-// tell you. It stays until fixed rather than fading like the footer hint, because it
-// describes a state, not a tip. The bar is hidden only when there is genuinely
-// nothing to say: agent running, but no program resolved yet (a Wayland session with
-// no bridge, say), which the popup's Allowed programs panel explains properly.
-let shownProgram: string | null = null;
-let offSince = 0;                    // when the agent first looked absent
+if (PLATFORM === 'windows' || PLATFORM === 'linux') {
+  setPin('Pinning on top…', 'Something outside the browser has to do this — on Windows the Focus agent, on GNOME the companion bridge. Neither needs any setup here.', { spin: true });
+  setTimeout(() => {
+    if (pinState !== 'pinning') return;   // the agent already said something better
+    pinState = 'settled';
+    setPin(
+      'Not on top? See the README — “Floating companion”',
+      PLATFORM === 'windows'
+        ? 'The Focus agent pins this window while it is running. Without it, use PowerToys “Always On Top” (Win+Ctrl+T).'
+        : 'The GNOME companion bridge pins this window (desktop/gnome-extension/install.sh). On KDE, right-click the title bar → More Actions → Keep Above Others.',
+      { fade: true },
+    );
+  }, PIN_WAIT_MS);
+} else {
+  pinManually();
+}
 
-// A woken service worker answers the first AGENT_STATUS from an empty cache — its
-// poll timer did not survive suspension — so "not running" is a normal first answer
-// from a machine whose agent is perfectly fine. Two polls' worth of grace turns that
-// into no flicker at all, at the cost of a genuinely stopped agent being announced
-// four seconds late, which nobody is waiting on.
-const OFF_GRACE_MS = 4000;
+let pinOffSince = 0;
 
-function renderProgramBar(agent: AgentStatus | null) {
-  // Nothing heard back yet — say nothing rather than accuse the agent of being off.
-  if (!agent) { programBar.hide(); return; }
-
-  if (!agent.running) {
-    if (!offSince) offSince = Date.now();
-    if (Date.now() - offSince < OFF_GRACE_MS) return;   // leave the bar as it was
-    shownProgram = null;
-    programBar.warn(
-      'Focus agent is off — double-click the Focus agent icon to run it',
-      'Without it, work outside the browser cannot be counted',
+/** Fold what the agent just said into the pin line — the only source of evidence this
+ *  window has about whether anything is going to pin it. Both signals are definite
+ *  ones, which is why they may overrule a "pinning…" already on screen: on Windows a
+ *  stopped agent means nothing is pinning; on Linux an agent that cannot see the
+ *  foreground is an agent with no GNOME bridge beside it, and the bridge is what does
+ *  the pinning there. Silence proves nothing and changes nothing. */
+function pinFromAgent(agent: AgentStatus | null): void {
+  if (pinState === 'manual' || !agent) return;
+  if (agent.running) pinOffSince = 0;
+  else if (!pinOffSince) pinOffSince = Date.now();
+  // The same grace the program bar takes, and for the same reason: a revived service
+  // worker answers the first AGENT_STATUS from an empty cache, so "not running" is a
+  // normal FIRST answer from a machine whose agent is fine.
+  if (PLATFORM === 'windows' && !agent.running && Date.now() - pinOffSince >= OFF_GRACE_MS) {
+    pinState = 'settled';
+    setPin(
+      'Start the Focus agent — it pins this window on top',
+      'On Windows the agent raises this window for you (SetWindowPos). Double-click the Focus agent icon; no setup, no elevation.',
+      { warn: true },
     );
     return;
   }
-
-  offSince = 0;
-  const p = agent.recent;
-  shownProgram = p?.id ?? null;
-  if (!p) { programBar.hide(); return; }
-  programBar.show(
-    p.name,
-    agent.recentAllowed ? `${p.id} counts as work` : `Count ${p.id} as work`,
-    agent.recentAllowed,
-    `Stop counting ${p.id} as work`,
-  );
+  if (PLATFORM === 'linux' && agent.running && agent.note) {
+    pinState = 'settled';
+    setPin(
+      'Install the GNOME bridge to pin this on top',
+      'desktop/gnome-extension/install.sh, then log out and back in. The agent reported it cannot see the foreground, '
+      + 'which means the bridge is not there — and on Wayland the bridge is the only thing that can raise this window.',
+      { warn: true },
+    );
+  }
 }
 
-programBar.button.addEventListener('click', () => {
-  if (!shownProgram) return;
-  chrome.runtime.sendMessage({ type: 'ADD_PROGRAM', program: shownProgram }, () => {
-    try { if (chrome.runtime.lastError) return; } catch { /* ignore */ }
-    askAgent();
-  });
-});
-
-programBar.remove.addEventListener('click', () => {
-  if (!shownProgram) return;
-  chrome.runtime.sendMessage({ type: 'REMOVE_PROGRAM', program: shownProgram }, () => {
-    try { if (chrome.runtime.lastError) return; } catch { /* ignore */ }
-    askAgent();
-  });
-});
-
-function askAgent() {
-  chrome.runtime.sendMessage({ type: 'AGENT_STATUS' }, (res?: AgentStatus) => {
-    try { if (chrome.runtime.lastError) return; } catch { return; }
-    renderProgramBar(res ?? null);
-  });
-}
-
-// Polled, because both answers change as you switch tab or alt-tab and nothing
-// broadcasts either. Skipped while the window is hidden: this window stays open for
-// hours, and a minimised companion asking twice a minute would wake the service
-// worker for two bars nobody can see.
-function poll() {
-  if (document.visibilityState !== 'visible') return;
-  askPage();
-  askAgent();
-}
-setInterval(poll, 2000);
-poll();
+// ── Layout ────────────────────────────────────────────────────────────────────
+// Page bar first: this window is on top of the browser at least as often as it is
+// beside another app, and the page is the thing you are looking at when it is.
+const bars = createWhitelistBars({ workingFreshMs: WORKING_FRESH_MS }, pinFromAgent);
+root.append(stage, ...bars.rows, footer);
 
 // ── State / settings ─────────────────────────────────────────────────────────
-function applyState(s: State) {
-  if (!s) return;
-  // wasActive starts true, so an already-idle first state anchors the W countdown.
-  if (wasActive && !s.isHeartbeatActive) idleSince = Date.now();
-  wasActive = s.isHeartbeatActive;
-  state = s;
+function noteState(s: CompanionState): void {
+  currentState = s;
+  companion.setState(s);
+  bars.noteState(s);   // a working↔idle switch must not wait for the poll
+  paintFavicon();
 }
+
+chrome.runtime.onMessage.addListener((msg: { type?: string; state?: CompanionState }) => {
+  if (msg?.type === 'STATE_UPDATE' && msg.state) noteState(msg.state);
+});
+chrome.runtime.sendMessage({ type: 'GET_STATE' }, (res?: CompanionState) => {
+  try {
+    if (chrome.runtime.lastError) return;
+    if (res) noteState(res);
+  } catch { /* ignore */ }
+});
 
 function readSettings(raw: unknown) {
-  const s = raw as { forceActive?: boolean; idleTime?: number } | undefined;
-  if (typeof s?.forceActive === 'boolean') forceActive = s.forceActive;
-  if (s?.idleTime !== undefined) idleTimeS = clampIdleTime(Number(s.idleTime));
+  const s = raw as { forceActive?: boolean; idleTime?: number; idleGrow?: boolean } | undefined;
+  paused = s?.forceActive === true;
+  companion.setSettings({
+    forceActive: paused,
+    idleTimeS: clampIdleTime(Number(s?.idleTime)),
+    idleGrow: s?.idleGrow !== false,
+  });
+  renderWorkBtn();
+  paintFavicon();
 }
-
-chrome.runtime.onMessage.addListener((msg: { type?: string; state?: State }) => {
-  if (msg?.type === 'STATE_UPDATE' && msg.state) applyState(msg.state);
-});
-chrome.runtime.sendMessage({ type: 'GET_STATE' }, (res?: State) => {
-  try { if (chrome.runtime.lastError) return; if (res) applyState(res); } catch { /* ignore */ }
-});
 chrome.storage.local.get(['focusFlowSettings'], (r) => readSettings(r.focusFlowSettings));
 chrome.storage.onChanged.addListener((c, area) => {
   if (area === 'local' && c.focusFlowSettings) readSettings(c.focusFlowSettings.newValue);
 });
 
-// ── Phase (I / W countdown) ────────────────────────────────────────────────────
-// Deliberately the same formula sprite.ts uses, over the same broadcast field
-// (state.lastHeartbeat = background's best estimate of the last input). That's the
-// only way the two readouts can agree: this window can't see page input directly,
-// so anything computed locally here would drift from the in-page sprite.
-function currentPhase(): { text: string; color: string } | null {
-  const s = state;
-  if (!s || s.enabled === false || forceActive) return null;
-  const now = Date.now();
-  if (s.isHeartbeatActive) {
-    // Violet = another app is keeping it alive, blue = this page is. Same countdown.
-    const remain = Math.max(0, idleTimeS - (now - s.lastHeartbeat) / 1000);
-    return { text: `I ${Math.ceil(remain)}s`, color: s.osHeld ? '#c4b5fd' : '#93c5fd' };
-  }
-  if (idleSince && now - idleSince < IDLE_WARNING_MS) {
-    const remain = Math.max(0, (idleSince + IDLE_WARNING_MS - now) / 1000);
-    return { text: `W ${Math.ceil(remain)}s`, color: '#fbbf24' };
-  }
-  return null;
-}
+// Both bars are polled only while this window is visible, so an unhidden window has
+// to ask straight away rather than wait out the rest of its interval.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') bars.refresh();
+});
 
-// ── Draw loop ──────────────────────────────────────────────────────────────────
-const ctx = canvas.getContext('2d');
-
-function draw() {
-  if (!ctx) return;
-  const s = state;
-  const idle = !s?.isHeartbeatActive;
-  const char = CHARS[(s?.currentIconId ?? 0) % CHARS.length] ?? CHARS[0];
-
-  if (s && s.heartbeatCount !== lastHb) {
-    const had = lastHb >= 0;
-    lastHb = s.heartbeatCount;
-    if (had && !idle) bob = -16;
-  }
-  const discX = 132, discY = 120 + bob, r = 78;
-  bob *= 0.82; if (Math.abs(bob) < 0.4) bob = 0;
-
-  ctx.filter = 'none';
-  const g = ctx.createRadialGradient(PIP_W * 0.3, PIP_H * 0.42, 20, PIP_W * 0.3, PIP_H * 0.42, PIP_W * 0.8);
-  g.addColorStop(0, '#1e293b'); g.addColorStop(1, '#0f172a');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, PIP_W, PIP_H);
-
-  if (forceActive) ctx.filter = 'grayscale(1)';
-
-  ctx.beginPath();
-  ctx.arc(discX, discY, r, 0, Math.PI * 2);
-  ctx.fillStyle = idle ? '#94a3b8' : char.color;
-  ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 18; ctx.shadowOffsetY = 6;
-  ctx.fill();
-  ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-
-  const face = idle ? CRYING[Math.floor(Date.now() / 450) % CRYING.length] : char.icon;
-  ctx.font = '84px "Noto Color Emoji","Apple Color Emoji","Segoe UI Emoji",sans-serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(face, discX, discY + 4);
-
-  const sx = 250;
-  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-  ctx.font = 'bold 46px system-ui, sans-serif';
-  const focusStr = String(Math.round(s?.focusScore ?? 0));
-  const distStr = String(Math.round(s?.distractedScore ?? 0));
-  ctx.fillStyle = '#4ade80'; ctx.fillText(focusStr, sx, 112);
-  const fw = ctx.measureText(focusStr).width;
-  ctx.fillStyle = '#64748b'; ctx.fillText('/', sx + fw + 12, 112);
-  const slw = ctx.measureText('/').width;
-  ctx.fillStyle = '#f87171'; ctx.fillText(distStr, sx + fw + 12 + slw + 12, 112);
-
-  const ph = currentPhase();
-  if (ph) {
-    ctx.font = 'bold 34px system-ui, sans-serif';
-    ctx.fillStyle = ph.color;
-    ctx.fillText(ph.text, sx, 168);
-  }
-  ctx.filter = 'none';
-}
-
-setInterval(draw, 66); // ~15 fps
-draw();
+window.addEventListener('pagehide', () => { companion.stop(); bars.stop(); });

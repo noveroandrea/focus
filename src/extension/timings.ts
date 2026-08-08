@@ -52,6 +52,21 @@ export const OS_IDLE_COUNTDOWN_S = 5;
  *  throttle, or a steadily-used page would flicker. */
 export const PAGE_INPUT_FRESH_MS = 2000;
 
+/** How stale `SessionState.lastHeartbeat` may be while still counting as "working
+ *  right now" — which is a different question from `isHeartbeatActive`.
+ *
+ *  `isHeartbeatActive` stays true through the whole idle timeout, including the final
+ *  stretch where chrome.idle has already said "idle", the anchor has been set and the
+ *  "I" countdown is visibly falling. No heartbeat is registered in that stretch and no
+ *  points are earned, so a companion bar reporting WORKING there would be describing a
+ *  session that has already stopped counting.
+ *
+ *  Any value between ~3 s and ~10 s behaves identically, because `lastHeartbeat` is
+ *  either being refreshed constantly (every IDLE_POLL_MS while genuinely active, and
+ *  at most 1 s apart from page input) or has jumped to the OS anchor, ≥10 s stale at
+ *  the shortest permitted idleTime. Four sits clear of both edges. */
+export const WORKING_FRESH_MS = 4000;
+
 /** registerHeartbeat() advances the count at most once per this window, so the
  *  count tracks ≈one heartbeat per real second no matter how many sources fire. */
 export const HEARTBEAT_THROTTLE_MS = 1000;

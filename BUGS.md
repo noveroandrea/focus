@@ -285,6 +285,82 @@ also what the user means by "this app", and it survives the click, which necessa
 focuses the browser to happen at all. The door is shut a second time in the `ADD_PROGRAM`
 handler, which refuses a browser id whatever the UI sent.
 
+### A page whitelisted from the companion un-whitelisted itself seconds later
+**Status: fixed — `saveSettings()` in `background.ts`**
+
+*Symptom.* Pressing **+ Whitelist** in the companion window worked: the tick appeared, the
+tab reloaded, the sprite woke up. A few seconds later the page stopped counting on its own
+and the entry was nowhere in the popup's domain editor. Same for **✕**, and for every other
+whitelist change the background makes on its own — `ADD_DOMAIN`, `REMOVE_DOMAIN`, the AI
+classifier's auto-add, `ADD_PROGRAM`.
+
+*Cause.* Two correct-looking pieces that only work for one of the two writers.
+
+`background.ts` reacts to settings changes through a `chrome.storage.onChanged` listener,
+which diffs the incoming value against its own `settings` and, on a whitelist change,
+mirrors the list to the server with `queueDomains()`. That is right for the **popup**,
+which writes storage directly — the background's copy really is the old one at that
+moment. It cannot work for a write made **in the background**, which assigns the new value
+to `settings` *before* calling `chrome.storage.local.set`: by the time the listener fires,
+`prev` and the new value are the same array, `whitelistChanged` is `false`, and the mirror
+never runs.
+
+That alone would only have been a missing sync. What made the entry *vanish* is the other
+half: with the edit never queued, the next post (a score change, or the 1-minute floor)
+came back carrying the server's **older** list, and `applyState()` in `sync.ts` overwrites
+`Settings.allowedDomains` with whatever the server sent — by design, since the server is
+the source of truth for the whitelist. So the local edit was deleted by the first reply
+that arrived after it.
+
+*Fix.* `saveSettings(next)` — one background-side writer that does the follow-ups
+(`queueDomains`, `updateActionIcon`, `setNamedPrograms`) itself rather than hoping a
+listener will notice. Every background write goes through it. The listener keeps its
+comment explaining that it covers the popup only, so the follow-ups are not "tidied" back
+into it.
+
+*Worth noting for anything similar:* an in-memory cache that is also the diff baseline can
+only detect changes made by *someone else*. Any writer that updates the cache first is
+invisible to its own listener.
+
+### `osHeld` is not "the page is idle", and reading it as such shows idle 18 s early
+**Status: avoided by construction — `programIsDriving()` in `background.ts`**
+
+*The trap.* The companion's page bar has to say **WORKING** for the whole idle timeout and
+only turn **IDLE** when the warning starts. `SessionState.osHeld` looks like exactly the
+flag for it — false means "a page heartbeat is feeding this session" — so the obvious
+implementation is `working: isHeartbeatActive && !osHeld`.
+
+It is wrong twice over.
+
+`osHeld` is set whenever the OS poll sees input but no page heartbeat has arrived within
+`PAGE_INPUT_FRESH_MS` (**2 s**). Sit still on a page you are reading and it flips true after
+two seconds — while `isHeartbeatActive` stays true for the remaining eighteen. The bar would
+have gone idle 18 s before the session did, on a page that was still being counted the whole
+time. It is also set while reading a **PDF**, where the browser genuinely is the work and no
+page heartbeat can ever arrive, so that case would read as idle permanently.
+
+*The shape that works.* Only the PROGRAM side gets a positive test — heartbeats landing,
+`osHeld`, and the *live foreground* program is a non-browser one on the whitelist — and the
+page's answer is its **complement**. Exactly one side can be driving, so "no allowed program
+is holding this session up" is the page's answer, and with no agent installed it degrades to
+what was always true: a live session on a whitelisted page is that page working.
+
+*And `isHeartbeatActive` is not "heartbeats are landing" either.* It stays true for the whole
+idle timeout, **including the final stretch where `chrome.idle` has already reported idle**,
+the anchor is set, and the "I" countdown is visibly falling. Nothing is registered and no
+point is earned in that stretch, so a bar saying WORKING there describes a session that has
+already stopped counting — next to a number counting down to zero. Both answers are therefore
+gated on `heartbeatsLanding()`: active **and** `lastHeartbeat` fresher than `WORKING_FRESH_MS`.
+That flips at the exact moment the background pins `lastHeartbeat` back to the OS anchor,
+which is itself a broadcast, so the companion's bars turn over on it rather than up to two
+seconds later on their poll.
+
+*The resulting timeline*, with the default 20 s timeout and the OS path: **0–15 s** one side
+says WORKING and the other IDLE; **15–20 s** `chrome.idle` has said idle, the countdown is
+falling and no heartbeat is landing — *both* say IDLE; **20–25 s** the warning, the character
+trembles and cries; **25 s+** the escalation (beep, grow). Nothing claims to be working once
+the countdown has started, which is the entire requirement.
+
 ### The companion took up to 15 seconds to notice the agent had started
 **Status: fixed — `agent.ts`**
 
@@ -512,5 +588,5 @@ something untrue. Noise in the console is better than a lie in the source.
 | **macOS cannot pin the companion window** | No public API lets a process change another application's window level. Every utility that does it is an Accessibility-granted window manager. The agent deliberately does not try — asking for that permission is what it is built to avoid. Documented with three helper apps in the README. |
 | **KDE and wlroots report no foreground program** | Same shape as the GNOME bridge (a KWin script; `swaymsg`/`hyprctl`) and simply not implemented. Those sessions fall back to browser-only tracking, which is exactly the behaviour with no agent installed. |
 | **Installing the GNOME bridge needs a logout** | Not fixable — see the entry above. |
-| **The Windows pin is untested on real hardware** | Written and reviewed, never run: there is no PowerShell on the development machine. The two things most likely to be wrong are the exact window title Chromium gives a popup window, and the script's encoding (handled pre-emptively above). |
+| **The Windows pin is untested on real hardware** | Written and reviewed, never run: there is no PowerShell on the development machine. The two things most likely to be wrong are the exact window title Chromium gives a popup window, and the script's encoding (handled pre-emptively above). The **GNOME** pin — same design, same title match, same 900×700 ceiling — is **confirmed working** on real hardware, so the shape is sound and it is the platform half that is unproven. |
 | **The extension ID is not pinned** | No `"key"` in `manifest.json`, so the ID changes when the unpacked folder moves. This is *why* the agent uses a loopback port rather than native messaging, and why the extension cannot start the agent itself. Pinning it is a deliberate open decision, not an oversight. |

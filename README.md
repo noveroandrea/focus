@@ -193,7 +193,7 @@ Click the Focus icon in the toolbar.
 
 | Element | What it does |
 |---|---|
-| **Force-active toggle** (top-right) | When ON, the sprite is pinned to the **Active** state on every page regardless of real input — useful to keep the companion alive while reading something it can't "see" (e.g. a video lecture). When OFF, activity is detected normally. Clicking it also opens the **floating companion** helper window — see [Floating companion](#floating-companion). |
+| **Force-active toggle** (top-right) | When ON, the sprite is pinned to the **Active** state on every page regardless of real input — useful to keep the companion alive while reading something it can't "see" (e.g. a video lecture). When OFF, activity is detected normally. Clicking it also opens the **floating companion** helper window — see [Floating companion](#floating-companion). The same toggle is in the corner of every companion window, for when the browser is buried behind whatever you are working in. |
 
 ### Main tab
 
@@ -211,6 +211,50 @@ Click the Focus icon in the toolbar.
 |---|---|---|
 | **Idle timeout in Chrome** | `2 s` | Seconds without input on an authorized page before going Idle (while Chrome is focused). |
 | **Change character every** | `30 hb` | **Heartbeats** of focused work before the character shrinks to minimum and changes. Range **5–300**. This is the slider that replaced the old "minutes" control. |
+
+**Sprite on the page**
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Show the sprite** | On | Off, **nothing at all is drawn into your pages**. Everything else carries on untouched — heartbeats, scoring, the whitelist and the idle beep all belong to the background, not to the sprite — so this is the setting for working off a [companion window](#floating-companion) on another screen instead. |
+
+Three shapes for the same information, because what makes a companion work differs per
+person: some people need it moving to notice it at all, some can't read a page with
+something crawling over it, and some want the whole companion — whitelist buttons
+included — without a second window to keep on top.
+
+| Mode | What you get |
+|---|---|
+| **Roaming** *(default)* | The small circle walks across the page, one step per heartbeat. The original behaviour. |
+| **Fixed** | The same circle, parked where you drag it. It spends each heartbeat on a **hop in place** instead of a step. Where you drop it is remembered, and every tab agrees on it. |
+| **Panel** | The whole [floating companion](#floating-companion) **inside the page** — character, score, countdown and both whitelist buttons — in a box you drag where you like. Same code as the window, so the two can't drift apart. |
+
+**Panel** is worth knowing about if you are on macOS or a Wayland desktop other than
+GNOME: the companion *window* needs something outside the browser to keep it on top, and
+there, nothing will. Inside the page the browser is the compositor and the problem
+disappears — at the cost of only being visible while you are looking at the browser.
+
+**When it goes idle.** The character does two things, and only one of them is a setting.
+
+**It trembles — always.** The shaking starts with the **5-second warning**, not with the
+escalation that follows it, so it is already moving while there is still time to come back;
+that is the whole job of a warning. It then shakes further and further the longer you stay
+away — visible from the first second, and up to about **two and a half centimetres** of
+movement after 25 seconds. Inside the companion window and the panel it tops out sooner,
+because the picture is only 480×240 and the character cannot be flung past its own frame.
+The escalation is in the *distance*, never the speed: it jumps on a fixed clock and what
+grows is how far it goes each time, which stays a series of steps you can count instead of
+blurring into a buzz. There is no setting for this. Being impossible to ignore is the point.
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Grow when idle** | On | The crying character also **swells until it fills the view** — the page, for the two circle modes; its own frame, in the panel and the companion window. Off, it stays its own size and only trembles. |
+
+A fixed-size box does not stop the *drawing* inside it from growing, which is why the panel
+and the window are not exempt. In both, the score, the phase countdown and the two whitelist
+bars are drawn **over** the character (the bars are separate rows below the picture
+altogether), so a character big enough to fill the frame covers the background and never the
+numbers you opened it for.
 
 **Behaviour**
 
@@ -254,14 +298,29 @@ program that covers the browser.
 
 **How to open it:** click the **Working** button in the popup header.
 
+**Pause without going back to the browser.** The same **⚡ Working / ⏸ Not working** toggle
+sits in the top-left corner of the drawing. It is the identical setting the popup's button
+writes — flipping it here greys the character, stops the counting and greys the toolbar
+icon exactly as flipping it there does — and it is here because the moment you most want it
+is the moment the popup is hardest to reach: the browser is behind whatever you were working
+in, and pausing meant raising it, finding the toolbar and opening the popup while the
+companion sat in the corner still saying you were being counted. Resuming from here does
+*not* open more companions, unlike the popup's button — you are already in one.
+
+**The title-bar icon says it too.** The window's icon is the character in miniature, so a
+companion that is minimised, half-covered or one line in a window list still answers the
+question: **full colour** while the session is counting, **grey and crying** once it has
+gone idle, and greyed out entirely while paused.
+
 **The two whitelist bars.** Under the character and the score, two strips answer the one
 question the sprite cannot: *is what I am doing right now being counted?*
 
 - **The page bar** — the site in the front tab, with a one-click **+ Whitelist** button, or
-  a green **✓ counts** and a **✕** to take it off again. Either way that tab is reloaded,
-  exactly as the popup's toggle does, so the sprite appears (or stops) straight away.
-- **The program bar** — the program you were last working in, same button, same tick, same
-  **✕**. Hidden when the agent cannot see the foreground.
+  a live **✓ WORKING** / **IDLE** status and a **✕** to take it off again. Either way that
+  tab is reloaded, exactly as the popup's toggle does, so the sprite appears (or stops)
+  straight away.
+- **The program bar** — the program you were last working in, same button, same status,
+  same **✕**. Hidden when the agent cannot see the foreground.
 
 The **✕** is deliberately quiet rather than a second coloured button: removing something is
 the rarer action and the one you would least like to hit by accident. Hovering it says what
@@ -285,18 +344,54 @@ double-click the Focus agent icon to run it."* Opening this window is the moment
 outside the browser, so a stopped agent means everything you are about to do goes uncounted,
 and nothing else on screen would say so.
 
+**One per screen, automatically.** On a two-monitor desk the browser is on one screen and
+the work is on the other, so a single companion is on the wrong one about half the time.
+Clicking **Working** therefore opens **one companion per display**, each bottom-right of its
+own screen and clear of panels and docks.
+
+There is no number to set, deliberately: how many you want is a fact about your desk rather
+than a preference, the browser already knows it, and a slider you have to remember to change
+every time you plug a monitor in is a slider that will be wrong. The **⧉** button in the
+corner of the drawing opens one *more*, for the rare screen that wants two. They all read the
+same state, so there is nothing to keep in sync between them.
+
+> **Wayland places them itself.** Under Wayland a client cannot position its own windows —
+> there is no protocol request for it — so the corner placement is done by the
+> [GNOME bridge](#wayland) instead, from inside the compositor, which is also where the
+> work areas are known exactly. Windows, macOS and Linux/X11 need nothing extra; the browser
+> places them. On KDE or wlroots without a bridge the windows still open, wherever the
+> compositor decides to put them.
+
+**They tell you which whitelist is earning right now.** Once something is whitelisted, its
+bar shows **✓ WORKING** or **IDLE** rather than just a tick, and only one side can be
+working at a time. Whitelist your editor and a page, then move from one to the other: the
+editor's companion goes quiet as the browser's lights up. Whitelisted and *being counted*
+are two different facts, and the second is the one that changes minute to minute — which
+is also the quickest way to see that the program whitelist is doing what you think it is.
+
 **How to keep it on top:** it is an ordinary browser window, so pinning it above other
 apps is your window manager's job, not the extension's — no browser can raise its own
 window on Wayland. Close it like any window.
 
+The line along the bottom of the window tells you which of the three cases below applies
+to *your* machine. On Windows and Linux something outside the browser does it for you, so
+it is a **"Pinning on top…"** progress line that gets out of the way; on macOS nothing can,
+so it prints what you have to do by hand and stays until you click it away. If the agent is
+stopped on Windows, or reports it cannot see the foreground on Linux (which means the GNOME
+bridge isn't installed), the line says so instead — those are the two cases where nothing
+is going to pin the window and waiting would be pointless.
+
 - **Linux / GNOME — automatic.** If you installed the
-  [companion bridge](#wayland), it pins the window for you. The bridge runs *inside*
-  the compositor, which is the only thing that can raise a window on Wayland, so it can
-  do what the browser cannot. It matches the window by its exact title (`Focus
-  companion`) and only pins it while it is small — under 900×700 — so a page that
-  happens to share that title can't drag a whole browser window on top, and a companion
-  stretched across the screen never becomes an overlay you can't work under. Nothing to
-  configure, and it works on GNOME/X11 too.
+  [companion bridge](#wayland), it pins the window for you **and puts it in its screen's
+  corner**. The bridge runs *inside* the compositor, which is the only thing that can
+  raise or position a window on Wayland, so it does what the browser cannot. It matches
+  the window by its exact title (`Focus companion`) and only pins it while it is small —
+  under 900×700 — so a page that happens to share that title can't drag a whole browser
+  window on top, and a companion stretched across the screen never becomes an overlay you
+  can't work under. Each companion goes to the first monitor that hasn't got one, in its
+  **work area** so panels and docks are cleared, and is placed **once** — move it by hand
+  afterwards and it stays where you put it. Nothing to configure, and it works on
+  GNOME/X11 too.
 - **Windows — automatic.** If the [desktop agent](#desktop-agent-windows-macos-linux) is
   running, it pins the window for you: on Windows one program may raise another's window
   (`SetWindowPos(HWND_TOPMOST)`), needing no elevation, no injection and no extra process.
@@ -730,7 +825,11 @@ focus/
 │   │   ├── background.ts   # service worker — single source of truth
 │   │   ├── content/        # content scripts injected into pages    ← see content/README.md
 │   │   │   ├── heartbeat.ts # activity detection + AI classify card
-│   │   │   └── sprite.ts    # the animated companion
+│   │   │   └── sprite.ts    # the animated companion (roaming / fixed / panel)
+│   │   ├── pip/            # the floating companion window
+│   │   │   └── pip.ts       # layout, state, and the per-platform "pin on top" line
+│   │   ├── ui/
+│   │   │   └── companion.ts # the companion panel — ONE implementation, two homes
 │   │   └── popup/          # toolbar popup UI                        ← see popup/README.md
 │   │       └── Popup.tsx
 │   ├── components/        # standalone dev demo (no Chrome APIs)     ← see components/README.md

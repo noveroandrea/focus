@@ -78,6 +78,9 @@ const COMPANION_TITLE = 'Focus companion';
 const MAX_PIN_W = 900;
 const MAX_PIN_H = 700;
 
+/** Gap from the work area's corner, in logical pixels. */
+const PLACE_MARGIN = 16;
+
 export default class FocusCompanionExtension extends Extension {
     enable() {
         this._current = '';
@@ -91,9 +94,12 @@ export default class FocusCompanionExtension extends Extension {
             return GLib.SOURCE_CONTINUE;
         });
 
-        // Pinning: new windows from here on, plus any that already exist (the
-        // companion may well have been open before this extension was enabled).
+        // Pinning and placing: new windows from here on, plus any that already exist
+        // (the companion may well have been open before this extension was enabled).
         this._titleIds = new Map();
+        // Which monitor each companion was given, so the next one goes somewhere else.
+        // Keyed by window, cleaned on unmanaged — a closed companion frees its screen.
+        this._placed = new Map();
         this._createdId = global.display.connect('window-created', (_d, win) => this._watch(win));
         for (const actor of global.get_window_actors())
             this._watch(actor.meta_window);
@@ -118,6 +124,10 @@ export default class FocusCompanionExtension extends Extension {
             }
             this._titleIds.clear();
             this._titleIds = null;
+        }
+        if (this._placed) {
+            this._placed.clear();
+            this._placed = null;
         }
         if (this._dbus) {
             this._dbus.unexport();
@@ -156,14 +166,72 @@ export default class FocusCompanionExtension extends Extension {
                 done();
         });
         this._titleIds.set(win, id);
-        win.connect('unmanaged', done);
+        win.connect('unmanaged', () => {
+            done();
+            // Its screen is free again, so the next companion can have it.
+            this._placed?.delete(win);
+        });
 
         if (this._pin(win))
             done();
     }
 
-    /** Put the window above the others if it is the companion. Returns true once it
-     *  has done so, which is the signal to stop watching this window. */
+    /** Put the companion bottom-right of a monitor that has not got one.
+     *
+     *  This exists because on Wayland the BROWSER cannot do it. `chrome.windows
+     *  .create({left, top})` is honoured on Windows, macOS and X11, and simply ignored
+     *  here: xdg-shell has no request for a client to position its own toplevel, by
+     *  design. Only something running inside the compositor can — which is this, the
+     *  same place and the same reason `make_above()` lives here.
+     *
+     *  The work area, not the monitor rectangle: it excludes the top bar and the dock,
+     *  which is the difference between "bottom-right" and "underneath the dock".
+     *
+     *  Placed exactly ONCE per window, on the frame it is recognised. Re-placing on
+     *  every title change would drag a companion the user had deliberately moved back
+     *  into the corner, which is a fight the user must win. */
+    _place(win) {
+        if (!this._placed || this._placed.has(win))
+            return;
+
+        try {
+            const nMonitors = global.display.get_n_monitors();
+            const taken = new Set(this._placed.values());
+            let monitor = -1;
+            for (let i = 0; i < nMonitors; i++) {
+                if (!taken.has(i)) { monitor = i; break; }
+            }
+            // Every screen already has one — leave this extra where the compositor put
+            // it rather than stacking it exactly on top of an existing companion.
+            if (monitor < 0) {
+                this._placed.set(win, win.get_monitor());
+                return;
+            }
+
+            const area = global.workspace_manager
+                .get_active_workspace()
+                .get_work_area_for_monitor(monitor);
+            const rect = win.get_frame_rect();
+            // A window with no size yet cannot be corner-anchored; leave it for the
+            // next title change rather than pinning it to a wrong spot.
+            if (!rect || rect.width <= 0 || rect.height <= 0)
+                return;
+
+            win.move_frame(
+                true,
+                area.x + area.width - rect.width - PLACE_MARGIN,
+                area.y + area.height - rect.height - PLACE_MARGIN,
+            );
+            this._placed.set(win, monitor);
+        } catch {
+            // A window that closed mid-placement, or a Shell without move_frame.
+            // Costs the automatic placement and nothing else.
+        }
+    }
+
+    /** Put the window above the others, and in a free screen's corner, if it is the
+     *  companion. Returns true once it has done both, which is the signal to stop
+     *  watching this window. */
     _pin(win) {
         let title = '';
         try {
@@ -179,6 +247,7 @@ export default class FocusCompanionExtension extends Extension {
             if (rect.width > MAX_PIN_W || rect.height > MAX_PIN_H)
                 return false;
             win.make_above();
+            this._place(win);
         } catch {
             // A window that closed mid-check, or a Shell version without
             // make_above. Failing here costs the automatic pin and nothing else —

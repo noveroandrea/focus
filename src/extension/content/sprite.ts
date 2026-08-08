@@ -1,9 +1,17 @@
-// Vanilla TypeScript. The only import is ../timings (pure numeric constants,
-// shared with background.ts so the idle timeline can't drift); it inlines away, so
-// the compiled content-script bundle stays self-contained.
+// Vanilla TypeScript. Two imports, both of which inline away at build time (see
+// vite.config.ts) so the compiled content-script bundle stays self-contained:
+//   ../timings   — pure numeric constants, shared with background.ts so the idle
+//                  timeline cannot drift.
+//   ../ui/companion — the companion panel, shared with the floating window so the
+//                  two are the same thing rather than two things that look alike.
 import {
   IDLE_WARNING_MS, STEP_DELAY_MS, INTERACTION_STEP_MS, GROW_DURATION_MS, ICON_POP_MS,
+  WORKING_FRESH_MS,
 } from '../timings';
+import {
+  CHARS, CRYING, TREMBLE_STEP_MS, createCompanionCanvas, createWhitelistBars, trembleAmplitude,
+  type CompanionCanvas, type WhitelistBars,
+} from '../ui/companion';
 
 interface SessionState {
   isHeartbeatActive: boolean;
@@ -19,24 +27,6 @@ interface SessionState {
   osHeld: boolean;
 }
 
-const CHARS = [
-  { name: 'Mario',   icon: '🍄', color: '#ef4444' },
-  { name: 'Luigi',   icon: '🥬', color: '#22c55e' },
-  { name: 'Peach',   icon: '👑', color: '#ec4899' },
-  { name: 'Toad',    icon: '🍄', color: '#f87171' },
-  { name: 'Yoshi',   icon: '🥚', color: '#4ade80' },
-  { name: 'Bowser',  icon: '🐢', color: '#f97316' },
-  { name: 'Link',    icon: '🛡️', color: '#16a34a' },
-  { name: 'Zelda',   icon: '💎', color: '#eab308' },
-  { name: 'Kirby',   icon: '🎈', color: '#f472b6' },
-  { name: 'Pikachu', icon: '⚡', color: '#facc15' },
-  { name: 'DK',      icon: '🍌', color: '#92400e' },
-  { name: 'Samus',   icon: '🚀', color: '#ea580c' },
-  { name: 'Fox',     icon: '🦊', color: '#d97706' },
-  { name: 'Ness',    icon: '🧢', color: '#2563eb' },
-  { name: 'Falcon',  icon: '🏎️', color: '#1d4ed8' },
-];
-const CRYING = ['😭', '😢', '💧'];
 const SIZE = 60;
 const FIREWORK_COLORS = ['#fde047', '#f97316', '#ef4444', '#22c55e', '#3b82f6', '#ec4899', '#a855f7'];
 
@@ -45,7 +35,15 @@ const FIREWORK_COLORS = ['#fde047', '#f97316', '#ef4444', '#22c55e', '#3b82f6', 
 // minimum exactly when the heartbeat count hits the configured threshold.
 const START_SCALE = 2;
 const MIN_SCALE = 0.5;
-const ACTIVE_TRANSITION = 'background-color 0.35s ease, left 0.09s ease, top 0.09s ease, transform 0.9s linear';
+
+// The circle and its position are two elements, and that split is what lets the
+// bounce and the tremble exist at all. `transform` can hold only one value: the slow
+// `transform 0.9s linear` easing that makes the shrink pleasant would also smear a
+// 300 ms hop and a per-frame shiver into nothing. So the WRAPPER owns where the
+// sprite is (left/top, plus a per-frame translate with no transition) and the CIRCLE
+// owns how big it is — neither has to know about the other's timing.
+const SPRITE_TRANSITION = 'background-color 0.35s ease, transform 0.9s linear';
+const WRAP_TRANSITION = 'left 0.09s ease, top 0.09s ease';
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 ((window as any).__ffSpriteCleanup as (() => void) | undefined)?.();
@@ -69,6 +67,16 @@ let pageAllowed = true;
 // active with no real work behind it (and earns no score), so we desaturate the
 // whole thing to make that legible at a glance.
 let forcedNotWorking = false;
+// Which of the three shapes the sprite is wearing. Mirrors Settings; see SPRITE_MODES.
+let spriteMode: 'roam' | 'fixed' | 'panel' = 'roam';
+// Mirrors Settings.idleGrow. Trembling has no equivalent — it is always on.
+let idleGrow = true;
+// Mirrors Settings.spriteEnabled. When off nothing is drawn into the page at all —
+// for people who work with the companion window instead. Everything else carries on:
+// heartbeats, scoring and the whitelist are the background's, not this file's, so the
+// only thing that stops is the drawing. Defaults to true so a page never flashes an
+// empty frame before settings load.
+let spriteEnabled = true;
 let px = Math.random() * 300 + 100;
 let py = Math.random() * 200 + 100;
 let vx = 2.5, vy = 1.8;
@@ -99,8 +107,10 @@ let lastHeartbeatCount = -1;
 
 function doStep() {
   stepTimer = null;
-  // Sprite only moves when active
-  if (stopped || pendingSteps <= 0 || isDragging || !(appState?.isHeartbeatActive)) {
+  // Sprite only moves when active — and only in `roam` mode, which is the whole
+  // difference between it and `fixed`: same circle, same one-per-heartbeat rhythm,
+  // but the beat is spent bouncing in place instead of covering ground.
+  if (stopped || spriteMode !== 'roam' || pendingSteps <= 0 || isDragging || !(appState?.isHeartbeatActive)) {
     pendingSteps = 0;
     return;
   }
@@ -113,13 +123,14 @@ function doStep() {
   if (ny <= 0 || ny >= maxY) { vy = -vy; ny = py + (vy / mag) * STEP_PX; }
   px = Math.max(0, Math.min(nx, maxX));
   py = Math.max(0, Math.min(ny, maxY));
-  spriteEl.style.left = px + 'px';
-  spriteEl.style.top  = py + 'px';
+  wrapEl.style.left = px + 'px';
+  wrapEl.style.top  = py + 'px';
   pendingSteps--;
   if (pendingSteps > 0) stepTimer = setTimeout(doStep, STEP_DELAY_MS);
 }
 
 function queueSteps(n: number) {
+  if (spriteMode !== 'roam') return;
   pendingSteps += n;
   if (!stepTimer && pendingSteps > 0) doStep();
 }
@@ -129,7 +140,7 @@ function queueSteps(n: number) {
 // Only walks while active and not being dragged.
 let lastInteractionStep = 0;
 function interactionStep() {
-  if (stopped || isDragging || !appState?.isHeartbeatActive) return;
+  if (stopped || spriteMode !== 'roam' || isDragging || !appState?.isHeartbeatActive) return;
   const now = Date.now();
   if (now - lastInteractionStep < INTERACTION_STEP_MS) return;
   lastInteractionStep = now;
@@ -137,11 +148,90 @@ function interactionStep() {
 }
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
-let spriteEl: HTMLDivElement;
+let wrapEl: HTMLDivElement;     // where the sprite IS (position + per-frame motion)
+let spriteEl: HTMLDivElement;   // the circle itself (colour + scale)
 let iconEl: HTMLSpanElement;
 let scoreEl: HTMLSpanElement;
 let focusEl: HTMLSpanElement;
 let distractedEl: HTMLSpanElement;
+
+// ── Bounce and tremble ────────────────────────────────────────────────────────
+// Two per-frame offsets applied to the WRAPPER, both zero most of the time:
+//
+//   bounceY  — the `fixed` mode's heartbeat. A parked sprite still has to show that
+//              a beat landed, and a hop is the same rhythm the walk had.
+//   tremble  — the idle escalation, always on and with no setting. Ramped by
+//              trembleAmplitude() from the companion panel, so the circle and the
+//              panel shake on one curve rather than two that were meant to match.
+//
+// The loop only runs while there is something to draw, and stops itself the moment
+// both settle to zero — a content script on every page in every tab does not get to
+// hold a permanent rAF.
+let bounceY = 0;
+let motionRaf = 0;
+let motionLastAt = 0;
+let shakeAt = 0, shakeX = 0, shakeY = 0;
+
+/** How far the sprite should be jumping right now, in CSS pixels, or 0. */
+function currentTremble(): number {
+  if (spriteMode === 'panel') return 0;   // the panel's own canvas shakes itself
+  if (!warningStartAt || appState?.isHeartbeatActive) return 0;
+  // Anchored on the START of the warning, not on the escalation that follows it, so
+  // the shake is already visible while there is still time to come back.
+  return trembleAmplitude(Date.now() - warningStartAt);
+}
+
+function motionTick() {
+  motionRaf = 0;
+  if (stopped || !wrapEl) return;
+  const now = Date.now();
+  const dt = Math.min(0.1, (now - motionLastAt) / 1000);
+  motionLastAt = now;
+
+  bounceY *= Math.pow(0.86, dt * 60);
+  if (Math.abs(bounceY) < 0.3) bounceY = 0;
+
+  // A new direction on a FIXED clock, held until the next one. What the lapse buys is
+  // DISTANCE, never rate: a rising rate blurs into a buzz, while a rising distance
+  // stays a series of steps you can count — which is what makes it catch your eye
+  // rather than merely be noisy.
+  const amp = currentTremble();
+  if (!amp) shakeAt = 0;
+  else if (now - shakeAt >= TREMBLE_STEP_MS) {
+    shakeAt = now;
+    // Random direction, full step: a shake is a jump to somewhere else, not a drift,
+    // so the magnitude is not randomised on top of the direction.
+    const a = Math.random() * Math.PI * 2;
+    shakeX = Math.cos(a); shakeY = Math.sin(a);
+  }
+  // Clamped to the room the viewport actually has on each side. At full amplitude the
+  // jump is wider than the margin a sprite dragged into a corner has left, and a
+  // companion that shakes ITSELF off the edge of the screen is one you stop seeing at
+  // exactly the moment it is trying hardest to be seen.
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, hi));
+  const jx = clamp(shakeX * amp, -px, Math.max(0, window.innerWidth - SIZE - px));
+  const jy = clamp(shakeY * amp, -py, Math.max(0, window.innerHeight - SIZE - py));
+
+  if (!bounceY && !amp) {
+    wrapEl.style.transform = '';
+    return;                       // nothing left to animate — let the loop die
+  }
+  wrapEl.style.transform = `translate(${jx.toFixed(2)}px, ${(bounceY + jy).toFixed(2)}px)`;
+  motionRaf = requestAnimationFrame(motionTick);
+}
+
+function startMotion() {
+  if (motionRaf || stopped) return;
+  motionLastAt = Date.now();
+  motionRaf = requestAnimationFrame(motionTick);
+}
+
+/** One heartbeat, spent in place. The `fixed` mode's answer to a step. */
+function bounce() {
+  if (spriteMode !== 'fixed' || isDragging) return;
+  bounceY = -14;
+  startMotion();
+}
 
 // ── Phase countdown (debug readout under the score) ────────────────────────────
 // A small "I 12s" / "W 4s" line below the points that ticks down the current
@@ -255,14 +345,22 @@ function stopScaleAnimation() {
   if (scaleAnimTimer) { clearInterval(scaleAnimTimer); scaleAnimTimer = null; }
 }
 
-/** Idle: center sprite on screen, grow from scale(1) to fill window over 20s. */
+/** The escalation, once the warning window has run out: swell to fill the page. The
+ *  shake is not part of this and does not wait for it — it began back at the start of
+ *  the warning and has been ramping ever since. In `panel` mode the canvas does both
+ *  itself, so there is nothing here to do. */
 function startGrowAnimation() {
+  if (spriteMode === 'panel') return;
+  startMotion();                  // the shake never stops while the lapse runs
+  if (!idleGrow) return;          // …and growing is the half that can be refused
+
   stopScaleAnimation();
-  spriteEl.style.transition = 'background-color 0.35s ease, left 1.5s ease, top 1.5s ease';
+  spriteEl.style.transition = 'background-color 0.35s ease';
+  wrapEl.style.transition = 'left 1.5s ease, top 1.5s ease';
   const centerX = window.innerWidth  / 2 - SIZE / 2;
   const centerY = window.innerHeight / 2 - SIZE / 2;
-  spriteEl.style.left = centerX + 'px';
-  spriteEl.style.top  = centerY + 'px';
+  wrapEl.style.left = centerX + 'px';
+  wrapEl.style.top  = centerY + 'px';
   px = centerX;
   py = centerY;
   spriteEl.style.transform = 'scale(1)';
@@ -294,7 +392,8 @@ function activeScale(count: number): number {
 function applyActiveSize() {
   if (!appState) return;
   stopScaleAnimation();
-  spriteEl.style.transition = ACTIVE_TRANSITION;
+  spriteEl.style.transition = SPRITE_TRANSITION;
+  wrapEl.style.transition = WRAP_TRANSITION;
   const sc = activeScale(appState.heartbeatCount);
   spriteEl.style.transform = `scale(${sc})`;
   counterScaleScore(sc);
@@ -351,6 +450,9 @@ function triggerFireworks() {
  *  on any screen. Rendered at the screen centre so the grown idle sprite never
  *  covers it. */
 function triggerPenalty() {
+  // Panel mode draws its own −10 on the canvas; a second one filling the page on
+  // top of it would be the same event announced twice.
+  if (spriteMode === 'panel') return;
   const rootEl = document.getElementById('focus-flow-root');
   if (!rootEl) return;
   const label = document.createElement('div');
@@ -385,6 +487,7 @@ function triggerPenalty() {
 /** Play the icon-change celebration: fireworks + a quick spin pop, then the new
  *  character restarts at full size (heartbeat count is back to 0). */
 function triggerIconChange() {
+  if (spriteMode === 'panel') return;   // the canvas fires its own burst and "+N"
   if (changeTimer) clearTimeout(changeTimer);
   stopScaleAnimation();
   triggerFireworks();
@@ -539,8 +642,11 @@ let warningTimer: ReturnType<typeof setTimeout> | null = null;
 
 function startIdleWarning() {
   if (warningTimer || cryTimer) return;
-  warningStartAt = Date.now(); // anchor the "W" countdown
+  warningStartAt = Date.now(); // anchor the "W" countdown AND the tremble ramp
   setIconText(CRYING[0]);
+  // The shake starts here, not at the escalation, so it is already visible while
+  // there is still time to come back — which is the entire point of a warning.
+  startMotion();
   warningTimer = setTimeout(() => {
     warningTimer = null;
     if (appState?.isHeartbeatActive) return; // activity resumed → never escalate
@@ -558,6 +664,11 @@ function stopIdleWarning() {
 // ── Crying ────────────────────────────────────────────────────────────────────
 function startCrying() {
   if (cryTimer) return;
+  // Arriving here with no anchor means the page loaded into a lapse already in
+  // progress and there was no warning window to date it. Any anchor is a guess
+  // then; "now" at least ramps from nothing rather than jumping to full shake.
+  if (!warningStartAt) warningStartAt = Date.now();
+  startMotion();
   cryTimer = setInterval(() => {
     cryFrame = (cryFrame + 1) % CRYING.length;
     setIconText(CRYING[cryFrame]);
@@ -579,6 +690,11 @@ function applyState(s: SessionState) {
   const rootEl = document.getElementById('focus-flow-root');
   if (rootEl) rootEl.style.display = s.enabled === false ? 'none' : 'block';
 
+  // In panel mode the canvas draws its own everything — character, score, countdown,
+  // fireworks, the fly-ups and the shiver — off exactly this state.
+  panelCanvas?.setState(s);
+  panelBars?.noteState(s);   // a working↔idle switch must not wait for the poll
+
   const char = CHARS[s.currentIconId % CHARS.length] ?? CHARS[0];
 
   setScore(s.focusScore ?? 0, s.distractedScore ?? 0);
@@ -586,13 +702,15 @@ function applyState(s: SessionState) {
   const transitioned = wasHeartbeatActive !== s.isHeartbeatActive;
   wasHeartbeatActive = s.isHeartbeatActive;
 
-  // One step per heartbeat, from any source. The background counts one heartbeat
+  // One beat per heartbeat, from any source. The background counts one heartbeat
   // per active second (page activity or the chrome.idle poll) and broadcasts the
-  // new count, so a change here means a heartbeat just happened — take a step.
+  // new count, so a change here means a heartbeat just happened — spend it as a
+  // step (roaming) or a hop in place (fixed). Both no-op in panel mode; its canvas
+  // has already taken the same beat as its own bob.
   if (s.heartbeatCount !== lastHeartbeatCount) {
     const hadCount = lastHeartbeatCount >= 0;
     lastHeartbeatCount = s.heartbeatCount;
-    if (hadCount && s.isHeartbeatActive) queueSteps(1);
+    if (hadCount && s.isHeartbeatActive) { queueSteps(1); bounce(); }
   }
 
   spriteEl.style.backgroundColor = s.isHeartbeatActive ? char.color : '#94a3b8';
@@ -629,11 +747,21 @@ function applyState(s: SessionState) {
 
 // ── Sprite ────────────────────────────────────────────────────────────────────
 function buildSprite(): HTMLDivElement {
-  const el = document.createElement('div');
-  Object.assign(el.style, {
+  const wrap = document.createElement('div');
+  Object.assign(wrap.style, {
     position: 'absolute',
     width: SIZE + 'px', height: SIZE + 'px',
     left: px + 'px', top: py + 'px',
+    transition: WRAP_TRANSITION,
+    zIndex: '2147483647',
+    // The circle scales far past this box; nothing may be clipped to it.
+    overflow: 'visible',
+  });
+  wrapEl = wrap;
+
+  const el = document.createElement('div');
+  Object.assign(el.style, {
+    position: 'absolute', inset: '0',
     borderRadius: '50%',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     backgroundColor: '#94a3b8',
@@ -642,8 +770,7 @@ function buildSprite(): HTMLDivElement {
     boxShadow: '0 8px 20px rgba(0,0,0,0.28)',
     border: '4px solid white',
     userSelect: 'none',
-    transition: ACTIVE_TRANSITION,
-    zIndex: '2147483647',
+    transition: SPRITE_TRANSITION,
     transformOrigin: 'center',
   });
   spriteEl = el;
@@ -715,7 +842,10 @@ function buildSprite(): HTMLDivElement {
     e.stopPropagation();
     isDragging = false;
     el.style.cursor = 'grabbing';
-    const rect = el.getBoundingClientRect();
+    // The wrapper's box, not the circle's: the circle is scaled (up to 2× while
+    // active, and far more while growing), so its rect is not where the sprite
+    // "is" and the grab would jump by the difference.
+    const rect = wrapEl.getBoundingClientRect();
     dragOX = e.clientX - rect.left;
     dragOY = e.clientY - rect.top;
     el.setPointerCapture(e.pointerId);
@@ -723,26 +853,200 @@ function buildSprite(): HTMLDivElement {
     el.addEventListener('pointerup', onSpriteUp as EventListener, { once: true });
   });
 
-  return el;
+  wrap.appendChild(el);
+  return wrap;
 }
 
 function onSpriteMove(e: PointerEvent) {
   isDragging = true;
   px = Math.max(0, Math.min(e.clientX - dragOX, window.innerWidth  - SIZE));
   py = Math.max(0, Math.min(e.clientY - dragOY, window.innerHeight - SIZE));
-  spriteEl.style.left = px + 'px';
-  spriteEl.style.top  = py + 'px';
+  // No easing while a finger is on it — the 0.09 s walk transition would make the
+  // sprite trail the pointer.
+  wrapEl.style.transition = 'none';
+  wrapEl.style.left = px + 'px';
+  wrapEl.style.top  = py + 'px';
 }
 
 function onSpriteUp(_e: PointerEvent) {
   spriteEl.removeEventListener('pointermove', onSpriteMove as EventListener);
   spriteEl.style.cursor = 'grab';
+  wrapEl.style.transition = WRAP_TRANSITION;
+  // Where you park it is only meaningful in `fixed` mode — a roaming sprite walks
+  // off within a second, so remembering the drop point would be noise.
+  if (isDragging && spriteMode === 'fixed') savePosition('fixed', px, py);
   setTimeout(() => { isDragging = false; }, 30);
+}
+
+// ── Remembered position ───────────────────────────────────────────────────────
+// Stored as a FRACTION of the viewport rather than pixels, so the same page opened
+// on a laptop and on an external monitor puts the companion in the same visual
+// place instead of off the edge of the smaller one. Kept in its own storage key,
+// not in Settings: a drag is not a preference, and routing one through the settings
+// object would fire the whole settings-changed cascade on every drop.
+const POS_KEY = 'focusSpritePos';
+let savedPos: { fixed?: { x: number; y: number }; panel?: { x: number; y: number } } = {};
+
+function savePosition(mode: 'fixed' | 'panel', x: number, y: number) {
+  const w = Math.max(1, window.innerWidth);
+  const h = Math.max(1, window.innerHeight);
+  savedPos = { ...savedPos, [mode]: { x: x / w, y: y / h } };
+  try { chrome.storage.local.set({ [POS_KEY]: savedPos }); } catch { /* ignore */ }
+}
+
+/** The remembered spot in this viewport's pixels, clamped inside it, or null. */
+function loadPosition(mode: 'fixed' | 'panel', w: number, h: number): { x: number; y: number } | null {
+  const p = savedPos[mode];
+  if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+  return {
+    x: Math.max(0, Math.min(p.x * window.innerWidth, window.innerWidth - w)),
+    y: Math.max(0, Math.min(p.y * window.innerHeight, window.innerHeight - h)),
+  };
+}
+
+// ── Panel mode ────────────────────────────────────────────────────────────────
+// The floating companion window, drawn inside the page instead. Same canvas, same
+// two whitelist bars, same everything — literally the same module (../ui/companion),
+// so this is not a lookalike that will drift, it is the companion with a different
+// container. It exists because the window it copies has one hard requirement the
+// page does not: something outside the browser has to keep it on top, and on macOS
+// and most Wayland desktops nothing will. Inside the page, the browser is the
+// compositor and the problem disappears — at the cost of only being visible while
+// you are looking at the browser, which is exactly the trade the user is choosing.
+const PANEL_W = 300;
+
+let panelEl: HTMLDivElement | null = null;
+let panelCanvas: CompanionCanvas | null = null;
+let panelBars: WhitelistBars | null = null;
+let panelX = 0, panelY = 0;
+
+function buildPanel() {
+  if (panelEl) return;
+  const rootEl = document.getElementById('focus-flow-root');
+  if (!rootEl) return;
+
+  const box = document.createElement('div');
+  Object.assign(box.style, {
+    position: 'absolute', width: PANEL_W + 'px',
+    display: 'flex', flexDirection: 'column',
+    // The same surface as pip.html's <body>, so switching between the two modes
+    // does not look like switching between two products.
+    background: 'radial-gradient(circle at 30% 30%, #1e293b, #0f172a)',
+    color: '#e2e8f0', borderRadius: '14px', overflow: 'hidden',
+    border: '1px solid rgba(148,163,184,0.22)',
+    boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
+    fontFamily: 'system-ui, sans-serif',
+    pointerEvents: 'auto', cursor: 'grab', userSelect: 'none',
+    zIndex: '2147483647',
+  });
+
+  const stage = document.createElement('div');
+  Object.assign(stage.style, {
+    display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '6px',
+  });
+  panelCanvas = createCompanionCanvas({ idleWarningMs: IDLE_WARNING_MS, growDurationMs: GROW_DURATION_MS });
+  // A fixed height here rather than `flex:1`: this box is sized by its contents,
+  // so the canvas has to declare how tall it wants to be. 2:1, like the drawing.
+  Object.assign(panelCanvas.canvas.style, { width: '100%', height: ((PANEL_W - 12) / 2) + 'px' });
+  stage.appendChild(panelCanvas.canvas);
+
+  panelBars = createWhitelistBars({ workingFreshMs: WORKING_FRESH_MS });
+  box.append(stage, ...panelBars.rows);
+
+  const pos = loadPosition('panel', PANEL_W, (PANEL_W - 12) / 2 + 60);
+  panelX = pos ? pos.x : Math.max(0, window.innerWidth - PANEL_W - 24);
+  panelY = pos ? pos.y : Math.max(0, window.innerHeight - 220);
+  box.style.left = panelX + 'px';
+  box.style.top = panelY + 'px';
+
+  // Dragged by anywhere that is not a control. A title bar would cost a row of a
+  // 300px box, and every pixel of this thing is already earning its place.
+  box.addEventListener('pointerdown', (e: PointerEvent) => {
+    if ((e.target as HTMLElement)?.closest('button')) return;
+    e.stopPropagation();
+    const rect = box.getBoundingClientRect();
+    const ox = e.clientX - rect.left, oy = e.clientY - rect.top;
+    box.style.cursor = 'grabbing';
+    const move = (ev: PointerEvent) => {
+      panelX = Math.max(0, Math.min(ev.clientX - ox, window.innerWidth - rect.width));
+      panelY = Math.max(0, Math.min(ev.clientY - oy, window.innerHeight - rect.height));
+      box.style.left = panelX + 'px';
+      box.style.top = panelY + 'px';
+    };
+    const up = () => {
+      box.removeEventListener('pointermove', move as EventListener);
+      box.style.cursor = 'grab';
+      savePosition('panel', panelX, panelY);
+    };
+    box.setPointerCapture(e.pointerId);
+    box.addEventListener('pointermove', move as EventListener);
+    box.addEventListener('pointerup', up as EventListener, { once: true });
+  });
+
+  rootEl.appendChild(box);
+  panelEl = box;
+
+  // Hand it whatever we already know, so it is not blank until the next broadcast.
+  panelCanvas.setSettings({ forceActive: forcedNotWorking, idleTimeS, idleGrow });
+  if (appState) panelCanvas.setState(appState);
+}
+
+function destroyPanel() {
+  panelCanvas?.stop();
+  panelBars?.stop();
+  panelEl?.remove();
+  panelCanvas = null;
+  panelBars = null;
+  panelEl = null;
+}
+
+/** Show whichever of the two shapes the current mode calls for. Cheap enough to call
+ *  on every settings change — the panel is only built when it is actually wanted. */
+function applyMode() {
+  if (!wrapEl) return;
+  // Switched off entirely: put away both shapes and stop everything they were
+  // running. Note the beep is deliberately NOT part of this — it belongs to the idle
+  // escalation, not to the drawing, and someone who turned the sprite off to stop it
+  // walking over their page has not asked to stop being told they went idle.
+  if (!spriteEnabled) {
+    destroyPanel();
+    wrapEl.style.display = 'none';
+    return;
+  }
+  if (spriteMode === 'panel') {
+    wrapEl.style.display = 'none';
+    buildPanel();
+    // Already built — re-place it. Called on resize and on another tab's drag, both
+    // of which can leave a box anchored in pixels hanging off the edge.
+    if (panelEl) {
+      const pos = loadPosition('panel', panelEl.offsetWidth || PANEL_W, panelEl.offsetHeight || 200);
+      if (pos) {
+        panelX = pos.x; panelY = pos.y;
+        panelEl.style.left = panelX + 'px';
+        panelEl.style.top = panelY + 'px';
+      }
+    }
+    return;
+  }
+  destroyPanel();
+  wrapEl.style.display = 'block';
+  // Leaving `panel` for `fixed` has to put the circle somewhere deliberate; leaving
+  // it for `roam` does not, since it walks off wherever it starts.
+  if (spriteMode === 'fixed') {
+    const pos = loadPosition('fixed', SIZE, SIZE);
+    if (pos) { px = pos.x; py = pos.y; }
+    wrapEl.style.left = px + 'px';
+    wrapEl.style.top = py + 'px';
+  }
+  if (appState?.isHeartbeatActive && !changeTimer) applyActiveSize();
 }
 
 // ── Settings sync ──────────────────────────────────────────────────────────────
 function readSettings(raw: unknown) {
-  const s = raw as { iconChangeHeartbeats?: number; cryBeepVolume?: number; cryBeepDuration?: number; cryBeepStyle?: string; soundEnabled?: boolean; allowedDomains?: unknown; forceActive?: boolean; idleTime?: number } | undefined;
+  const s = raw as { iconChangeHeartbeats?: number; cryBeepVolume?: number; cryBeepDuration?: number; cryBeepStyle?: string; soundEnabled?: boolean; allowedDomains?: unknown; forceActive?: boolean; idleTime?: number; spriteEnabled?: boolean; spriteMode?: string; idleGrow?: boolean } | undefined;
+  spriteEnabled = s?.spriteEnabled !== false;
+  spriteMode = s?.spriteMode === 'fixed' || s?.spriteMode === 'panel' ? s.spriteMode : 'roam';
+  idleGrow = s?.idleGrow !== false;
   const it = Number(s?.idleTime);
   if (Number.isFinite(it)) idleTimeS = Math.min(300, Math.max(15, Math.round(it)));
   const h = Number(s?.iconChangeHeartbeats);
@@ -755,6 +1059,7 @@ function readSettings(raw: unknown) {
   if (typeof s?.soundEnabled === 'boolean') soundEnabled = s.soundEnabled;
   if (s?.allowedDomains !== undefined) pageAllowed = isPageAllowed(s.allowedDomains);
   if (typeof s?.forceActive === 'boolean') forcedNotWorking = s.forceActive;
+  panelCanvas?.setSettings({ forceActive: forcedNotWorking, idleTimeS, idleGrow });
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -778,8 +1083,7 @@ function init() {
   px = Math.min(px, Math.max(0, window.innerWidth - SIZE));
   py = Math.min(py, Math.max(0, window.innerHeight - SIZE));
 
-  spriteEl = buildSprite();
-  rootEl.appendChild(spriteEl);
+  rootEl.appendChild(buildSprite());   // returns the wrapper; the circle is inside
 
   // Unlock the AudioContext on the first real gesture. Capture phase + multiple
   // gesture types so pages that stopPropagation on input still let us through.
@@ -811,16 +1115,33 @@ function init() {
   window.addEventListener('wheel', interactionStep, unlockOpts);
   window.addEventListener('scroll', interactionStep, unlockOpts);
 
-  chrome.storage.local.get(['focusFlowSettings'], (r) => {
+  // Both keys in one read: the mode decides WHICH shape to build, the remembered
+  // position decides where to put it, and building before the position arrives would
+  // put a fixed sprite in the wrong place and then jump it.
+  chrome.storage.local.get(['focusFlowSettings', POS_KEY], (r) => {
+    const p = r[POS_KEY];
+    if (p && typeof p === 'object') savedPos = p as typeof savedPos;
     readSettings(r.focusFlowSettings);
+    applyMode();
     renderActiveFace(); // the whitelist just resolved — the face may need to change
     renderWorkingFilter();
     if (appState?.isHeartbeatActive && !changeTimer) applyActiveSize();
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.focusFlowSettings) {
+    if (area !== 'local') return;
+    // Another tab moved the sprite. Adopt the new spot so every tab agrees where
+    // "the companion" is, rather than each keeping the position it was opened with.
+    if (changes[POS_KEY]) {
+      const p = changes[POS_KEY].newValue;
+      if (p && typeof p === 'object') {
+        savedPos = p as typeof savedPos;
+        if (!isDragging) applyMode();
+      }
+    }
+    if (changes.focusFlowSettings) {
       readSettings(changes.focusFlowSettings.newValue);
+      applyMode();
       // Reconcile the beep with the new settings (volume/style/duration/sound):
       // restart it cleanly if still crying, otherwise it stays stopped.
       restartBeepIfCrying();
@@ -833,6 +1154,13 @@ function init() {
       if (appState?.isHeartbeatActive && !changeTimer) applyActiveSize();
     }
   });
+
+  // Both fixed shapes are placed against the viewport, so a resized window has to
+  // re-place them or they end up off the edge (or, on a maximise, huddled in a
+  // corner). The roaming sprite corrects itself on the next step and needs nothing.
+  window.addEventListener('resize', () => {
+    if (spriteMode !== 'roam' && !isDragging) applyMode();
+  }, { passive: true });
 
   chrome.runtime.onMessage.addListener((msg: any) => {
     if (msg.type === 'STATE_UPDATE') applyState(msg.state as SessionState);
@@ -857,6 +1185,8 @@ function init() {
     if (scaleAnimTimer) { clearInterval(scaleAnimTimer);  scaleAnimTimer = null; }
     if (changeTimer)    { clearTimeout(changeTimer);      changeTimer = null; }
     if (phaseTimer)     { clearInterval(phaseTimer);      phaseTimer = null; }
+    if (motionRaf)      { cancelAnimationFrame(motionRaf); motionRaf = 0; }
+    destroyPanel();     // its canvas holds a rAF and its bars a 2 s poll
     document.getElementById('focus-flow-root')?.remove();
     document.getElementById('ff-styles')?.remove();
     (window as any).__ffSpriteCleanup = undefined;

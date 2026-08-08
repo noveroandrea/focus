@@ -3,7 +3,7 @@
   "name": "Focus",
   "version": "1.0.0",
   "description": "Focus companion that helps you stay on task while studying or working.",
-  "permissions": ["tabs", "storage", "scripting", "activeTab", "windows", "idle", "identity", "alarms"],
+  "permissions": ["tabs", "storage", "scripting", "activeTab", "windows", "idle", "identity", "alarms", "system.display"],
   "host_permissions": [
     "http://127.0.0.1:47317/*",
     "https://*.supabase.co/*",

@@ -1,6 +1,6 @@
 import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, round2 } from '../types';
 import {
-  STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS,
+  STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS, WORKING_FRESH_MS,
   IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
 } from './timings';
 // Every heartbeat source — page input, focused PDF/viewer tabs, OS-wide activity —
@@ -134,6 +134,202 @@ function pageDomain(url: string): string {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
+// ── Writing settings from the background ──────────────────────────────────────
+// THE single background-side writer of `settings`, and it exists because the
+// storage.onChanged listener below cannot see these writes for what they are.
+//
+// That listener is how a settings change normally reaches the rest of this file:
+// it diffs the incoming value against `settings` and, on a whitelist change, mirrors
+// the list to the server and recolours the toolbar icon. It works for the popup,
+// which writes storage directly — the background's copy really is the old one at
+// that moment. It CANNOT work for a write made here: by the time storage fires we
+// have already assigned the new value to `settings`, so `prev` and the new value are
+// the same list, `whitelistChanged` is false, and queueDomains() never runs.
+//
+// That was not merely a missing sync. With the edit never queued, the next post
+// came back carrying the server's older list, and applyState() overwrites
+// Settings.allowedDomains with whatever the server sent — so a page whitelisted from
+// the companion window counted for a few seconds and then silently stopped, with the
+// entry gone from the popup's editor. The follow-ups therefore have to be done here,
+// explicitly, by whoever made the change.
+function saveSettings(next: Settings) {
+  const prev = settings;
+  settings = next;
+  chrome.storage.local.set({ focusFlowSettings: settings });
+
+  const whitelistChanged =
+    prev.allowedDomains.join('\n') !== settings.allowedDomains.join('\n');
+  if (whitelistChanged) {
+    updateActionIcon();          // the front page may have just flipped green↔yellow
+    void queueDomains(settings.allowedDomains);
+  }
+  // Only whitelisted programs may keep their display name on disk.
+  if ((prev.allowedPrograms ?? []).join('\n') !== (settings.allowedPrograms ?? []).join('\n')) {
+    setNamedPrograms(settings.allowedPrograms ?? []);
+  }
+}
+
+// ── Which whitelist is earning the points right now ───────────────────────────
+// Being ON a whitelist and being the thing currently counted are two different facts,
+// and the companion shows both: with one window per screen you can watch the editor
+// go quiet as the browser page lights up, which is the only way to see that the
+// program whitelist and the page whitelist are doing what you think.
+//
+// Exactly one side can be driving. This function answers for the PROGRAM side, and
+// the page side is its complement, because a live session that no allowed program is
+// holding up must be one the browser is holding up. Deriving the page's answer rather
+// than testing `!osHeld` for it is deliberate: `osHeld` is also set while reading a
+// PDF, where the browser genuinely IS the work but no page heartbeat can ever arrive,
+// and reading it directly would call that idle.
+// Both answers are gated on this rather than on `isHeartbeatActive` alone, because the
+// two are not the same question. `isHeartbeatActive` covers the whole idle timeout,
+// INCLUDING the final stretch where chrome.idle has already reported "idle", the
+// anchor is set and the "I" countdown is visibly falling — a stretch in which no
+// heartbeat is registered and no point is earned. Saying WORKING there would be
+// describing a session that has already stopped counting, while the number on the
+// screen next to it counts down. See WORKING_FRESH_MS.
+function heartbeatsLanding(): boolean {
+  return state.isHeartbeatActive && Date.now() - state.lastHeartbeat < WORKING_FRESH_MS;
+}
+
+function programIsDriving(): boolean {
+  const live = currentProgram();
+  return heartbeatsLanding() && state.osHeld && !!live
+    && !isBrowserProgram(live.id) && isAllowedProgram(live.id, settings.allowedPrograms);
+}
+
+// ── Companion windows ─────────────────────────────────────────────────────────
+// One per screen, bottom-right, because the companion is only useful where you can
+// see it: on a two-monitor desk the browser is on one screen and the work is on the
+// other, and a single companion is on the wrong one roughly half the time. So the
+// button on the companion opens ANOTHER one, and each goes to the first screen that
+// has none — which on a normal desk means one click per extra monitor and no
+// dragging. They are all the same window content reading the same broadcast state,
+// so there is nothing to keep in sync between them.
+//
+// Placement lives here rather than in the popup for two reasons: the popup closes
+// the moment the window opens, taking any callback with it, and chrome.system.display
+// is a background-only concern.
+const COMPANION_W = 300;
+const COMPANION_H = 260;   // canvas + the two whitelist bars + the pin line
+const COMPANION_MARGIN = 16;
+const COMPANION_IDS_KEY = 'pipWindowIds';
+
+/** Every companion window that still exists, with its bounds. Dead ids are dropped
+ *  on the way past — cheaper and more reliable than tracking windows.onRemoved, which
+ *  a suspended service worker is not around to hear. */
+async function liveCompanions(): Promise<chrome.windows.Window[]> {
+  const stored = await new Promise<unknown>((resolve) => {
+    chrome.storage.local.get([COMPANION_IDS_KEY, 'pipWindowId'], (r) => {
+      // `pipWindowId` is the single-window key earlier versions wrote; adopting it
+      // means an upgrade does not orphan the companion the user already has open.
+      const many = Array.isArray(r[COMPANION_IDS_KEY]) ? r[COMPANION_IDS_KEY] : [];
+      resolve(typeof r.pipWindowId === 'number' ? [...many, r.pipWindowId] : many);
+    });
+  });
+  const ids = [...new Set((stored as unknown[]).filter((v): v is number => typeof v === 'number'))];
+  const found = await Promise.all(ids.map((id) => new Promise<chrome.windows.Window | null>((resolve) => {
+    chrome.windows.get(id, (w) => {
+      if (chrome.runtime.lastError) { resolve(null); return; }
+      resolve(w ?? null);
+    });
+  })));
+  const live = found.filter((w): w is chrome.windows.Window => !!w && typeof w.id === 'number');
+  chrome.storage.local.set({ [COMPANION_IDS_KEY]: live.map((w) => w.id as number) });
+  chrome.storage.local.remove('pipWindowId');
+  return live;
+}
+
+function getDisplays(): Promise<chrome.system.display.DisplayUnitInfo[]> {
+  return new Promise((resolve) => {
+    try {
+      chrome.system.display.getInfo((d) => resolve(chrome.runtime.lastError ? [] : (d ?? [])));
+    } catch {
+      resolve([]);   // permission or API unavailable — fall back to no placement
+    }
+  });
+}
+
+/** Which display a window is on: the one containing its centre. A window straddling
+ *  two screens belongs to whichever shows more of it, which is what a centre test
+ *  gives you for free. -1 when nothing matches (an unplugged monitor). */
+function displayOf(win: chrome.windows.Window, displays: chrome.system.display.DisplayUnitInfo[]): number {
+  const cx = (win.left ?? 0) + (win.width ?? 0) / 2;
+  const cy = (win.top ?? 0) + (win.height ?? 0) / 2;
+  return displays.findIndex((d) => {
+    const a = d.workArea;
+    return cx >= a.left && cx < a.left + a.width && cy >= a.top && cy < a.top + a.height;
+  });
+}
+
+/** Put one window bottom-right of `display`, or wherever the browser likes if we have
+ *  no display information. Resolves with the new id so the caller can place the next
+ *  one knowing this one exists. */
+function createCompanion(area?: chrome.system.display.Bounds, step = 0): Promise<number | null> {
+  const left = area && area.left + area.width - COMPANION_W - COMPANION_MARGIN - step;
+  const top = area && area.top + area.height - COMPANION_H - COMPANION_MARGIN - step;
+  return new Promise((resolve) => {
+    chrome.windows.create(
+      // Deliberately small — this sits in a screen corner while you work elsewhere.
+      // The canvas scales with the window, so it survives being shrunk further.
+      { url: chrome.runtime.getURL('pip.html'), type: 'popup', width: COMPANION_W, height: COMPANION_H, left, top },
+      (w) => resolve(w?.id ?? null),
+    );
+  });
+}
+
+/**
+ * Open companion windows.
+ *
+ *   extra = false — the Working button. Opens **one per screen**, and focuses what is
+ *                   already there. There is no setting for the number and there
+ *                   should not be: the right answer is a fact about the desk, not a
+ *                   preference, and `chrome.system.display` already knows it. A
+ *                   number the user has to keep in step with the monitors they
+ *                   plugged in is a number they will forget to change.
+ *   extra = true  — the companion's own ⧉ button, which is a request for one MORE,
+ *                   for the rare desk where a screen wants two.
+ */
+async function openCompanion(extra: boolean) {
+  const live = await liveCompanions();
+  const displays = await getDisplays();
+  const ids = live.map((w) => w.id as number);
+
+  // Which screens already have one. A window is on the display containing its centre.
+  const used = new Set(live.map((w) => displayOf(w, displays)).filter((i) => i >= 0));
+
+  // One per screen. With no display information at all (an API that failed, or a
+  // platform that has none) fall back to one — the count has to come from somewhere
+  // and "the screen you are looking at" is the only safe guess.
+  const want = extra ? live.length + 1 : Math.max(1, displays.length);
+
+  if (live.length >= want) {
+    // Nothing to add — the button still has to do something visible, so raise them.
+    for (const id of ids) chrome.windows.update(id, { focused: true, drawAttention: true });
+    return;
+  }
+
+  for (let n = live.length; n < want; n++) {
+    let area: chrome.system.display.Bounds | undefined;
+    let step = 0;
+    if (displays.length) {
+      const idx = displays.findIndex((_, i) => !used.has(i));
+      if (idx >= 0) {
+        used.add(idx);
+        area = displays[idx].workArea;
+      } else {
+        // Every screen already has one → stack on the primary, stepped down and right
+        // so the new window is not perfectly hidden behind the old.
+        area = displays[Math.max(0, displays.findIndex((d) => d.isPrimary))].workArea;
+        step = n * 26;
+      }
+    }
+    const id = await createCompanion(area, step);
+    if (id != null) ids.push(id);
+  }
+  chrome.storage.local.set({ [COMPANION_IDS_KEY]: ids });
+}
+
 // ── Init from storage ─────────────────────────────────────────────────────────
 chrome.storage.local.get(['focusFlowState', 'focusFlowSettings'], (result) => {
   // Left behind by a version that tried to detect a broken chrome.idle at runtime.
@@ -175,7 +371,12 @@ chrome.runtime.onInstalled.addListener(() => {
   void queueDomains(settings.allowedDomains);
 });
 
-// Pick up settings changes written directly by the popup
+// Pick up settings changes written directly by the popup.
+//
+// Only the popup: a change made HERE has already been assigned to `settings` by the
+// time this fires, so every diff below reads as "nothing changed". That is what
+// saveSettings() is for — it does these same follow-ups itself. Do not move them
+// back in here on the assumption that one listener covers both writers.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.focusFlowSettings) {
     const prev = settings;
@@ -502,8 +703,7 @@ function maybeClassifyViewerTab(tab?: chrome.tabs.Tab) {
     try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { return; }
     if (!host || NEVER_WHITELIST.some(d => host.includes(d))) return;
     if (!settings.allowedDomains.includes(host)) {
-      settings = { ...settings, allowedDomains: [...settings.allowedDomains, host] };
-      chrome.storage.local.set({ focusFlowSettings: settings });
+      saveSettings({ ...settings, allowedDomains: [...settings.allowedDomains, host] });
     }
     chrome.tabs.reload(tabId);
   });
@@ -545,8 +745,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       const domain = message.domain.trim();
       const NEVER_WHITELIST = ['youtube.com', 'youtu.be'];
       if (domain && !settings.allowedDomains.includes(domain) && !NEVER_WHITELIST.some(d => domain.includes(d))) {
-        settings = { ...settings, allowedDomains: [...settings.allowedDomains, domain] };
-        chrome.storage.local.set({ focusFlowSettings: settings });
+        saveSettings({ ...settings, allowedDomains: [...settings.allowedDomains, domain] });
       }
       sendResponse({});
       break;
@@ -554,8 +753,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
 
     case 'REMOVE_DOMAIN': {
       const domain = message.domain.trim();
-      settings = { ...settings, allowedDomains: settings.allowedDomains.filter(d => d !== domain) };
-      chrome.storage.local.set({ focusFlowSettings: settings });
+      saveSettings({ ...settings, allowedDomains: settings.allowedDomains.filter(d => d !== domain) });
       updateState({ isHeartbeatActive: false });
       sendResponse({});
       break;
@@ -577,12 +775,18 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       void refreshProgram(true).then(() => {
         const program = currentProgram();
         const recent = recentProgram();
+        const recentAllowed = !!recent && isAllowedProgram(recent.id, settings.allowedPrograms);
         sendResponse({
           running: isAgentOnline(),
           program,
           allowed: !!program && isAllowedProgram(program.id, settings.allowedPrograms),
           recent,
-          recentAllowed: !!recent && isAllowedProgram(recent.id, settings.allowedPrograms),
+          recentAllowed,
+          // Whitelisted is not the same as working — see programIsDriving(). The id
+          // comparison is what makes it "this program": `recent` is the last
+          // non-browser program, which is not necessarily the one in front now.
+          recentWorking: recentAllowed && programIsDriving()
+            && !!program && !!recent && normaliseProgram(program.id) === normaliseProgram(recent.id),
           names: programNames(),
           note: agentNote(),
         } satisfies AgentStatus);
@@ -601,9 +805,8 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       // A browser is never evidence of work on its own — the page whitelist decides
       // those — so the door is shut here as well, not only in the UI that offers it.
       if (id && !isBrowserProgram(id) && !programs.includes(id)) {
-        settings = { ...settings, allowedPrograms: [...programs, id] };
-        chrome.storage.local.set({ focusFlowSettings: settings });
-        setNamedPrograms(settings.allowedPrograms);   // its name may now be saved
+        // saveSettings takes care of setNamedPrograms — its name may now be saved.
+        saveSettings({ ...settings, allowedPrograms: [...programs, id] });
       }
       sendResponse({});
       break;
@@ -613,10 +816,8 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       const id = normaliseProgram(message.program);
       const programs = settings.allowedPrograms ?? [];
       if (id && programs.includes(id)) {
-        settings = { ...settings, allowedPrograms: programs.filter((p) => p !== id) };
-        chrome.storage.local.set({ focusFlowSettings: settings });
-        // Its name is no longer one we may keep on disk — see setNamedPrograms.
-        setNamedPrograms(settings.allowedPrograms);
+        // Its name is no longer one we may keep on disk — saveSettings drops it.
+        saveSettings({ ...settings, allowedPrograms: programs.filter((p) => p !== id) });
       }
       sendResponse({});
       break;
@@ -630,6 +831,12 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
         sendResponse({
           domain,
           allowed: matched.length > 0,
+          // The complement of AgentStatus.recentWorking: a live session that no
+          // allowed program is holding up is one the browser is holding up, and the
+          // only page it can be is the one in front — this one. Includes the PDF
+          // case, where the session is genuinely the browser's work even though
+          // osHeld is set and no page heartbeat can arrive.
+          working: heartbeatsLanding() && matched.length > 0 && !programIsDriving(),
           matched,
         } satisfies PageStatus);
       };
@@ -658,8 +865,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
     case 'WHITELIST_PAGE': {
       const domain = pageDomain(lastPageUrl);
       if (domain && !settings.allowedDomains.includes(domain)) {
-        settings = { ...settings, allowedDomains: [...settings.allowedDomains, domain] };
-        chrome.storage.local.set({ focusFlowSettings: settings });
+        saveSettings({ ...settings, allowedDomains: [...settings.allowedDomains, domain] });
         if (lastPageTabId != null) chrome.tabs.reload(lastPageTabId);
       }
       sendResponse({});
@@ -676,14 +882,18 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       const drop = lastPageUrl ? new Set(matchingDomains(lastPageUrl)) : new Set<string>();
       if (drop.size) {
         const keep = settings.allowedDomains.filter((d) => !drop.has(d));
-        settings = { ...settings, allowedDomains: keep };
-        chrome.storage.local.set({ focusFlowSettings: settings });
+        saveSettings({ ...settings, allowedDomains: keep });
         updateState({ isHeartbeatActive: false });
         if (lastPageTabId != null) chrome.tabs.reload(lastPageTabId);
       }
       sendResponse({});
       break;
     }
+
+    case 'OPEN_COMPANION':
+      void openCompanion(message.extra === true);
+      sendResponse({});
+      break;
 
     case 'GET_STATE':
       sendResponse(state);

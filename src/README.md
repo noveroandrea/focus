@@ -32,7 +32,13 @@ It exports:
   `HEARTBEAT`, `FOCUS_PING`, `GET_STATE`, `STATE_UPDATE`, `ADD_DOMAIN`, `REMOVE_DOMAIN`,
   `CLASSIFY_PAGE`. If you add a message, add it here first.
 - **`CHARACTER_COUNT`** — number of characters in the sprite roster (kept in sync with the
-  `CHARS` array in `content/sprite.ts`).
+  `CHARS` array in `extension/ui/companion.ts`, which both the sprite and the companion
+  window read).
+- **`SpriteMode`** — what the in-page sprite looks like (`roam` / `fixed` / `panel`), with a
+  `SPRITE_MODES` descriptor list the popup renders and a `clampSpriteMode` helper.
+- **`Settings.idleGrow`** — whether the crying character also swells to fill its frame.
+  There is no equivalent for trembling: that is the escalation itself, it starts inside the
+  warning window and it never stops while you are away, so it is not offered as a choice.
 - **`ICON_CHANGE_MIN` / `ICON_CHANGE_MAX` / `clampIconChangeHeartbeats`** — the supported
   range (5–300) for how many focus heartbeats trigger a character change, and a clamp helper
   used everywhere a raw value comes in.

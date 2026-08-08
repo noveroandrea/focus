@@ -170,13 +170,25 @@ Debian. It is a Shell extension exporting one D-Bus object, needed because
 hook.
 
 It has a **second job the agent could never do**: keeping the extension's floating
-companion window above other windows. A Wayland client cannot raise its own window, but
-code inside the compositor calls `make_above()` in one line. It finds the window by the
-exact title `Focus companion` and pins it only while it is smaller than 900×700 — so a
-page that happens to carry that title cannot drag a whole browser window on top, and a
-companion stretched across the screen never becomes an overlay you cannot work under.
-This is the only window title anything here reads, and it is compared against a constant
-rather than reported anywhere.
+companion windows above other windows, and putting each one in a screen's corner. A
+Wayland client can neither raise nor position its own window — there is no protocol
+request for either — while code inside the compositor calls `make_above()` and
+`move_frame()` in one line each.
+
+It finds the window by the exact title `Focus companion` and pins it only while it is
+smaller than 900×700 — so a page that happens to carry that title cannot drag a whole
+browser window on top, and a companion stretched across the screen never becomes an
+overlay you cannot work under. This is the only window title anything here reads, and it
+is compared against a constant rather than reported anywhere.
+
+Placement sends each companion to the **first monitor that has not got one**, bottom-right
+of that monitor's *work area* — the compositor's own figure, so panels and docks are
+cleared exactly rather than guessed at. It happens **once per window**, on the frame the
+window is recognised: re-placing it later would drag a companion you had deliberately
+moved back into the corner. Closing one frees its screen for the next.
+
+Windows, macOS and Linux/X11 need none of this — the browser positions its own windows
+there, and the extension already asks it to.
 
 ```bash
 desktop/gnome-extension/install.sh   # copies in, and marks it enabled for next login
