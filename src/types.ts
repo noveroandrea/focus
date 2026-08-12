@@ -128,27 +128,11 @@ export interface Settings {
   classifyNumThreads: number;
   /** Prompt sent to the model for page classification (URL/title/snippet are appended automatically) */
   classifyPrompt: string;
-  /** Buzz the user's phone at the start of the 5-second warning, via a Telegram bot.
-   *
-   *  Off by default and inert until both fields below are filled in. Telegram rather
-   *  than a push service or an app of our own because it is the only option that
-   *  needs nothing installed on the desktop, nothing hosted, no keys to rotate and no
-   *  iOS build: one HTTPS POST from the service worker, and the phone the user
-   *  already has notifications from does the rest.
-   *
-   *  Note this is the ONE thing the extension sends anywhere other than its own
-   *  backend, so it is opt-in and the message names no page and no program — only
-   *  that a lapse started. The timing alone is behavioural data, and it lands on
-   *  Telegram's servers. */
-  telegramEnabled: boolean;
-  /** Bot token from @BotFather (`123456:ABC-…`). A credential, held in
-   *  chrome.storage.local exactly like `classifyApiKey`. */
-  telegramToken: string;
-  /** Which chat to send to — the numeric id of the user's own conversation with
-   *  their bot. Filled in by the popup's "Find" button rather than by hand: nobody
-   *  knows their own chat id, and it is one `getUpdates` call away once they have
-   *  said anything to the bot. */
-  telegramChatId: string;
+  /** Master switch for the Web Push nudge. On by default and inert until a phone is
+   *  actually paired: with no subscriptions, sendPush() returns immediately. It
+   *  exists so someone can stop the nudges for an afternoon without unpairing the
+   *  phone and having to walk the QR flow again to get them back. */
+  pushEnabled: boolean;
 }
 
 /** Clamp the icon-change interval to the supported heartbeat range. */
@@ -261,9 +245,7 @@ export const DEFAULT_SETTINGS: Settings = {
   classifyApiKey: '',
   classifyModel: 'qwen-yesno',
   classifyNumThreads: 2,
-  telegramEnabled: false,
-  telegramToken: '',
-  telegramChatId: '',
+  pushEnabled: true,
   classifyPrompt: 'Is this page where the user actively reads, studies, or writes technical or academic content? Answer YES for: search results, study material, math/engineering related material, research papers, documentation, articles, reference tools, writing editors. Answer NO if the page is primarily for passive consumption or social interaction — regardless of how professional it looks. For YouTube, base your answer only on the video title.',
 };
 
@@ -323,24 +305,54 @@ export type MessageType =
   | { type: 'SERVER_COMPETITION_BOARD'; competition: string; metric: 'live' | 'avg7' | 'avg30' }
   | { type: 'SERVER_MEMBER_PROFILE'; userId: string }
   | { type: 'SERVER_FLAG_DOMAIN'; domain: string }
-  // The phone nudge. Both are popup-only setup steps, and both live in the background
-  // for the same reason the classifier proxy does: the bot token is a credential the
-  // background already holds, and a popup that closes mid-request loses the answer.
-  //   TELEGRAM_LINK — read the chat id off the bot's own inbox (getUpdates), so the
-  //                   user never has to find a number nobody knows how to find.
-  //   TELEGRAM_TEST — send the buzz now, which is the only way to know the phone is
-  //                   actually set to vibrate for it.
-  | { type: 'TELEGRAM_LINK' }
-  | { type: 'TELEGRAM_TEST' };
+  // The same weekly flag, spent on a program instead. A separate message and a
+  // separate RPC rather than one carrying a kind: the two write separate registries,
+  // and a single "flag(kind, target)" is exactly the shape that lets a program be
+  // written into the page registry, which is a global table shared by every user.
+  | { type: 'SERVER_FLAG_PROGRAM'; program: string }
+  // Phone pairing over Web Push. All four live in the background because the VAPID
+  // keypair and the paired devices do: a popup that closes mid-flow must not be able
+  // to lose either.
+  //   PUSH_PAIR_START — a nonce + the QR text to show.
+  //   PUSH_PAIR_POLL  — has the phone answered yet? Called while the QR is up.
+  //   PUSH_LIST       — the phones already paired, for the popup's list.
+  //   PUSH_FORGET     — unpair one; the phone keeps its subscription but nothing
+  //                     will ever push to it again, which is what "forget" means
+  //                     when the sender is the only party holding the address.
+  //   PUSH_TEST       — send one now: the only way to find out whether the phone is
+  //                     actually set to vibrate for it.
+  | { type: 'PUSH_PAIR_START'; platform: PhonePlatform }
+  | { type: 'PUSH_PAIR_POLL'; nonce: string; platform: PhonePlatform }
+  | { type: 'PUSH_LIST' }
+  | { type: 'PUSH_FORGET'; endpoint: string }
+  | { type: 'PUSH_TEST' };
 
-/** Reply to the two Telegram setup messages. `error` is Telegram's own `description`
- *  where there is one — it is written to be shown ("Unauthorized", "chat not found"). */
-export interface TelegramResult {
+/** Which phone the user said they were pairing. Chosen in the popup BEFORE the QR
+ *  appears, because the two flows differ enough that showing both sets of steps at
+ *  once is worse than asking one question: Android subscribes straight from the
+ *  browser tab, while iOS refuses to subscribe at all until the page has been added
+ *  to the Home Screen and opened from there. */
+export type PhonePlatform = 'android' | 'ios';
+
+/** Reply to PUSH_PAIR_START. `url` is what the QR encodes and what a user on the
+ *  same machine can click instead. */
+export interface PairStart {
   ok: boolean;
-  /** TELEGRAM_LINK only: the chat id found, for the popup to save. */
-  chatId?: string;
+  nonce?: string;
+  url?: string;
+  /** How long the nonce is good for, mirrored from pairing_ttl() in SQL so the popup
+   *  can count it down instead of letting it expire silently. */
+  ttlMs?: number;
   error?: string;
 }
+
+/** One phone this browser can push to. */
+export interface PairedPhone {
+  endpoint: string;
+  platform: string;
+  addedAt: number;
+}
+
 
 /** Reply to the three team messages. `error` carries the database's own message
  *  ("Team X already exists — join it instead"), which is written to be shown. */

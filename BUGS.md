@@ -505,6 +505,47 @@ feeding it the server's own reply posts that reply back as a delta, compounding 
 round trip. The reconciled value is `server + still_pending`, because deltas queued
 mid-flight are not in the server's figure yet and dropping them makes the number jump twice.
 
+### Web Push encryption is unverifiable by inspection, so it was verified by decryption
+**Status: verified — `src/extension/push.ts`**
+
+*The trap.* RFC 8291's `aes128gcm` payload is two HKDF rounds over an ECDH secret, and
+every way of getting it wrong produces the **same symptom**: the push service accepts the
+POST with a 201 and the phone silently shows nothing. A swapped key order in `key_info`, a
+missing `\0` in a label, the `0x02` last-record delimiter left off the plaintext, the
+record size written little-endian — all of them look exactly like "notifications don't
+work on my phone", which is also what a wrong browser setting, a Doze delay and an
+expired subscription look like.
+
+*What was done.* Before shipping, `sendPush()` was driven with `fetch` stubbed and its
+captured body **decrypted by an independently written receiver** playing the phone: an
+ECDH keypair standing in for the device, the derivation run in reverse, AES-GCM opened,
+the delimiter and the JSON checked. The VAPID JWT was verified against the advertised
+public key, `aud` checked against the endpoint's origin, and a 410 confirmed to prune the
+subscription. The test is not in the repo because it needs no fixture and no network — it
+is thirty lines and recreating it is faster than maintaining it — but **recreate it before
+touching the crypto**: the alternative is debugging silence on a phone.
+
+*Related trap, same file.* `TTL: 0` is deliberate and looks like a mistake to anyone
+tidying up. It means "deliver now or drop", which is right for a nudge that is only
+meaningful during a five-second warning. Raising it to a "safer" value buys nothing except
+notifications that arrive after the penalty has already landed.
+
+### A program in the page whitelist would have matched half the web
+**Status: designed around — `20260812090000_program_flags.sql`**
+
+Adding red flags for programs invited a `kind` column on `domain_flags` and
+`user_domains`. It was rejected because `build_state()`'s `domains` array is written
+straight into `Settings.allowedDomains`, which `heartbeat.ts` **substring-matches against
+every URL**. One forgotten `where kind = 'domain'` in one of the several readers would put
+`code` into the page whitelist, where it matches vscode.dev, qrcode.com and any URL
+containing those four letters — the extension would start counting arbitrary browsing as
+work, with nothing on screen to say why and nothing in the diff that looks wrong.
+
+Parallel tables (`user_programs` / `program_flags` / `program_flag_events`) cost some
+duplicated function bodies and make that failure unrepresentable. The shared thing is the
+one that should be shared: the weekly budget in `user_flags`, which both `flag_domain` and
+`flag_program` contend on, so a flag really is one flag spent on either kind.
+
 ### `ArXiv.org` and `arxiv.org` would have been two different domains
 **Status: fixed before it could bite — `domain_flags`**
 

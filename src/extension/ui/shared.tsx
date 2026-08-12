@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { SessionState, Settings, DayScore, MessageType, AgentStatus, HISTORY_KEY, localDateKey, weekdayName } from '../../types';
 import { Plus, X, Check, Copy, ClipboardPaste, Users, Trophy, ChevronLeft, ChevronRight, Flag, Loader2, UserPlus, UserCheck, Clock, Monitor } from 'lucide-react';
-import { SUMMARY_KEY, TEAMS_KEY, FLAG_KEY, DOMAIN_FLAGS_KEY } from '../server/config';
+import { SUMMARY_KEY, TEAMS_KEY, FLAG_KEY, DOMAIN_FLAGS_KEY, PROGRAM_FLAGS_KEY } from '../server/config';
 // Pure predicates — the same two the background applies, so the list the popup
 // writes and the list the poll reads can never disagree about what a browser is.
 import { isBrowserProgram, normaliseProgram } from '../agent';
 // Type-only: erased at compile time, so the popup bundle does not pull in sync.ts
 // (and through it auth.ts and the whole fetch path) just to name a shape.
-import type { ServerSummary, ServerDay, MemberScore, TeamBoard, CompetitionTeam, CompetitionBoard, MemberProfile, FlagResult, FriendsBoard, UserHit, FriendStatus, AvgSummary, GroupHistory as GroupHistoryPayload } from '../server/sync';
+import type { ServerSummary, ServerDay, MemberScore, TeamBoard, CompetitionTeam, CompetitionBoard, MemberProfile, FlagResult, ProgramFlagResult, FriendsBoard, UserHit, FriendStatus, AvgSummary, GroupHistory as GroupHistoryPayload } from '../server/sync';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Everything the popup and the dashboard page BOTH render
@@ -763,6 +763,11 @@ export const ProfileStat = ({ label, focus, distracted }: {
  *  to grey the button before the click, so the two must be changed together. */
 export const MAX_FLAGS_PER_DOMAIN = 3;
 
+/** The same ceiling, counted separately for programs. Three on `youtube.com` and
+ *  three on `steam` are six objections to six different things — which is the
+ *  reading the tally exists to collect. Mirrors flag_program()'s own constant. */
+export const MAX_FLAGS_PER_PROGRAM = 3;
+
 /** The friend control on a profile. Four states, four different sentences — a single
  *  "Add friend" that silently did nothing on the other three would be worse than no
  *  button. Never shown for yourself. */
@@ -837,9 +842,16 @@ export const MemberProfileView = ({ userId, onBack }: { userId: string; onBack: 
   // Flagging returns the domain's new global tally, so only that one row is patched
   // rather than refetching the whole profile. The badge updates independently: the
   // background writes FLAG_KEY, which useWeeklyFlag is watching.
-  const flag = (domain: string) => {
-    setFlagging(domain);
-    chrome.runtime.sendMessage({ type: 'SERVER_FLAG_DOMAIN', domain }, (res?: FlagResult | null) => {
+  // One weekly flag, two things it can be spent on. The kind picks the message and
+  // therefore the registry; everything after it — the ceiling, the error, the badge
+  // going grey — is identical, which is why the two lists render through one
+  // component and patch through one handler.
+  const flag = (kind: 'domain' | 'program', target: string) => {
+    setFlagging(target);
+    const msg: MessageType = kind === 'domain'
+      ? { type: 'SERVER_FLAG_DOMAIN', domain: target }
+      : { type: 'SERVER_FLAG_PROGRAM', program: target };
+    chrome.runtime.sendMessage(msg, (res?: FlagResult | ProgramFlagResult | null) => {
       void chrome.runtime.lastError;
       setFlagging('');
       if (!res) {
@@ -847,14 +859,21 @@ export const MemberProfileView = ({ userId, onBack }: { userId: string; onBack: 
         return;
       }
       setFlagError('');
-      setProfile((p) => p && {
-        ...p,
-        // my_flags comes back from the server rather than being incremented locally,
-        // so the ceiling is judged on the server's count, not this view's guess.
-        domains: p.domains.map((d) => (d.domain === res.domain
-          ? { ...d, flag_count: res.flag_count, my_flags: res.my_flags }
-          : d)),
-      });
+      // my_flags comes back from the server rather than being incremented locally, so
+      // the ceiling is judged on the server's count and not on this view's guess.
+      setProfile((p) => p && (kind === 'domain'
+        ? {
+            ...p,
+            domains: p.domains.map((d) => (d.domain === (res as FlagResult).domain
+              ? { ...d, flag_count: res.flag_count, my_flags: res.my_flags }
+              : d)),
+          }
+        : {
+            ...p,
+            programs: (p.programs ?? []).map((x) => (x.program === (res as ProgramFlagResult).program
+              ? { ...x, flag_count: res.flag_count, my_flags: res.my_flags }
+              : x)),
+          }));
     });
   };
 
@@ -928,70 +947,117 @@ export const MemberProfileView = ({ userId, onBack }: { userId: string; onBack: 
         )}
       </div>
 
-      <div className="space-y-1">
-        <h4 className="flex items-baseline justify-between text-[9px] font-bold uppercase tracking-widest text-slate-400">
-          <span>Whitelisted domains</span>
-          <FlagBadge available={flagAvailable} small />
-        </h4>
-        {profile.domains.length === 0 ? (
-          <p className="text-[10px] text-slate-400">No domains recorded.</p>
-        ) : (
-          <div className="divide-y divide-slate-100 rounded-xl border border-slate-100">
-            {profile.domains.map((d) => {
-              // Two independent gates, and they need different explanations: the week
-              // runs out for every domain at once, the ceiling only for this one.
-              const capped = d.my_flags >= MAX_FLAGS_PER_DOMAIN;
-              const canFlag = flagAvailable && !capped;
-              return (
-                <div key={d.domain} className="flex items-center gap-2 px-2 py-1">
-                  <span className="min-w-0 flex-1 truncate text-[10px] text-slate-600">
-                    {d.domain}
-                    {/* Your own contribution, as a fraction of your ceiling. Shown only
-                        once you have spent something on this domain — "0/3" on every
-                        untouched row would read as a target to fill. */}
-                    {d.my_flags > 0 && (
-                      <span className={capped ? 'text-red-400' : 'text-slate-400'}>
-                        {' '}· {d.my_flags}/{MAX_FLAGS_PER_DOMAIN} from you
-                      </span>
-                    )}
-                  </span>
-                  {/* Tally inside the button: the count and the act of flagging are one
-                      affordance. A permanent, unrevocable action should not look
-                      available when it isn't. */}
-                  <button
-                    onClick={() => flag(d.domain)}
-                    disabled={!canFlag || flagging === d.domain}
-                    title={
-                      capped
-                        ? `You've used all ${MAX_FLAGS_PER_DOMAIN} of your flags on ${d.domain}. Others can still flag it.`
-                        : flagAvailable
-                          ? `Spend this week's red flag on ${d.domain} — this cannot be undone`
-                          : 'Weekly red flag already spent. You get another on Monday at 01:00.'
-                    }
-                    className={`flex flex-shrink-0 items-center gap-1 rounded-lg px-1.5 py-0.5 text-[10px] font-bold tabular-nums transition-colors ${
-                      canFlag
-                        ? 'cursor-pointer bg-slate-100 text-slate-500 hover:bg-red-100 hover:text-red-600'
-                        : 'cursor-not-allowed bg-slate-50 text-slate-300'
-                    }`}
-                  >
-                    <Flag size={10} fill={d.flag_count > 0 ? 'currentColor' : 'none'} />
-                    {d.flag_count}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
-        {flagError && <p className="text-[9px] font-medium text-red-500">{flagError}</p>}
-        <p className="text-[9px] text-slate-400">
-          One red flag per week, granted each Monday at 01:00, and at most{' '}
-          {MAX_FLAGS_PER_DOMAIN} from you on any one domain. Flags are permanent, and
-          the count shown is everyone's together.
-        </p>
-      </div>
+      <FlagList
+        title="Whitelisted domains"
+        noun="domain"
+        max={MAX_FLAGS_PER_DOMAIN}
+        empty="No domains recorded."
+        items={profile.domains.map((d) => ({ key: d.domain, label: d.domain, flag_count: d.flag_count, my_flags: d.my_flags }))}
+        available={flagAvailable}
+        busyKey={flagging}
+        onFlag={(target) => flag('domain', target)}
+      />
+
+      {/* Only when the server sent them. A backend that has not run the
+          program-flags migration sends nothing here, and an empty "Whitelisted
+          programs" heading would read as "this person works only in a browser"
+          rather than "this server does not know about programs yet". */}
+      {!!profile.programs?.length && (
+        <FlagList
+          title="Whitelisted programs"
+          noun="program"
+          max={MAX_FLAGS_PER_PROGRAM}
+          empty="No programs recorded."
+          items={profile.programs.map((p) => ({ key: p.program, label: p.program, flag_count: p.flag_count, my_flags: p.my_flags }))}
+          available={flagAvailable}
+          busyKey={flagging}
+          onFlag={(target) => flag('program', target)}
+        />
+      )}
+
+      {flagError && <p className="text-[9px] font-medium text-red-500">{flagError}</p>}
+      <p className="text-[9px] text-slate-400">
+        One red flag per week, granted each Monday at 01:00 — spend it on a domain or a
+        program, whichever you think is the problem. At most {MAX_FLAGS_PER_DOMAIN} from
+        you on any one of them. Flags are permanent, and the count shown is everyone's
+        together.
+      </p>
     </div>
   );
 };
+
+/** One flaggable list: a participant's whitelisted domains, or their whitelisted
+ *  programs. Built once for both because they are the same control over two
+ *  registries, and a second copy is where the ceiling, the disabled states and the
+ *  wording would quietly drift apart.
+ *
+ *  Two independent gates decide whether a row can be flagged, and they need
+ *  different explanations: the WEEK runs out for every target at once, the CEILING
+ *  only for this one. */
+const FlagList = ({ title, noun, max, items, empty, available, busyKey, onFlag }: {
+  title: string;
+  noun: 'domain' | 'program';
+  max: number;
+  items: { key: string; label: string; flag_count: number; my_flags: number }[];
+  empty: string;
+  available: boolean;
+  busyKey: string;
+  onFlag: (target: string) => void;
+}) => (
+  <div className="space-y-1">
+    <h4 className="flex items-baseline justify-between text-[9px] font-bold uppercase tracking-widest text-slate-400">
+      <span>{title}</span>
+      <FlagBadge available={available} small />
+    </h4>
+    {items.length === 0 ? (
+      <p className="text-[10px] text-slate-400">{empty}</p>
+    ) : (
+      <div className="divide-y divide-slate-100 rounded-xl border border-slate-100">
+        {items.map((it) => {
+          const capped = it.my_flags >= max;
+          const canFlag = available && !capped;
+          return (
+            <div key={it.key} className="flex items-center gap-2 px-2 py-1">
+              <span className={`min-w-0 flex-1 truncate text-[10px] text-slate-600 ${noun === 'program' ? 'font-mono' : ''}`}>
+                {it.label}
+                {/* Your own contribution as a fraction of your ceiling, shown only once
+                    you have spent something here — "0/3" on every untouched row would
+                    read as a target to fill. */}
+                {it.my_flags > 0 && (
+                  <span className={capped ? 'text-red-400' : 'text-slate-400'}>
+                    {' '}· {it.my_flags}/{max} from you
+                  </span>
+                )}
+              </span>
+              {/* Tally inside the button: the count and the act of flagging are one
+                  affordance. A permanent, unrevocable action should not look available
+                  when it isn't. */}
+              <button
+                onClick={() => onFlag(it.key)}
+                disabled={!canFlag || busyKey === it.key}
+                title={
+                  capped
+                    ? `You've used all ${max} of your flags on ${it.label}. Others can still flag it.`
+                    : available
+                      ? `Spend this week's red flag on ${it.label} — this cannot be undone`
+                      : 'Weekly red flag already spent. You get another on Monday at 01:00.'
+                }
+                className={`flex flex-shrink-0 items-center gap-1 rounded-lg px-1.5 py-0.5 text-[10px] font-bold tabular-nums transition-colors ${
+                  canFlag
+                    ? 'cursor-pointer bg-slate-100 text-slate-500 hover:bg-red-100 hover:text-red-600'
+                    : 'cursor-not-allowed bg-slate-50 text-slate-300'
+                }`}
+              >
+                <Flag size={10} fill={it.flag_count > 0 ? 'currentColor' : 'none'} />
+                {it.flag_count}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    )}
+  </div>
+);
 
 /** Create-or-join, one field and two verbs. They are separate buttons because they
  *  are separate intents, and the server enforces the difference: create refuses a
@@ -1616,6 +1682,25 @@ export function useDomainFlags(): Record<string, number> {
   return flags;
 }
 
+/** Red-flag tallies for the user's own whitelisted PROGRAMS, as `{program: count}`.
+ *  The twin of useDomainFlags, reading the other registry's cache. */
+export function useProgramFlags(): Record<string, number> {
+  const [flags, setFlags] = useState<Record<string, number>>({});
+  useEffect(() => {
+    const load = () => chrome.storage.local.get([PROGRAM_FLAGS_KEY], (r) => {
+      const f = r[PROGRAM_FLAGS_KEY];
+      setFlags(f && typeof f === 'object' ? (f as Record<string, number>) : {});
+    });
+    load();
+    const listener = (changes: Record<string, unknown>, area: string) => {
+      if (area === 'local' && changes[PROGRAM_FLAGS_KEY]) load();
+    };
+    chrome.storage.onChanged.addListener(listener);
+    return () => chrome.storage.onChanged.removeListener(listener);
+  }, []);
+  return flags;
+}
+
 /** Whether this week's red flag is still in hand. Read from storage, which both the
  *  server replies and a successful flag write — so the badge and the flag buttons on
  *  a profile stay in step without either owning the other's state. */
@@ -1811,6 +1896,7 @@ export const AllowedPrograms = ({ settings, onChange }: {
   const [agent, setAgent] = useState<AgentStatus | null>(null);
   const [newProgram, setNewProgram] = useState('');
   const [rejected, setRejected] = useState('');
+  const flags = useProgramFlags();
 
   // Polled while the popup is open: the point of the panel is to show what is in
   // front of you *now*, and the answer changes as you alt-tab.
@@ -1917,7 +2003,12 @@ export const AllowedPrograms = ({ settings, onChange }: {
         {/* Named where a name is known, identifier alongside it in fine print — the
             identifier is what actually matches, so it stays visible, but `code` on
             its own tells nobody they whitelisted Visual Studio Code. */}
-        {programs.map((p) => (
+        {programs.map((p) => {
+          // Undefined means the server has not reported this program yet — just added,
+          // signed out, or a backend without the program-flags migration. Nobody has
+          // flagged it either way, so 0 is the honest reading.
+          const count = flags[p] ?? 0;
+          return (
           <div key={p} className="flex items-center gap-2 rounded-lg px-2 py-1 hover:bg-slate-50">
             <span className="min-w-0 flex-1 truncate">
               {names[p] ? (
@@ -1929,6 +2020,19 @@ export const AllowedPrograms = ({ settings, onChange }: {
                 <span className="font-mono text-[11px] text-slate-700">{p}</span>
               )}
             </span>
+            {/* Same badge the page list carries, reading the other registry. Grey at 0
+                keeps an unobjectionable list quiet; red once anyone has flagged it. */}
+            <span
+              title={count === 0
+                ? `No red flags on ${p}`
+                : `${count} red flag${count === 1 ? '' : 's'} raised against ${p} by participants`}
+              className={`flex flex-shrink-0 items-center gap-0.5 text-[10px] font-bold tabular-nums ${
+                count > 0 ? 'text-red-500' : 'text-slate-300'
+              }`}
+            >
+              <Flag size={9} fill={count > 0 ? 'currentColor' : 'none'} />
+              {count}
+            </span>
             <button
               onClick={() => remove(p)}
               title={`Stop counting ${names[p] ?? p} as work`}
@@ -1937,7 +2041,8 @@ export const AllowedPrograms = ({ settings, onChange }: {
               <X size={12} />
             </button>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className="flex gap-2">

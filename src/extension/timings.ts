@@ -107,10 +107,23 @@ export const IDLE_PENALTY = 10;
  *  point. Five minutes makes it a reminder that you have drifted rather than a report
  *  on every glance out of the window.
  *
- *  Persisted (see TELEGRAM_LAST_KEY), because an MV3 worker is suspended between
- *  events and a cooldown living in a module variable is a cooldown that resets itself
- *  exactly when the user has been away long enough for the worker to be dropped. */
-export const TELEGRAM_COOLDOWN_MS = 5 * 60_000;
+ *  Persisted (see NUDGE_LAST_KEY in background.ts), because an MV3 worker is suspended
+ *  between events and a cooldown living in a module variable is a cooldown that resets
+ *  itself exactly when the user has been away long enough for the worker to be
+ *  dropped. */
+export const NUDGE_COOLDOWN_MS = 5 * 60_000;
+
+/** How long a phone-pairing QR stays valid.
+ *
+ *  MIRRORS pairing_ttl() in supabase/migrations/20260812100000_push_pairing.sql,
+ *  which is the one that actually enforces it — this copy exists so the popup can
+ *  count the QR down instead of letting it expire silently, and a disagreement here
+ *  costs a wrong number on screen rather than a wrong decision.
+ *
+ *  Long enough to find the phone, unlock it, scan, and on iOS work through Add to
+ *  Home Screen; short enough that a nonce photographed over a shoulder is worthless
+ *  by the time anyone could use it. */
+export const PAIRING_TTL_MS = 10 * 60_000;
 
 // ── Sprite animation ───────────────────────────────────────────────────────────
 /** Delay between the sprite's walking steps (one step is queued per heartbeat). */

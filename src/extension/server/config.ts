@@ -29,6 +29,25 @@ export const SUPABASE_ANON_KEY: string = 'sb_publishable_HHxAUdAbNabMNZwri-imLw_
  *  rejected. */
 export const GOOGLE_CLIENT_ID: string = '6850334637-raa373p6et6vunpur0gofapq3cd3fhr1.apps.googleusercontent.com';
 
+/** Where the pairing web app (`web/`) is deployed, no trailing slash.
+ *
+ *  The one page the phone ever opens: it asks whether this is an Android or an
+ *  iPhone, walks through the steps for that one, subscribes to Web Push and hands
+ *  the subscription back through `claim_pairing`. It must be **HTTPS** — a service
+ *  worker, and therefore Web Push, exists nowhere else — which is why it cannot
+ *  simply be a page inside the extension: `chrome-extension://` URLs mean nothing on
+ *  a phone.
+ *
+ *  GitHub Pages is the intended host and is free for a public repo; any static HTTPS
+ *  host works. Empty disables phone pairing entirely and the popup says so, rather
+ *  than showing a QR that leads nowhere. Deployment is in web/README.md. */
+export const PUSH_LANDING_URL: string = 'https://noveroandrea.github.io/focus';
+
+/** True once the pairing page has somewhere to live. */
+export function isPushConfigured(): boolean {
+  return PUSH_LANDING_URL !== '';
+}
+
 /** True once the three values above are filled in. Every server call checks this
  *  first, so an unconfigured build simply behaves like the offline extension
  *  rather than throwing on every heartbeat.
@@ -57,6 +76,11 @@ export const SUMMARY_KEY = 'focusServerSummary';
  *  number on screen rather than a page that fails to activate. */
 export const DOMAIN_FLAGS_KEY = 'focusServerDomainFlags';
 
+/** The same, for `{ [program]: flagCount }`. A program is flagged from the same
+ *  weekly budget as a domain — one flag a week, spent on either — but the tallies
+ *  are counted per target and per kind, so they cannot share a map. */
+export const PROGRAM_FLAGS_KEY = 'focusServerProgramFlags';
+
 /** Storage key holding whether this week's red flag is still in hand.
  *
  *  Its own key rather than a field on the summary because two unrelated parts of the
@@ -75,6 +99,11 @@ export const TEAMS_KEY = 'focusServerTeams';
  *  only between the user's edit and the next successful post. */
 export const PENDING_DOMAINS_KEY = 'focusServerPendingDomains';
 
+/** The same, for a pending PROGRAM whitelist edit. Two keys rather than one object
+ *  because the two lists are edited independently and each must be able to be in
+ *  flight without dragging the other along. */
+export const PENDING_PROGRAMS_KEY = 'focusServerPendingPrograms';
+
 /** Storage key holding the whitelist as the server last reported it.
  *
  *  This is what makes the write path loop-free. Every server reply is written into
@@ -83,3 +112,7 @@ export const PENDING_DOMAINS_KEY = 'focusServerPendingDomains';
  *  would push the server's own list straight back at it, forever. Comparing against
  *  this snapshot answers "did this change come from the server or from the user?". */
 export const SERVER_DOMAINS_KEY = 'focusServerDomains';
+
+/** The program whitelist as the server last reported it — the echo test above,
+ *  applied to the other list. */
+export const SERVER_PROGRAMS_KEY = 'focusServerPrograms';

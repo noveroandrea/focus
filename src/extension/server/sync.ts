@@ -43,7 +43,8 @@
 import { DayScore, HISTORY_KEY, Settings, DEFAULT_SETTINGS, weekdayName, round2 } from '../../types';
 import {
   SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY, TEAMS_KEY, FLAG_KEY,
-  DOMAIN_FLAGS_KEY, PENDING_DOMAINS_KEY, SERVER_DOMAINS_KEY, isServerConfigured,
+  DOMAIN_FLAGS_KEY, PENDING_DOMAINS_KEY, SERVER_DOMAINS_KEY,
+  PROGRAM_FLAGS_KEY, PENDING_PROGRAMS_KEY, SERVER_PROGRAMS_KEY, isServerConfigured,
 } from './config';
 import { getAccessToken, isSignedIn } from './auth';
 
@@ -144,6 +145,12 @@ export interface ServerState {
   /** The same domains with their global flag tally. Display only — `domains` above
    *  is the copy that drives whether the extension activates on a page. */
   domain_flags: { domain: string; flag_count: number }[];
+  /** The program whitelist, mirrored the same way. Optional in the type because a
+   *  backend that predates the program-flags migration simply does not send it, and
+   *  the difference between "no programs" and "this server has never heard of
+   *  programs" decides whether the local list is cleared or left alone. */
+  programs?: string[];
+  program_flags?: { program: string; flag_count: number }[];
   my_teams: string[];
   /** Competitions the user entered as themselves. */
   my_competitions: string[];
@@ -316,6 +323,27 @@ async function applyState(next: ServerState | null): Promise<void> {
     });
   });
 
+  // Program whitelist → Settings.allowedPrograms, same echo snapshot, same
+  // "only write when it differs" rule.
+  //
+  // GUARDED on the key being present, which the domain list above is not. An empty
+  // array means "you have no programs" and must clear the list; a MISSING key means
+  // the backend has not run the program-flags migration, and clearing a whitelist
+  // because the server is a version behind would delete work the user did by hand.
+  if (Array.isArray(next.programs)) {
+    const programs = next.programs;
+    await new Promise<void>((resolve) => {
+      chrome.storage.local.get(['focusFlowSettings', SERVER_PROGRAMS_KEY], (r) => {
+        const settings = { ...DEFAULT_SETTINGS, ...(r.focusFlowSettings as Settings) };
+        const write: Record<string, unknown> = { [SERVER_PROGRAMS_KEY]: programs };
+        if (!sameList(settings.allowedPrograms ?? [], programs)) {
+          write.focusFlowSettings = { ...settings, allowedPrograms: programs };
+        }
+        chrome.storage.local.set(write, () => resolve());
+      });
+    });
+  }
+
   // Which sections to offer — names only. Written unconditionally, including when
   // empty: leaving your last team has to remove the pill, not leave a stale one.
   chrome.storage.local.set({
@@ -335,6 +363,16 @@ async function applyState(next: ServerState | null): Promise<void> {
     if (d && typeof d.domain === 'string') tallies[d.domain] = Number(d.flag_count) || 0;
   }
   chrome.storage.local.set({ [DOMAIN_FLAGS_KEY]: tallies });
+
+  // The program tallies, same shape and same reasoning — but only when the server
+  // sent them, for the reason the whitelist above is guarded.
+  if (Array.isArray(next.program_flags)) {
+    const progTallies: Record<string, number> = {};
+    for (const p of next.program_flags) {
+      if (p && typeof p.program === 'string') progTallies[p.program] = Number(p.flag_count) || 0;
+    }
+    chrome.storage.local.set({ [PROGRAM_FLAGS_KEY]: progTallies });
+  }
 
   // The weekly flag. Defaults to available when the server said nothing, matching
   // build_state's own coalesce — a user who has never spent one holds one.
@@ -374,6 +412,40 @@ function readPendingDomains(): Promise<string[] | null> {
     chrome.storage.local.get([PENDING_DOMAINS_KEY], (r) => {
       const d = r[PENDING_DOMAINS_KEY];
       resolve(Array.isArray(d) ? (d as string[]) : null);
+    });
+  });
+}
+
+function readServerPrograms(): Promise<string[] | null> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([SERVER_PROGRAMS_KEY], (r) => {
+      const p = r[SERVER_PROGRAMS_KEY];
+      resolve(Array.isArray(p) ? (p as string[]) : null);
+    });
+  });
+}
+
+/** Queue a PROGRAM whitelist edit, exactly as queueDomains does for pages.
+ *
+ *  The list has to reach the server at all for two reasons that have nothing to do
+ *  with syncing machines: the global registry cannot list a program nobody has
+ *  reported, and a participant cannot flag one they cannot see on a profile. */
+export async function queuePrograms(programs: string[]): Promise<void> {
+  if (!isServerConfigured()) return;
+  const clean = programs.map((p) => p.trim().toLowerCase()).filter((p) => p.length > 0);
+  const known = await readServerPrograms();
+  if (known && sameList(known, clean)) return;   // an echo is not an edit
+  await new Promise<void>((resolve) => {
+    chrome.storage.local.set({ [PENDING_PROGRAMS_KEY]: clean }, () => resolve());
+  });
+  void flush();
+}
+
+function readPendingPrograms(): Promise<string[] | null> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([PENDING_PROGRAMS_KEY], (r) => {
+      const p = r[PENDING_PROGRAMS_KEY];
+      resolve(Array.isArray(p) ? (p as string[]) : null);
     });
   });
 }
@@ -426,6 +498,7 @@ export async function flush(): Promise<ServerState | null> {
   inFlight = (async () => {
     const pending = await readPending();
     const pendingDomains = await readPendingDomains();
+    const pendingPrograms = await readPendingPrograms();
     try {
       const res = await authedFetch('/rest/v1/rpc/apply_score_delta', {
         method: 'POST',
@@ -436,6 +509,7 @@ export async function flush(): Promise<ServerState | null> {
           // null, not [], when there is no edit: an empty array legitimately CLEARS
           // the whitelist, so the two must not be conflated.
           p_domains: pendingDomains,
+          p_programs: pendingPrograms,
         }),
       });
       if (!res) return null;
@@ -459,6 +533,12 @@ export async function flush(): Promise<ServerState | null> {
         const still = await readPendingDomains();
         if (still && sameList(still, pendingDomains)) {
           await new Promise<void>((r) => chrome.storage.local.remove(PENDING_DOMAINS_KEY, () => r()));
+        }
+      }
+      if (pendingPrograms) {
+        const still = await readPendingPrograms();
+        if (still && sameList(still, pendingPrograms)) {
+          await new Promise<void>((r) => chrome.storage.local.remove(PENDING_PROGRAMS_KEY, () => r()));
         }
       }
 
@@ -619,6 +699,25 @@ export interface FlagResult {
   flag_available: boolean;
 }
 
+/** A whitelisted program with the same two tallies a domain carries. */
+export interface MemberProgram {
+  program: string;
+  flag_count: number;
+  my_flags: number;
+}
+
+/** What flag_program returns. The same shape as FlagResult under different names,
+ *  deliberately not merged into one type: the two RPCs are separate functions
+ *  writing separate registries, and a single type with an optional `domain` and an
+ *  optional `program` would let a caller pass either to either. */
+export interface ProgramFlagResult {
+  program: string;
+  flag_count: number;
+  my_flags: number;
+  max_per_program: number;
+  flag_available: boolean;
+}
+
 /** A participant's detail view. `days` matches ServerDay so the popup renders it
  *  through the same code path as your own history. */
 export interface MemberProfile {
@@ -633,6 +732,9 @@ export interface MemberProfile {
   avg30_focus: number; avg30_distracted: number;
   days: ServerDay[];
   domains: MemberDomain[];
+  /** Optional for the same reason ServerState.programs is: a backend that has not
+   *  run the program-flags migration does not send it. */
+  programs?: MemberProgram[];
 }
 
 async function readRpc<T>(fn: string, body: Record<string, unknown>): Promise<T | null> {
@@ -774,6 +876,41 @@ export async function flagDomain(domain: string): Promise<FlagResult | null> {
   const res = await readRpc<FlagResult>('flag_domain', { p_domain: domain });
   if (res) chrome.storage.local.set({ [FLAG_KEY]: { available: res.flag_available } });
   return res;
+}
+
+/** Spend this week's red flag on a PROGRAM. The SAME budget flagDomain spends —
+ *  one flag a week, and it goes on whichever of the two you point it at — which is
+ *  why this also writes FLAG_KEY and why the badge greys out for both. The ceiling
+ *  of three is per program and independent of the per-domain one. */
+export async function flagProgram(program: string): Promise<ProgramFlagResult | null> {
+  const res = await readRpc<ProgramFlagResult>('flag_program', { p_program: program });
+  if (res) chrome.storage.local.set({ [FLAG_KEY]: { available: res.flag_available } });
+  return res;
+}
+
+// ── Phone pairing ─────────────────────────────────────────────────────────────
+// The server's entire involvement in the phone nudge: it carries the subscription
+// from the phone that scanned the QR back to the desktop that showed it, for at most
+// ten minutes, and forgets it on collection. Nothing about a nudge is ever sent here
+// — see src/extension/push.ts and the push_pairings migration.
+
+/** The subscription shape the phone's browser produces, as the relay stores it. */
+export interface PairedSubscription {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+
+/** Ask for a nonce to put in the pairing QR. Invalidates any earlier one this user
+ *  left outstanding, so an abandoned panel does not leave a live way in. */
+export function createPairing(): Promise<string | null> {
+  return readRpc<string>('create_pairing', {});
+}
+
+/** Collect the subscription, if the phone has answered yet. Null means "not yet" —
+ *  the desktop simply asks again. A successful call also deletes the relay row, so
+ *  the second caller of the same nonce legitimately gets null. */
+export function takePairing(nonce: string): Promise<PairedSubscription | null> {
+  return readRpc<PairedSubscription | null>('take_pairing', { p_nonce: nonce });
 }
 
  /** Read-only fetch of the full state — no delta, no write, no side effects.

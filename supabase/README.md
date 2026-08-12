@@ -87,24 +87,45 @@ was a bug; the rule was just satisfiable unilaterally. Now step two needs a secr
 needs no permission you didn't already have, and requiring the password to leave
 would strand a team whose organiser forgot it.
 
-### Profiles and domain flags
+### Profiles and flags
 
 ```
 POST /rest/v1/rpc/get_member_profile  { p_user }      read-only
 POST /rest/v1/rpc/flag_domain         { p_domain }
+POST /rest/v1/rpc/flag_program        { p_program }
 ```
 
 Tapping a participant on a leaderboard opens their live / 7-day / 30-day scores,
-their day history, and their whitelisted domains. Each domain carries a **global**
-red-flag tally — flagging `youtube.com` on one profile raises the same counter every
-other profile shows.
+their day history, their whitelisted domains **and their whitelisted programs**. Each
+target carries a **global** red-flag tally — flagging `youtube.com` on one profile
+raises the same counter every other profile shows.
+
+Domains and programs are **parallel sets of tables** (`user_domains` /
+`domain_flags` / `domain_flag_events` and `user_programs` / `program_flags` /
+`program_flag_events`), not one pair with a `kind` column. That looks like
+duplication and is deliberate: `build_state()`'s `domains` array is written straight
+into the extension's page whitelist, which is substring-matched against every URL. One
+forgotten `where kind = 'domain'` would put `code` in that list, where it matches
+vscode.dev, qrcode.com and anything else containing those four letters — silently, and
+invisibly in a diff. Separate tables make it unrepresentable.
+
+Program identifiers are normalised by `focus_program()` (trim, lower-case, drop a
+trailing `.exe`), which mirrors `normaliseProgram()` in the extension. If those two
+ever disagree, `Code.exe` and `code` become two registry rows that never join and a
+flagged program shows a tally of zero.
 
 **Two limits, doing different jobs:**
 
 | Limit | Controls | Value |
 |---|---|---|
 | Weekly budget (`user_flags`) | how often one person can flag *anything* | 1 per week |
-| Per-domain ceiling | how far one person can push *one* domain | 3, ever |
+| Per-target ceiling | how far one person can push *one* domain, or *one* program | 3, ever |
+
+The weekly budget is **shared across both kinds**: one flag a week, spent on whichever
+of a page or a program you think is the problem. `flag_domain` and `flag_program`
+contend on the same `user_flags` row, so spending it on `steam` really does mean you
+cannot also flag `youtube.com` until Monday. The ceilings are counted per target and
+are independent — three on a program does not limit what you can say about a domain.
 
 `user_flags` holds 0 or 1 per user (the check constraint is what makes "they don't
 accumulate" a property of the table). Every Monday at 01:00 local the holding is
@@ -217,6 +238,37 @@ travels with every team row so the board can be read honestly.
 > to name someone. That is a disclosure *between participants* and belongs in the
 > consent form. To anonymise, change the single `split_part` expression in
 > `20260730120000_teams.sql` to a stable pseudonym.
+
+### Phone pairing (`push_pairings`)
+
+```
+POST /rest/v1/rpc/create_pairing   {}                                    authenticated
+POST /rest/v1/rpc/claim_pairing    { p_nonce, p_subscription, p_platform }   anon
+POST /rest/v1/rpc/take_pairing     { p_nonce }                           authenticated
+```
+
+The phone nudge is sent by the participant's **own browser** straight to the push
+service — there is no Edge Function, no server-held VAPID key, and no record here that
+a notification was ever sent. The only thing the database does is carry one push
+subscription from the phone that scanned the QR to the desktop that showed it.
+
+A row lives ten minutes (`pairing_ttl()`) and `take_pairing()` **deletes the row it
+returns**, so after pairing this table is empty again.
+
+`claim_pairing` is **the one function in this schema granted to `anon`**. The phone is
+not signed in and never will be, so its 128-bit single-use nonce is the credential.
+The function is written so that holding one lets you do exactly one thing — fill in a
+subscription on a row that is fresh and unclaimed — and it cannot read a row, list
+rows, learn a `user_id`, or overwrite an existing claim. It rebuilds the stored JSON
+from three extracted fields rather than keeping what it was handed, so an
+unauthenticated caller cannot park arbitrary JSON in the column.
+
+`take_pairing` is SECURITY DEFINER, which makes its `user_id = auth.uid()` predicate
+load-bearing rather than decorative: without it, knowing any nonce would hand over that
+pairing.
+
+A push subscription is enough to send that phone notifications, which is exactly why it
+is deleted on collection rather than kept "in case the desktop asks again".
 
 ### The client has no day rollover
 
@@ -347,7 +399,19 @@ supabase/migrations/
   20260729183000_schema.sql      tables, RLS, the focus_day() boundary
   20260729183100_functions.sql   apply_score_delta, get_state, build_state, rollover
   20260729183200_cron.sql        the 01:00 rollover schedule + researcher export views
+  …                              teams, competitions, friends, flags — see the folder
+  20260812090000_program_flags.sql  the program whitelist, its registry, flag_program
+  20260812100000_push_pairing.sql   the ten-minute phone-pairing courier
 ```
+
+The last two are the newest and both change existing functions:
+`20260812090000` **drops and recreates `apply_score_delta`** with a fifth parameter
+(`p_programs`) — a defaulted parameter added alongside the old signature would make
+every existing four-argument call ambiguous to PostgREST — and rewrites
+`build_state`, `build_flags`, `get_member_profile` and `grant_weekly_flags`. Apply it
+before deploying an extension build that posts program lists; an older backend simply
+ignores the extra field, and the client is written to leave the local program list
+alone when the reply carries no `programs` key.
 
 Filenames use the Supabase `<timestamp>_<name>.sql` convention, so they apply in
 order and register correctly in the migration history. Three ways to apply them:

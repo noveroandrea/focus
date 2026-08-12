@@ -1,7 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, TelegramResult, localDateKey, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle, SPRITE_MODES, clampSpriteMode } from '../../types';
-import { FileText, Activity, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus } from 'lucide-react';
+import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, PairStart, PairedPhone, PhonePlatform, localDateKey, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle, SPRITE_MODES, clampSpriteMode } from '../../types';
+import { FileText, Activity, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus, Smartphone, X } from 'lucide-react';
+// Drawn in the popup, never fetched: the URL encoded here carries a single-use
+// pairing secret, and asking a chart service to render it would hand them the pairing.
+import qrcode from 'qrcode-generator';
+import { isPushConfigured } from '../server/config';
 import { IDLE_WARNING_MS } from '../timings';
 import '../../index.css';
 // The sections themselves — shared verbatim with the dashboard page, which composes
@@ -305,31 +309,249 @@ const AccountRow = ({ email, busy, onSignOut }: {
 );
 
 // ── Settings tab ──────────────────────────────────────────────────────────────
+// ── Phone pairing ─────────────────────────────────────────────────────────────
+// A QR code, and the question that has to come before it.
+//
+// The two platforms need genuinely different instructions — Android subscribes from a
+// browser tab in two taps, iOS refuses until the page has been added to the Home
+// Screen and opened from there — so asking WHICH PHONE first is not a preamble to
+// skip. Showing both sets of steps at once is worse than one question: four of the
+// six iOS steps are meaningless on Android and would read as things the user had
+// failed to do.
+//
+// Everything here is a thin shell over the background, which owns the VAPID keypair
+// and the paired devices. This component holds only what is on screen right now.
+const PhonePairing = () => {
+  const [phones, setPhones] = useState<PairedPhone[]>([]);
+  const [platform, setPlatform] = useState<PhonePlatform | null>(null);
+  const [pair, setPair] = useState<PairStart | null>(null);
+  const [expiresAt, setExpiresAt] = useState(0);
+  const [now, setNow] = useState(Date.now());
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = () =>
+    chrome.runtime.sendMessage({ type: 'PUSH_LIST' }, (res?: PairedPhone[]) => {
+      void chrome.runtime.lastError;
+      if (Array.isArray(res)) setPhones(res);
+    });
+
+  useEffect(() => { refresh(); }, []);
+
+  // One ticker for both jobs while a QR is up: counting it down, and asking whether
+  // the phone has answered. Two seconds is fast enough that the ✓ feels immediate and
+  // slow enough that an abandoned panel is not a request per second forever.
+  useEffect(() => {
+    if (!pair?.nonce || !platform) return;
+    const t = setInterval(() => {
+      setNow(Date.now());
+      chrome.runtime.sendMessage(
+        { type: 'PUSH_PAIR_POLL', nonce: pair.nonce, platform },
+        (res?: { ok: boolean; delivered?: number }) => {
+          void chrome.runtime.lastError;
+          if (!res?.ok) return;
+          setPair(null);
+          setPlatform(null);
+          refresh();
+          setNote(res.delivered
+            ? { ok: true, text: 'Paired — your phone should have just buzzed.' }
+            : { ok: false, text: 'Paired, but the test notification did not go through. Try Send test.' });
+        },
+      );
+    }, 2000);
+    return () => clearInterval(t);
+  }, [pair?.nonce, platform]);
+
+  const start = (p: PhonePlatform) => {
+    setPlatform(p);
+    setNote(null);
+    setBusy(true);
+    chrome.runtime.sendMessage({ type: 'PUSH_PAIR_START', platform: p }, (res?: PairStart) => {
+      void chrome.runtime.lastError;
+      setBusy(false);
+      if (!res?.ok) {
+        setPlatform(null);
+        setNote({ ok: false, text: res?.error ?? 'Could not start pairing.' });
+        return;
+      }
+      setPair(res);
+      setExpiresAt(Date.now() + (res.ttlMs ?? 0));
+      setNow(Date.now());
+    });
+  };
+
+  const forget = (endpoint: string) =>
+    chrome.runtime.sendMessage({ type: 'PUSH_FORGET', endpoint }, () => {
+      void chrome.runtime.lastError;
+      refresh();
+    });
+
+  const test = () => {
+    setBusy(true);
+    setNote(null);
+    chrome.runtime.sendMessage({ type: 'PUSH_TEST' }, (res?: { ok: boolean; delivered?: number }) => {
+      void chrome.runtime.lastError;
+      setBusy(false);
+      setNote(res?.ok
+        ? { ok: true, text: 'Sent — your phone should have buzzed.' }
+        : { ok: false, text: 'Nothing was delivered. The subscription may have expired; pair again.' });
+    });
+  };
+
+  // The QR is drawn locally rather than fetched from a chart service: the URL in it
+  // contains a single-use pairing secret, and posting that to a third party to have a
+  // picture drawn would hand them the pairing.
+  const qr = React.useMemo(() => {
+    if (!pair?.url) return '';
+    const code = qrcode(0, 'M');
+    code.addData(pair.url);
+    code.make();
+    return code.createDataURL(4, 2);
+  }, [pair?.url]);
+
+  const secondsLeft = Math.max(0, Math.ceil((expiresAt - now) / 1000));
+
+  // Said before the buttons rather than after pressing one. Pairing needs a page the
+  // phone can open, and a build without one cannot be fixed from in here — so this is
+  // an instruction to whoever built it, not an error the user did something to cause.
+  if (!isPushConfigured()) {
+    return (
+      <p className="rounded-lg bg-amber-50 px-2 py-1.5 text-[9px] leading-relaxed text-amber-700">
+        No pairing page is set up in this build. Deploy <span className="font-mono">web/</span> to
+        any HTTPS host and put its address in <span className="font-mono">PUSH_LANDING_URL</span>{' '}
+        (<span className="font-mono">src/extension/server/config.ts</span>) — see{' '}
+        <span className="font-mono">web/README.md</span>.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {phones.length > 0 && (
+        <div className="space-y-1 rounded-xl border border-slate-100 p-1">
+          {phones.map((ph) => (
+            <div key={ph.endpoint} className="flex items-center gap-2 px-1.5 py-1">
+              <Smartphone size={12} className="flex-shrink-0 text-slate-400" />
+              <span className="min-w-0 flex-1 truncate text-[11px] text-slate-600">
+                {ph.platform === 'ios' ? 'iPhone' : ph.platform === 'android' ? 'Android phone' : 'Phone'}
+                <span className="ml-1 text-[9px] text-slate-400">
+                  paired {new Date(ph.addedAt).toLocaleDateString()}
+                </span>
+              </span>
+              <button
+                onClick={() => forget(ph.endpoint)}
+                title="Stop sending nudges to this phone"
+                className="flex-shrink-0 cursor-pointer text-slate-300 transition-colors hover:text-red-500"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+          <button
+            onClick={test}
+            disabled={busy}
+            title="Send one now — the only way to know your phone is set to vibrate for it"
+            className="w-full cursor-pointer rounded-lg bg-blue-500 px-2 py-1.5 text-[10px] font-bold text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Send test buzz
+          </button>
+        </div>
+      )}
+
+      {/* The question, before the QR. */}
+      {!pair && (
+        <div className="space-y-1">
+          <p className="text-[10px] text-slate-500">
+            {phones.length ? 'Pair another phone — which is it?' : 'Which phone do you want to pair?'}
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => start('android')}
+              disabled={busy}
+              className="flex-1 cursor-pointer rounded-lg bg-slate-100 px-2 py-2 text-[11px] font-bold text-slate-600 transition-colors hover:bg-slate-200 disabled:opacity-50"
+            >
+              Android
+            </button>
+            <button
+              onClick={() => start('ios')}
+              disabled={busy}
+              className="flex-1 cursor-pointer rounded-lg bg-slate-100 px-2 py-2 text-[11px] font-bold text-slate-600 transition-colors hover:bg-slate-200 disabled:opacity-50"
+            >
+              iPhone
+            </button>
+          </div>
+        </div>
+      )}
+
+      {pair?.url && (
+        <div className="space-y-2 rounded-xl bg-slate-50 p-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              {platform === 'ios' ? 'iPhone' : 'Android'} — scan this
+            </span>
+            <span className="text-[10px] tabular-nums text-slate-400">
+              {secondsLeft > 0
+                ? `${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}`
+                : 'expired'}
+            </span>
+          </div>
+
+          {secondsLeft > 0 ? (
+            <img src={qr} alt="Pairing QR code" className="mx-auto block w-40 rounded-lg bg-white p-1" />
+          ) : (
+            <p className="py-4 text-center text-[10px] text-slate-400">
+              This code has expired — pick your phone again for a new one.
+            </p>
+          )}
+
+          {/* The steps for the phone they said they had, and only those. */}
+          <ol className="list-inside list-decimal space-y-0.5 text-[10px] leading-snug text-slate-500">
+            {platform === 'ios' ? (
+              <>
+                <li>Scan it with the Camera app and open the link.</li>
+                <li>Tap <strong>Share</strong> → <strong>Add to Home Screen</strong> → <strong>Add</strong>.</li>
+                <li>Open the new <strong>Focus</strong> icon.</li>
+                <li>Tap <strong>Turn on notifications</strong>, then <strong>Allow</strong>.</li>
+              </>
+            ) : (
+              <>
+                <li>Scan it with the Camera app and open the link.</li>
+                <li>Tap <strong>Turn on notifications</strong>, then <strong>Allow</strong>.</li>
+              </>
+            )}
+          </ol>
+
+          {platform === 'ios' && (
+            <p className="text-[9px] leading-snug text-slate-400">
+              iPhones only allow notifications for web apps added to the Home Screen. It is
+              four extra taps, once.
+            </p>
+          )}
+
+          <button
+            onClick={() => { setPair(null); setPlatform(null); }}
+            className="w-full cursor-pointer rounded-lg bg-slate-200 px-2 py-1 text-[10px] font-bold text-slate-600 hover:bg-slate-300"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {note && (
+        <p className={`text-[10px] leading-snug ${note.ok ? 'text-green-600' : 'text-red-500'}`}>
+          {note.text}
+        </p>
+      )}
+    </div>
+  );
+};
+
 const SettingsTab = ({ settings, onChange }: {
   settings: Settings;
   onChange: (s: Settings) => void;
 }) => {
   const [companionInfoOpen, setCompanionInfoOpen] = useState(false);
-  // The two Telegram buttons are the only settings controls that talk to the outside
-  // world, so they are the only ones that can be in progress or come back wrong.
-  const [tgBusy, setTgBusy] = useState<'' | 'link' | 'test'>('');
-  const [tgNote, setTgNote] = useState<{ ok: boolean; text: string } | null>(null);
-
   const set = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
-
-  const askTelegram = (type: 'TELEGRAM_LINK' | 'TELEGRAM_TEST') => {
-    setTgBusy(type === 'TELEGRAM_LINK' ? 'link' : 'test');
-    setTgNote(null);
-    chrome.runtime.sendMessage({ type }, (res?: TelegramResult) => {
-      setTgBusy('');
-      if (chrome.runtime.lastError || !res) { setTgNote({ ok: false, text: 'No answer from the extension' }); return; }
-      if (!res.ok) { setTgNote({ ok: false, text: res.error ?? 'Failed' }); return; }
-      // Saving the id found is the entire point of Find — leaving the user to copy a
-      // number out of a status line would be a worse version of typing it in.
-      if (res.chatId) set({ telegramChatId: res.chatId });
-      setTgNote({ ok: true, text: res.chatId ? `Linked to chat ${res.chatId}` : 'Sent — your phone should have buzzed' });
-    });
-  };
 
   return (
     <div className="space-y-5 text-sm">
@@ -707,9 +929,7 @@ const SettingsTab = ({ settings, onChange }: {
         </p>
       </section>
 
-      {/* Phone nudge. Last, because it is the only feature that leaves the machine —
-          and the only one where the useful control is a Test button rather than a
-          value, since whether the phone actually buzzes is the phone's business. */}
+      {/* Phone nudge. Last, because it is the only feature that leaves the machine. */}
       <section className="space-y-2">
         <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Phone nudge</h3>
 
@@ -717,89 +937,25 @@ const SettingsTab = ({ settings, onChange }: {
           <span className="text-[11px] text-slate-600 leading-tight">
             Buzz my phone when I go idle<br />
             <span className="text-[10px] text-slate-400">
-              a Telegram message the moment the {Math.round(IDLE_WARNING_MS / 1000)}s warning starts
+              a notification the moment the {Math.round(IDLE_WARNING_MS / 1000)}s warning starts
             </span>
           </span>
           <div
-            onClick={() => set({ telegramEnabled: !settings.telegramEnabled })}
-            className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.telegramEnabled ? 'bg-blue-500' : 'bg-slate-300'}`}
+            onClick={() => set({ pushEnabled: !settings.pushEnabled })}
+            className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.pushEnabled ? 'bg-blue-500' : 'bg-slate-300'}`}
           >
-            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.telegramEnabled ? 'translate-x-5' : ''}`} />
+            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.pushEnabled ? 'translate-x-5' : ''}`} />
           </div>
         </div>
 
-        {settings.telegramEnabled && (
-          <>
-            <p className="text-[9px] text-slate-400 leading-snug">
-              The screen can't help with the one thing it's for — you've stopped looking at it.
-              Setup, once: message <strong>@BotFather</strong> in Telegram, send <code>/newbot</code>,
-              paste the token it gives you below, then open your new bot, say anything to it and
-              press <strong>Find</strong>.
-            </p>
+        {settings.pushEnabled && <PhonePairing />}
 
-            <label className="flex items-center justify-between gap-3">
-              <span className="text-[11px] text-slate-600 leading-tight">
-                Bot token<br />
-                <span className="text-[10px] text-slate-400">from @BotFather</span>
-              </span>
-              <input
-                type="password"
-                value={settings.telegramToken ?? ''}
-                onChange={e => set({ telegramToken: e.target.value })}
-                className="w-40 text-right text-[12px] border border-slate-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-300"
-                placeholder="123456:ABC-…"
-              />
-            </label>
-
-            <label className="flex items-center justify-between gap-3">
-              <span className="text-[11px] text-slate-600 leading-tight">
-                Chat<br />
-                <span className="text-[10px] text-slate-400">found for you — no need to type it</span>
-              </span>
-              <input
-                type="text"
-                value={settings.telegramChatId ?? ''}
-                onChange={e => set({ telegramChatId: e.target.value })}
-                className="w-40 text-right text-[12px] border border-slate-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-300"
-                placeholder="(press Find)"
-              />
-            </label>
-
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => askTelegram('TELEGRAM_LINK')}
-                disabled={tgBusy !== '' || !settings.telegramToken?.trim()}
-                title="Read the chat id from your bot's own inbox — say anything to the bot first"
-                className="flex-1 cursor-pointer rounded-lg bg-slate-100 px-2 py-1.5 text-[10px] font-bold text-slate-600 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {tgBusy === 'link' ? 'Looking…' : 'Find my chat'}
-              </button>
-              <button
-                onClick={() => askTelegram('TELEGRAM_TEST')}
-                disabled={tgBusy !== '' || !settings.telegramToken?.trim() || !settings.telegramChatId?.trim()}
-                title="Send one now — the only way to know your phone is set to vibrate for it"
-                className="flex-1 cursor-pointer rounded-lg bg-blue-500 px-2 py-1.5 text-[10px] font-bold text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {tgBusy === 'test' ? 'Sending…' : 'Send test buzz'}
-              </button>
-            </div>
-
-            {tgNote && (
-              <p className={`text-[10px] leading-snug ${tgNote.ok ? 'text-green-600' : 'text-red-500'}`}>
-                {tgNote.text}
-              </p>
-            )}
-
-            <p className="text-[9px] text-slate-400 leading-snug">
-              At most one every 5 minutes — a buzz per lapse is a phone you'd silence by lunchtime.
-              The message names no page and no program, but it does tell Telegram's servers when you
-              drift: this is the only thing Focus sends anywhere other than its own backend.
-              Vibration itself is your phone's setting for that chat.
-            </p>
-          </>
-        )}
+        <p className="text-[9px] text-slate-400 leading-snug">
+          At most one nudge every 5 minutes — a buzz per lapse is a phone you'd silence by
+          lunchtime. The message names no page and no program, and it goes from this browser
+          straight to your phone: nothing about it reaches any server.
+        </p>
       </section>
-
     </div>
   );
 };

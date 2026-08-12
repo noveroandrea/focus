@@ -25,7 +25,7 @@ on your machine. An **optional** local AI helper (Ollama) can auto-detect study 
 - [The sprite](#the-sprite)
 - [The popup menu](#the-popup-menu)
 - [Floating companion](#floating-companion)
-- [Phone nudge (Telegram)](#phone-nudge-telegram)
+- [Phone nudge](#phone-nudge)
 - [Desktop agent (Windows, macOS, Linux)](#desktop-agent-windows-macos-linux)
   - [Run it](#run-it)
   - [How the extension uses it](#how-the-extension-uses-it)
@@ -623,42 +623,63 @@ the agent.
 
 ---
 
-## Phone nudge (Telegram)
+## Phone nudge
 
-Everything else Focus does needs you to be looking at the screen — and the one failure it
-exists to catch is that you have stopped. The beep needs the volume up and the room quiet;
-the trembling character needs your eyes on it. A phone in your pocket needs neither.
+Everything else Focus does needs you to be looking at the screen — and the one failure
+it exists to catch is that you have stopped. The beep needs the volume up and the room
+quiet; the trembling character needs your eyes on it. A phone in your pocket needs
+neither.
 
-Switch on **Phone nudge** in Settings and Focus sends one Telegram message the moment the
-5-second warning starts — while there is still time to come back before anything is lost.
-Whether that makes the phone vibrate is your phone's setting for that chat, which is why
-there is a **Send test buzz** button: it is the only honest way to find out.
+Switch it on in Settings and Focus sends **one notification the moment the 5-second
+warning starts** — while there is still time to come back before anything is lost. It
+arrives on a locked phone with the app closed, because it rides the same push channel
+native apps use.
 
-**Setup, once (about a minute):**
+### Pair a phone (one QR)
 
-1. In Telegram, message **@BotFather** and send `/newbot`. Answer its two questions.
-2. Copy the token it gives you (`123456:ABC-…`) into **Bot token** in Settings.
-3. Open your new bot and **send it anything** — a full stop will do. A bot cannot message
-   you first; this is what opens the conversation.
-4. Press **Find my chat**, then **Send test buzz**.
+Settings → **Phone nudge** asks **which phone you have** before showing anything else,
+because the two are genuinely different — then shows a QR code and the steps for that
+one:
 
-**At most one nudge every 5 minutes.** Not adjustable, and not an oversight: the warning
-starts every time you look away for `idleTime`, which on an ordinary afternoon is dozens of
-times an hour. A buzz per lapse is not a nudge — it is a phone you would silence by
-lunchtime, which costs the feature the whole point.
+| | Android | iPhone |
+|---|---|---|
+| Scan the QR, open the link | ✔ | ✔ |
+| Add to Home Screen, open the icon | — | **required** |
+| Tap *Turn on notifications* → *Allow* | ✔ | ✔ |
+| **Taps in total** | **2** | ~6 |
 
-**Why Telegram and not a proper push notification.** Web Push would need a hosted page,
-VAPID keys and a PWA the user installs; a real app would need an iOS build. Telegram needs a
-bot token and one HTTPS POST, and works identically on Android and iOS with an app most
-people already have. If you would rather self-host, `buzzPhone()` in
-`src/extension/background.ts` is one `fetch` — ntfy, Gotify and Home Assistant are the same
-shape and roughly the same five lines.
+The iPhone install step cannot be shortened or scripted: Apple exposes web
+notifications only to web apps launched from the Home Screen, and Safari offers no
+programmatic install. It is four extra taps, once.
 
-> **This is the only thing Focus sends anywhere other than its own backend.** The message
-> names no page and no program, but the *timing* of these messages is itself a record of
-> when you drift, and it lands on Telegram's servers. That is why the feature is off by
-> default. Anyone running the study should say so in the consent form, or use a self-hosted
-> target instead.
+Your computer sends a test notification the instant pairing completes — which is the
+only honest way to find out whether the phone is set to vibrate for it, since that is
+the phone's setting and nothing here can read it.
+
+### Where the notification actually comes from
+
+**Your own browser, straight to your phone.** The extension generates its own VAPID
+signing key on your machine, encrypts each message so that only your phone can read it
+(RFC 8291), and posts it to the push service. Google and Apple relay bytes they cannot
+decrypt.
+
+The server's entire involvement is a **ten-minute courier**: it carries the
+subscription from the phone that scanned the QR to the computer that showed it, and
+deletes the row the moment your computer collects it. No notification ever passes
+through it, and there is no record anywhere of when you drift — which is the whole
+reason it is built this way rather than as a normal push backend.
+
+Setting it up means publishing one small static page (`web/`) — five files, no build
+step. GitHub Pages takes two commands and a checkbox; see
+[`web/README.md`](web/README.md). Until it is published and its address is in
+`PUSH_LANDING_URL`, the popup says so rather than showing a QR that leads nowhere.
+
+### At most one nudge every 5 minutes
+
+Not adjustable, and not an oversight: the warning starts every time you look away for
+`idleTime`, which on an ordinary afternoon is dozens of times an hour. A buzz per lapse
+is not a nudge — it is a phone you would silence by lunchtime, which costs the feature
+the whole point.
 
 ---
 
@@ -863,6 +884,7 @@ focus/
 │   ├── types.ts           # shared types + constants (SessionState, Settings, MessageType)
 │   ├── extension/         # everything that ships in the extension  ← see src/extension/README.md
 │   │   ├── background.ts   # service worker — single source of truth
+│   │   ├── push.ts         # Web Push: per-install VAPID key, encryption, sending
 │   │   ├── content/        # content scripts injected into pages    ← see content/README.md
 │   │   │   ├── heartbeat.ts # activity detection + AI classify card
 │   │   │   └── sprite.ts    # the animated companion (roaming / fixed / panel)
@@ -876,6 +898,10 @@ focus/
 │   │   └── SpriteSimulation.tsx
 │   ├── App.tsx / main.tsx # mount the demo for `npm run dev`
 │   └── index.css          # Tailwind entry (popup + demo only)
+├── web/                   # the phone-pairing web app (deploy to any HTTPS host)  ← see web/README.md
+│   ├── index.html          # Android-or-iPhone, then the steps for that one
+│   ├── app.js              # subscribe, then hand the subscription back
+│   └── sw.js               # the service worker that draws the notification
 ├── desktop/               # the foreground-program agent — its OWN npm package  ← see desktop/README.md
 │   ├── src/foreground.ts  # per-OS: which program is in front. Nothing else.
 │   ├── src/index.ts       # the loopback HTTP endpoint the extension polls
@@ -891,6 +917,7 @@ Each meaningful folder has its own `README.md` describing the modules inside it:
 - [`src/extension/popup/README.md`](src/extension/popup/README.md) — the popup UI
 - [`src/components/README.md`](src/components/README.md) — the local demo
 - [`desktop/README.md`](desktop/README.md) — the foreground-program agent
+- [`web/README.md`](web/README.md) — the phone-pairing page and how to deploy it
 
 The agent **shares no code with the extension** and deliberately knows nothing about
 heartbeats, whitelists or scoring — it reports a program name over loopback and the
@@ -965,10 +992,11 @@ The build in `dist/` is a valid MV3 extension. Before submitting:
   (and your API key is sent to it as a Bearer token); nothing is sent anywhere else. The
   feature is off unless a backend is reachable.
 - The optional **phone nudge** sends a fixed message ("you have gone idle") to **your own
-  Telegram bot**, at most once every 5 minutes, and only while it is switched on. No page,
-  no program and no score is included — but the timing tells Telegram's servers when you go
-  idle, which is why it is off by default and why it is the only feature that talks to
-  anything other than the AI address and the sync backend you configure.
+  phone**, at most once every 5 minutes. It goes from your browser to your phone's push
+  service and nowhere else: the notification is encrypted so that only your phone can read
+  it, and **no server involved in Focus ever learns that one was sent**. The pairing QR
+  puts a subscription on the server for at most ten minutes, and it is deleted the moment
+  your computer collects it.
 - Console logs are prefixed `Focus:`. Inspect the service worker from
   `chrome://extensions` → Focus → **Service Worker**.
 

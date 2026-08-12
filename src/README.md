@@ -10,6 +10,7 @@ src/
 ├── index.css         # Tailwind entry (popup + dev demo only; content scripts use inline styles)
 ├── extension/        # the actual extension → see extension/README.md
 │   ├── background.ts  # service worker (single source of truth)
+│   ├── push.ts        # Web Push to the user's phone — VAPID key, encryption, sending
 │   ├── content/       # scripts injected into web pages → content/README.md
 │   └── popup/         # toolbar popup UI → popup/README.md
 ├── components/       # standalone sprite demo → components/README.md

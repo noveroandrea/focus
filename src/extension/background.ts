@@ -1,7 +1,7 @@
-import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, TelegramResult, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, clampIdleTime, round2 } from '../types';
+import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, PairStart, PairedPhone, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, clampIdleTime, round2 } from '../types';
 import {
   STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS, WORKING_FRESH_MS,
-  IDLE_PENALTY, IDLE_WARNING_MS, TELEGRAM_COOLDOWN_MS,
+  IDLE_PENALTY, IDLE_WARNING_MS, NUDGE_COOLDOWN_MS, PAIRING_TTL_MS,
   idlePenaltyDelayMs, autoPauseDelayMs,
 } from './timings';
 // Every heartbeat source — page input, focused PDF/viewer tabs, OS-wide activity —
@@ -13,14 +13,20 @@ import {
 // Optional Supabase sync. Every call is a no-op until config.ts is filled in AND
 // the user has signed in, so the extension is fully functional without a server.
 import {
-  initSync, queueDelta, queueDomains, flush, getCachedSummary,
-  joinTeam, leaveTeam, enrollTeam, leaveCompetition, fetchMemberProfile, flagDomain,
+  initSync, queueDelta, queueDomains, queuePrograms, flush, getCachedSummary,
+  createPairing, takePairing,
+  joinTeam, leaveTeam, enrollTeam, leaveCompetition, fetchMemberProfile, flagDomain, flagProgram,
   joinCompetition, leaveCompetitionSolo,
   fetchTeamBoard, fetchCompetitionBoard, fetchMyDays, fetchTeamDays, fetchFriendsDays,
   fetchFriendsBoard, searchUsers, sendFriendRequest, respondFriendRequest, removeFriend,
 } from './server/sync';
 import { signIn, signOut, getSession } from './server/auth';
-import { isServerConfigured } from './server/config';
+import { isServerConfigured, isPushConfigured, PUSH_LANDING_URL } from './server/config';
+// Web Push: the VAPID keypair, the paired phones and the sender. Entirely local —
+// the server's only part in this is carrying a subscription across during pairing.
+import {
+  publicKeyB64, listSubscriptions, addSubscription, removeSubscription, sendPush,
+} from './push';
 // The optional desktop agent — reports which PROGRAM is in front. Purely a sensor:
 // every decision about what that means lives in ./heartbeats.
 import {
@@ -167,6 +173,11 @@ function saveSettings(next: Settings) {
   // Only whitelisted programs may keep their display name on disk.
   if ((prev.allowedPrograms ?? []).join('\n') !== (settings.allowedPrograms ?? []).join('\n')) {
     setNamedPrograms(settings.allowedPrograms ?? []);
+    // And the list itself goes to the server, for the same reason the domains do:
+    // the global registry cannot list a program nobody has reported, so nobody could
+    // flag it. Same self-write problem as the whitelist above — see this function's
+    // header — so it is queued here rather than from the storage listener.
+    void queuePrograms(settings.allowedPrograms ?? []);
   }
 }
 
@@ -347,56 +358,18 @@ async function openCompanion(extra: boolean) {
 // of the 5-second warning rather than at the penalty: there is still time to come back
 // before anything is lost.
 //
-// Telegram, and not Web Push or an app of our own, because it is the only route that
-// costs nothing to build, needs nothing installed on the desktop, nothing hosted, no
-// keys to rotate and — decisively — no iOS build. It is one HTTPS POST from here.
-// Whether it actually buzzes is the phone's business (Telegram's per-chat notification
-// settings), which is exactly why the popup has a Test button: that is the only honest
-// way to find out.
-//
-// It is off by default, and the message names NO page and NO program. This is the only
-// thing the extension sends anywhere other than its own backend, and the timing of
-// these messages is itself a record of when the user drifts — so the payload is kept
-// to the one fact the user asked to be told.
-const TELEGRAM_API = 'https://api.telegram.org';
-/** Last nudge, in storage rather than a module variable — see TELEGRAM_COOLDOWN_MS. */
-const TELEGRAM_LAST_KEY = 'focusTelegramAt';
-let telegramLastAt = 0;
-
-function telegramConfigured(): boolean {
-  return settings.telegramEnabled === true
-    && !!settings.telegramToken?.trim()
-    && !!settings.telegramChatId?.trim();
-}
-
-/** POST one Telegram method, and turn every way it can fail into one shape. Telegram
- *  answers 200 with `ok: false` for most real errors (bad token, unknown chat), so the
- *  HTTP status alone proves nothing and the body has to be read either way. */
-async function telegramCall(method: string, body: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
-  const token = settings.telegramToken?.trim();
-  if (!token) return { ok: false, error: 'No bot token' };
-  try {
-    const r = await fetch(`${TELEGRAM_API}/bot${token}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await r.json().catch(() => null) as { ok?: boolean; result?: unknown; description?: string } | null;
-    if (!data) return { ok: false, error: `HTTP ${r.status}` };
-    if (!data.ok) return { ok: false, error: data.description || `HTTP ${r.status}` };
-    return { ok: true, result: data.result };
-  } catch {
-    // No network, or Telegram unreachable. A missed nudge is a missed nudge; nothing
-    // else in the session depends on it, so it is never retried or queued.
-    return { ok: false, error: 'Could not reach Telegram' };
-  }
-}
+// The sending itself is in ./push — a VAPID-signed, encrypted POST straight from this
+// worker to the phone's push service. Nothing here goes through a server, so no record
+// of a nudge exists anywhere; what lives in THIS file is only when one is allowed.
+/** Last nudge, in storage rather than a module variable — see NUDGE_COOLDOWN_MS. */
+const NUDGE_LAST_KEY = 'focusNudgeAt';
+let nudgeLastAt = 0;
 
 /** Fire the nudge, if everything about the moment says it should be fired. Called from
  *  writeState on the active→idle edge, which is the same instant the sprite starts its
  *  warning — one edge, one definition, no second timer to drift from it. */
 function buzzPhone(): void {
-  if (!settings.enabled || settings.forceActive || !telegramConfigured()) return;
+  if (!settings.enabled || settings.forceActive || settings.pushEnabled === false) return;
   const now = Date.now();
   // Only a real lapse. The idle flag is cleared by things that are not one — the
   // popup's "remove this domain" drops it outright, mid-click — and a phone that
@@ -406,25 +379,23 @@ function buzzPhone(): void {
   // whole idleTime has passed with no input, so that is the test, and it needs no
   // second flag to be kept in step with them.
   if (now - state.lastHeartbeat < clampIdleTime(settings.idleTime) * 1000 - 500) return;
-  if (now - telegramLastAt < TELEGRAM_COOLDOWN_MS) return;
-  telegramLastAt = now;
-  chrome.storage.local.set({ [TELEGRAM_LAST_KEY]: now });
-  void telegramCall('sendMessage', {
-    chat_id: settings.telegramChatId.trim(),
-    text: `⏳ Focus — you have gone idle. ${Math.round(IDLE_WARNING_MS / 1000)}s to come back before it counts against you.`,
-    // Explicit, because the default is what a silent notification would use and this
-    // message exists ONLY to make a noise in a pocket.
-    disable_notification: false,
-  });
+  if (now - nudgeLastAt < NUDGE_COOLDOWN_MS) return;
+  nudgeLastAt = now;
+  chrome.storage.local.set({ [NUDGE_LAST_KEY]: now });
+
+  // Fire-and-forget: with no phone paired this returns immediately, and a nudge that
+  // fails is never retried — it is only worth delivering inside the few seconds the
+  // warning lasts.
+  void sendPush('⏳ Focus', `You have gone idle. ${Math.round(IDLE_WARNING_MS / 1000)}s to come back before it counts against you.`);
 }
 
 // ── Init from storage ─────────────────────────────────────────────────────────
-chrome.storage.local.get(['focusFlowState', 'focusFlowSettings', TELEGRAM_LAST_KEY], (result) => {
+chrome.storage.local.get(['focusFlowState', 'focusFlowSettings', NUDGE_LAST_KEY], (result) => {
   // Left behind by a version that tried to detect a broken chrome.idle at runtime.
   chrome.storage.local.remove('idleApiProven');
   // A revived worker has forgotten when it last nudged, and the gap it has forgotten
   // is exactly the one where the user was away long enough to be dropped.
-  if (typeof result[TELEGRAM_LAST_KEY] === 'number') telegramLastAt = result[TELEGRAM_LAST_KEY];
+  if (typeof result[NUDGE_LAST_KEY] === 'number') nudgeLastAt = result[NUDGE_LAST_KEY];
   if (result.focusFlowState) {
     state = { ...state, ...(result.focusFlowState as SessionState) };
   }
@@ -460,6 +431,7 @@ chrome.runtime.onStartup.addListener(() => { void flush(); });
 chrome.runtime.onInstalled.addListener(() => {
   void flush();
   void queueDomains(settings.allowedDomains);
+  void queuePrograms(settings.allowedPrograms ?? []);
 });
 
 // Pick up settings changes written directly by the popup.
@@ -514,6 +486,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
     // Only whitelisted programs get their display name written to disk.
     setNamedPrograms(settings.allowedPrograms ?? []);
+    if ((prev.allowedPrograms ?? []).join('\n') !== (settings.allowedPrograms ?? []).join('\n')) {
+      void queuePrograms(settings.allowedPrograms ?? []);
+    }
   }
 });
 
@@ -863,42 +838,72 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       break;
     }
 
-    // Read the chat id off the bot's own inbox. Nobody knows their own chat id and
-    // there is no way to look it up in the app, so the alternative is telling people
-    // to message a third-party "id bot" — which means handing a stranger's bot the
-    // first message of the setup. One getUpdates on their own bot is the whole answer.
-    case 'TELEGRAM_LINK': {
-      void telegramCall('getUpdates', { limit: 10, timeout: 0 }).then((r) => {
-        if (!r.ok) { sendResponse({ ok: false, error: r.error } satisfies TelegramResult); return; }
-        const updates = Array.isArray(r.result) ? r.result : [];
-        // The most recent chat that has said anything, so a user who has been talking
-        // to their bot for other reasons still lands on the conversation they just used.
-        let chatId = '';
-        for (const u of updates) {
-          const chat = (u as { message?: { chat?: { id?: number | string } } })?.message?.chat;
-          if (chat?.id != null) chatId = String(chat.id);
-        }
-        if (!chatId) {
-          sendResponse({
-            ok: false,
-            error: 'No message yet — open the bot in Telegram, send it anything, then press Find again',
-          } satisfies TelegramResult);
+    // ── Phone pairing ────────────────────────────────────────────────────────
+    // The QR carries two things and only two: a one-use nonce, and this install's
+    // VAPID public key. The key has to travel because the phone subscribes AGAINST
+    // it — a subscription is bound to the sender's key, and one minted for anybody
+    // else's would refuse every push this browser ever sent.
+    case 'PUSH_PAIR_START': {
+      void (async () => {
+        if (!isPushConfigured()) {
+          sendResponse({ ok: false, error: 'No pairing page is configured — see web/README.md' } satisfies PairStart);
           return;
         }
-        sendResponse({ ok: true, chatId } satisfies TelegramResult);
-      });
+        const nonce = await createPairing();
+        if (!nonce) {
+          sendResponse({ ok: false, error: 'Sign in first — pairing goes through your account' } satisfies PairStart);
+          return;
+        }
+        const key = await publicKeyB64();
+        // A query parameter, NOT a fragment. On iOS the page has to be added to the
+        // Home Screen before it may subscribe at all, and Safari saves the URL it is
+        // looking at — a fragment is the part most likely to be dropped along the
+        // way, and losing it would strand the user inside an installed app with no
+        // idea which pairing it belonged to.
+        const url = `${PUSH_LANDING_URL.replace(/\/+$/, '')}/?p=${encodeURIComponent(`${nonce}.${key}`)}`;
+        sendResponse({ ok: true, nonce, url, ttlMs: PAIRING_TTL_MS } satisfies PairStart);
+      })();
       break;
     }
 
-    // The only way to learn whether the phone will actually buzz: Telegram's per-chat
-    // notification settings are the phone's business, not ours, and a nudge that
-    // arrives silently is indistinguishable from one that never arrived.
-    case 'TELEGRAM_TEST': {
-      void telegramCall('sendMessage', {
-        chat_id: settings.telegramChatId?.trim(),
-        text: '✅ Focus — this is what an idle nudge will feel like.',
-        disable_notification: false,
-      }).then((r) => sendResponse({ ok: r.ok, error: r.error } satisfies TelegramResult));
+    case 'PUSH_PAIR_POLL': {
+      void (async () => {
+        const sub = await takePairing(message.nonce);
+        if (!sub?.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) {
+          sendResponse({ ok: false });   // not yet — the popup simply asks again
+          return;
+        }
+        await addSubscription({
+          endpoint: sub.endpoint,
+          p256dh: sub.keys.p256dh,
+          auth: sub.keys.auth,
+          platform: message.platform,
+          addedAt: Date.now(),
+        });
+        // Straight away, and from here rather than from the popup: this is the moment
+        // the user is holding the phone and looking at it, which is the only moment a
+        // "did it vibrate?" answer is worth anything.
+        const delivered = await sendPush('✅ Focus', 'Paired. This is what an idle nudge will feel like.');
+        sendResponse({ ok: true, delivered });
+      })();
+      break;
+    }
+
+    case 'PUSH_LIST': {
+      void listSubscriptions().then((subs) => sendResponse(
+        subs.map((s): PairedPhone => ({ endpoint: s.endpoint, platform: s.platform, addedAt: s.addedAt })),
+      ));
+      break;
+    }
+
+    case 'PUSH_FORGET': {
+      void removeSubscription(message.endpoint).then(() => sendResponse({ ok: true }));
+      break;
+    }
+
+    case 'PUSH_TEST': {
+      void sendPush('✅ Focus', 'This is what an idle nudge will feel like.')
+        .then((delivered) => sendResponse({ ok: delivered > 0, delivered }));
       break;
     }
 
@@ -1137,6 +1142,10 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
 
     case 'SERVER_FLAG_DOMAIN':
       flagDomain(message.domain).then(sendResponse);
+      break;
+
+    case 'SERVER_FLAG_PROGRAM':
+      flagProgram(message.program).then(sendResponse);
       break;
   }
   return true;
