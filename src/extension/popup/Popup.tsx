@@ -336,7 +336,21 @@ const PhonePairing = () => {
       if (Array.isArray(res)) setPhones(res);
     });
 
-  useEffect(() => { refresh(); }, []);
+  // The paired phones, and — separately — any pairing still in flight. The popup closes
+  // the instant the browser loses focus, which during the iPhone flow is guaranteed:
+  // the user is holding the phone, not the mouse. The background carries on polling, so
+  // reopening the panel rejoins the same QR instead of showing the buttons again.
+  useEffect(() => {
+    refresh();
+    chrome.runtime.sendMessage({ type: 'PUSH_PAIR_RESUME' }, (res?: PairStart) => {
+      void chrome.runtime.lastError;
+      if (!res?.ok || !res.nonce || !res.platform) return;
+      setPair(res);
+      setPlatform(res.platform);
+      setExpiresAt(Date.now() + (res.ttlMs ?? 0));
+      setNow(Date.now());
+    });
+  }, []);
 
   // One ticker for both jobs while a QR is up: counting it down, and asking whether
   // the phone has answered. Two seconds is fast enough that the ✓ feels immediate and
@@ -508,7 +522,8 @@ const PhonePairing = () => {
           <ol className="list-inside list-decimal space-y-0.5 text-[10px] leading-snug text-slate-500">
             {platform === 'ios' ? (
               <>
-                <li>Scan it with the Camera app and open the link.</li>
+                <li>Scan it with the Camera app and open the link <strong>in Safari</strong>.</li>
+                <li>Tap <strong>Copy code</strong> on that page.</li>
                 <li>Tap <strong>Share</strong> → <strong>Add to Home Screen</strong> → <strong>Add</strong>.</li>
                 <li>Open the new <strong>Focus</strong> icon.</li>
                 <li>Tap <strong>Turn on notifications</strong>, then <strong>Allow</strong>.</li>
@@ -523,13 +538,18 @@ const PhonePairing = () => {
 
           {platform === 'ios' && (
             <p className="text-[9px] leading-snug text-slate-400">
-              iPhones only allow notifications for web apps added to the Home Screen. It is
-              four extra taps, once.
+              iPhones only allow notifications for web apps added to the Home Screen, and
+              only <strong>Safari</strong> can add one — Brave has no <em>Add to Home Screen</em>.
+              You can close this popup while you do it; pairing finishes on its own.
             </p>
           )}
 
           <button
-            onClick={() => { setPair(null); setPlatform(null); }}
+            onClick={() => {
+              chrome.runtime.sendMessage({ type: 'PUSH_PAIR_CANCEL' }, () => void chrome.runtime.lastError);
+              setPair(null);
+              setPlatform(null);
+            }}
             className="w-full cursor-pointer rounded-lg bg-slate-200 px-2 py-1 text-[10px] font-bold text-slate-600 hover:bg-slate-300"
           >
             Cancel

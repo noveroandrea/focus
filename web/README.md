@@ -133,10 +133,39 @@ only to web apps launched from the Home Screen, and Safari offers no programmati
 install. That is why the extension asks **which phone** before showing the QR, and why
 this page keeps the choice switchable — a wrong guess would show the wrong four steps.
 
-The pairing code travels in the **query string**, not the fragment, because Add to
-Home Screen saves the URL Safari is showing and a fragment is the part most likely to
-be dropped. It is also copied to `localStorage` on first sight, so whichever of the
-two survives into the installed app, one of them is there.
+## Getting the code across the install (iOS)
+
+This is the fiddly part, and it is worth reading before changing anything here. The
+pairing code has to travel from a **Safari tab** into a **separately installed app**,
+and two of the three ways of carrying it can fail:
+
+| Carrier | Survives Safari → Home Screen app? |
+|---|---|
+| `?p=` in the URL | **yes — but only because the manifest declares no `start_url`** |
+| `localStorage` | **no.** A Home Screen web app has its own storage partition |
+| the system clipboard | **yes**, always — every app on the phone shares it |
+
+> ⚠ **`manifest.webmanifest` deliberately has no `start_url`, and adding one breaks
+> iPhone pairing.** When a manifest names a `start_url`, that is the URL the installed
+> app launches — *not* the URL that was on screen when it was added — so `?p=<code>`
+> would be dropped and the app would open belonging to no pairing. With the key absent,
+> the spec defaults it to the document URL and the query string comes along. JSON cannot
+> carry a comment, so the warning lives beside the `<link rel="manifest">` in
+> `index.html`; see BUGS.md for the version of this that shipped.
+
+The code is still mirrored to `localStorage`, but only for what it can actually do:
+surviving a reload, or a second tab on Android. It cannot cross onto an iPhone.
+
+So the guaranteed route is the clipboard. The iOS steps offer **Copy code** *before*
+the install, and the installed app offers **Paste pairing code** whenever it opens
+without one (falling back to a plain text box if the clipboard API is refused — a whole
+pasted link is accepted as well as the bare code). Most users never see either: the URL
+normally works, and this is the path that makes "normally" not matter.
+
+**Pairing does not need the popup to stay open.** The extension's popup closes the
+moment the browser loses focus, which during this flow is guaranteed. The background
+keeps polling on a one-minute alarm and completes the pairing on its own; reopening the
+panel rejoins the same QR rather than issuing a new code.
 
 ## Troubleshooting
 
@@ -148,6 +177,13 @@ two survives into the installed app, one of them is there.
   notifications; this is the one real reliability gap versus a native app.
 - **Nothing arrives on iOS** — confirm you opened the app from the **Home Screen
   icon** and not from Safari, and that Focus appears in Settings → Notifications.
+- **The Home Screen icon asks for a pairing code** — the code did not survive the
+  install. Go back to Safari, open the QR link again, tap **Copy code**, then paste it
+  in the app. If this happens every time, check that nobody has put a `start_url` back
+  into `manifest.webmanifest`.
+- **There is no "Add to Home Screen" in the share menu** — you are not in Safari. Brave
+  on iOS does not offer it. Open the same link in Safari; the QR link is an ordinary
+  URL and can be pasted there.
 - **It worked, then stopped** — subscriptions expire, and iOS drops them for apps left
   unopened for long stretches. The extension prunes a subscription the moment the push
   service says it is gone (404/410) and the popup shows no paired phone; pair again.

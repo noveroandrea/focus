@@ -643,14 +643,21 @@ one:
 
 | | Android | iPhone |
 |---|---|---|
-| Scan the QR, open the link | ✔ | ✔ |
+| Scan the QR, open the link | ✔ | ✔ — **in Safari** |
 | Add to Home Screen, open the icon | — | **required** |
 | Tap *Turn on notifications* → *Allow* | ✔ | ✔ |
 | **Taps in total** | **2** | ~6 |
 
 The iPhone install step cannot be shortened or scripted: Apple exposes web
 notifications only to web apps launched from the Home Screen, and Safari offers no
-programmatic install. It is four extra taps, once.
+programmatic install. It is a few extra taps, once.
+
+Two iPhone-only notes, both of which will otherwise look like the pairing is broken:
+**it has to be Safari** (Brave has no *Add to Home Screen* in its share menu), and if
+the new icon opens asking for a **pairing code**, go back to Safari, tap *Copy code* on
+the same page and paste it in — the app is installed separately from the tab and the
+code does not always come with it. You can close the popup while you do all this;
+pairing finishes on its own.
 
 Your computer sends a test notification the instant pairing completes — which is the
 only honest way to find out whether the phone is set to vibrate for it, since that is

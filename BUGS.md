@@ -560,6 +560,59 @@ tidying up. It means "deliver now or drop", which is right for a nudge that is o
 meaningful during a five-second warning. Raising it to a "safer" value buys nothing except
 notifications that arrive after the penalty has already landed.
 
+### `start_url` threw away the pairing code on the way into the iPhone app
+**Status: fixed — `web/manifest.webmanifest`, `web/app.js`**
+
+*The symptom.* On iPhone: scan the QR, the page opens, Add to Home Screen, tap the new
+icon — and the app says **"Start on your computer: scan the QR code"**. The QR it had just
+scanned. No notification prompt ever appeared, so the phone could never pair.
+
+*The cause.* `manifest.webmanifest` declared `"start_url": "./"`. **When a manifest names a
+start_url, that is what the installed app launches — not the URL that was on screen when it
+was added.** The pairing code travels as `?p=<nonce>.<vapid key>`, so the Home Screen icon
+opened a codeless page. The comment in `app.js` asserting that "Add to Home Screen saves
+the URL Safari is currently showing" was true only for the pre-manifest path.
+
+*Why the fallback did not fire.* The code was also mirrored to `localStorage` "so whichever
+survives, one of them is there". Neither survives on iOS: **a Home Screen web app gets its
+own storage partition, separate from Safari's**, so anything the tab wrote is invisible to
+the app. The belt and the braces were the same belt — two carriers that both ride on the
+same install boundary, chosen without checking whether either crosses it.
+
+*The fix, in two independent layers.*
+1. **`start_url` removed entirely.** Absent, the spec defaults it to the document URL, so
+   the query string comes along. There is a loud comment beside the `<link rel="manifest">`
+   because a missing key in a JSON file is exactly the kind of thing someone helpfully adds
+   back, and JSON cannot hold the comment itself.
+2. **The clipboard**, which is the only channel that genuinely crosses the partition: the
+   iOS steps offer **Copy code** before the install, and the installed app offers **Paste
+   pairing code** whenever it opens without one. Most users will never see either.
+
+*The general lesson.* "Two mechanisms, one will work" is only true if they fail
+independently. Both of these were downstream of the same platform boundary, so the
+redundancy was imaginary — and the platform in question could not be tested on the
+development machine, which is precisely when a stated fallback deserves to be checked
+rather than assumed.
+
+### A pairing outlived the popup that was watching it
+**Status: fixed — `PUSH_PAIR_RESUME` / `PUSH_PAIR_CANCEL` + the `focus-pair-poll` alarm**
+
+Found while fixing the entry above. Polling for the phone's answer lived in the popup's
+2-second ticker — and **a Chrome popup closes the moment the browser loses focus**, which
+during the iPhone flow is not a risk but a certainty: the user is holding a phone through
+six taps and several minutes. So the claim landed on the server and nobody ever collected
+it; `take_pairing` was never called and the row expired.
+
+Worse, reopening the panel showed the Android/iPhone buttons again, and pressing one called
+`create_pairing`, which **deletes the caller's outstanding rows** — destroying the pairing
+the phone was on its way to claim.
+
+The pending nonce now lives in `chrome.storage.local` and the poll on a `chrome.alarms`
+job, for the same reason every other periodic task here does: a suspended worker's timers
+do not fire. The popup asks `PUSH_PAIR_RESUME` on open and rejoins the QR already in
+flight. One minute of alarm granularity is fine — the popup's own 2-second poll still makes
+the ✓ instant whenever somebody is actually watching.
+
 ### A program in the page whitelist would have matched half the web
 **Status: designed around — `20260812090000_program_flags.sql`**
 

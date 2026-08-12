@@ -1,4 +1,4 @@
-import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, PairStart, PairedPhone, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, clampIdleTime, round2 } from '../types';
+import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, PairStart, PairedPhone, PhonePlatform, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, clampIdleTime, round2 } from '../types';
 import {
   STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS, WORKING_FRESH_MS,
   IDLE_PENALTY, IDLE_WARNING_MS, NUDGE_COOLDOWN_MS, PAIRING_TTL_MS,
@@ -388,6 +388,76 @@ function buzzPhone(): void {
   // warning lasts.
   void sendPush('⏳ Focus', `You have gone idle. ${Math.round(IDLE_WARNING_MS / 1000)}s to come back before it counts against you.`);
 }
+
+// ── An outstanding pairing outlives the popup that started it ────────────────
+// A Chrome popup closes the moment the browser loses focus, and the iPhone flow — scan,
+// copy, Share, Add to Home Screen, open the icon, allow — takes minutes with the user
+// looking at a phone the whole time. So the surface that started the pairing is gone
+// long before the phone answers, and with the poll living only in the popup the claim
+// sat on the server until it expired: the phone said "done", the desktop never heard.
+//
+// The pending nonce therefore lives in storage and the polling on an alarm, like every
+// other periodic job here — a suspended worker's timers do not fire, and this one waits
+// out a task performed on a different device. One minute is the floor Chrome allows and
+// is fine: the popup still polls every 2s while it is open, so the ✓ is instant when
+// anybody is watching, and this is only the backstop for when nobody is.
+const PAIR_PENDING_KEY = 'focusPairPending';
+const PAIR_ALARM = 'focus-pair-poll';
+
+interface PendingPair {
+  nonce: string;
+  platform: PhonePlatform;
+  url: string;
+  expiresAt: number;
+}
+
+function readPendingPair(): Promise<PendingPair | null> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([PAIR_PENDING_KEY], (r) => {
+      const p = r[PAIR_PENDING_KEY] as PendingPair | undefined;
+      // Expiry is checked on read rather than swept: the row is gone from the server by
+      // then anyway (take_pairing deletes, pairing_ttl() expires), so a stale record
+      // here is only a QR the popup must not offer to resume.
+      resolve(p?.nonce && p.expiresAt > Date.now() ? p : null);
+    });
+  });
+}
+
+function clearPendingPair(): void {
+  chrome.storage.local.remove(PAIR_PENDING_KEY);
+  chrome.alarms.clear(PAIR_ALARM);
+}
+
+/** Has the phone answered? Finishes the pairing if so and returns how many devices the
+ *  confirmation push reached; null while there is still nothing to collect. */
+async function collectPairing(nonce: string, platform: PhonePlatform): Promise<number | null> {
+  const sub = await takePairing(nonce);
+  if (!sub?.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) return null;
+  await addSubscription({
+    endpoint: sub.endpoint,
+    p256dh: sub.keys.p256dh,
+    auth: sub.keys.auth,
+    platform,
+    addedAt: Date.now(),
+  });
+  clearPendingPair();
+  // Straight away, and from here rather than from the popup: this is the moment the
+  // user is holding the phone and looking at it, which is the only moment a "did it
+  // vibrate?" answer is worth anything — and by construction the popup is shut.
+  return await sendPush('✅ Focus', 'Paired. This is what an idle nudge will feel like.');
+}
+
+// Module scope, so it exists synchronously when Chrome wakes the worker to deliver the
+// alarm — a listener registered inside a callback would not be there yet and the event
+// would be dropped.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== PAIR_ALARM) return;
+  void (async () => {
+    const pending = await readPendingPair();
+    if (!pending) { clearPendingPair(); return; }
+    await collectPairing(pending.nonce, pending.platform);
+  })();
+});
 
 // ── Init from storage ─────────────────────────────────────────────────────────
 chrome.storage.local.get(['focusFlowState', 'focusFlowSettings', NUDGE_LAST_KEY], (result) => {
@@ -849,9 +919,21 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
           sendResponse({ ok: false, error: 'No pairing page is configured — see web/README.md' } satisfies PairStart);
           return;
         }
+        // Asked separately, and BEFORE the call, because the two failures need
+        // different remedies and the sync client cannot tell them apart: readRpc
+        // returns null both when there is no session and when the request came back
+        // an error. Collapsing them told a signed-in user to sign in, which is a
+        // message that sends someone to fix the one thing that was already right.
+        if (!(await getSession())) {
+          sendResponse({ ok: false, error: 'Sign in first — pairing goes through your account' } satisfies PairStart);
+          return;
+        }
         const nonce = await createPairing();
         if (!nonce) {
-          sendResponse({ ok: false, error: 'Sign in first — pairing goes through your account' } satisfies PairStart);
+          sendResponse({
+            ok: false,
+            error: 'The server refused the request. If the database migrations are not applied yet, create_pairing does not exist — the reason is logged in the Service Worker console.',
+          } satisfies PairStart);
           return;
         }
         const key = await publicKeyB64();
@@ -861,31 +943,43 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
         // way, and losing it would strand the user inside an installed app with no
         // idea which pairing it belonged to.
         const url = `${PUSH_LANDING_URL.replace(/\/+$/, '')}/?p=${encodeURIComponent(`${nonce}.${key}`)}`;
-        sendResponse({ ok: true, nonce, url, ttlMs: PAIRING_TTL_MS } satisfies PairStart);
+        // Recorded before the reply, so the pairing is already the background's problem
+        // by the time the QR is on screen: from here it completes whether or not the
+        // popup is still open to watch it.
+        const expiresAt = Date.now() + PAIRING_TTL_MS;
+        chrome.storage.local.set({
+          [PAIR_PENDING_KEY]: { nonce, platform: message.platform, url, expiresAt } satisfies PendingPair,
+        });
+        chrome.alarms.create(PAIR_ALARM, { periodInMinutes: 1 });
+        sendResponse({ ok: true, nonce, url, ttlMs: PAIRING_TTL_MS, platform: message.platform } satisfies PairStart);
       })();
       break;
     }
 
     case 'PUSH_PAIR_POLL': {
-      void (async () => {
-        const sub = await takePairing(message.nonce);
-        if (!sub?.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) {
-          sendResponse({ ok: false });   // not yet — the popup simply asks again
-          return;
-        }
-        await addSubscription({
-          endpoint: sub.endpoint,
-          p256dh: sub.keys.p256dh,
-          auth: sub.keys.auth,
-          platform: message.platform,
-          addedAt: Date.now(),
-        });
-        // Straight away, and from here rather than from the popup: this is the moment
-        // the user is holding the phone and looking at it, which is the only moment a
-        // "did it vibrate?" answer is worth anything.
-        const delivered = await sendPush('✅ Focus', 'Paired. This is what an idle nudge will feel like.');
-        sendResponse({ ok: true, delivered });
-      })();
+      void collectPairing(message.nonce, message.platform).then((delivered) => {
+        // null — not yet; the popup simply asks again two seconds later.
+        sendResponse(delivered === null ? { ok: false } : { ok: true, delivered });
+      });
+      break;
+    }
+
+    // Asked when the popup opens, so a panel that was closed mid-flow comes back to the
+    // same QR with the time that is actually left on it. Starting a fresh one instead
+    // would be worse than an inconvenience: create_pairing deletes the caller's other
+    // rows, so a second nonce would throw away the one the phone is on its way to claim.
+    case 'PUSH_PAIR_RESUME': {
+      void readPendingPair().then((p) => sendResponse(
+        p
+          ? { ok: true, nonce: p.nonce, url: p.url, ttlMs: p.expiresAt - Date.now(), platform: p.platform } satisfies PairStart
+          : { ok: false } satisfies PairStart,
+      ));
+      break;
+    }
+
+    case 'PUSH_PAIR_CANCEL': {
+      clearPendingPair();
+      sendResponse({ ok: true });
       break;
     }
 

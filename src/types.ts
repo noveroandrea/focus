@@ -313,16 +313,27 @@ export type MessageType =
   // Phone pairing over Web Push. All four live in the background because the VAPID
   // keypair and the paired devices do: a popup that closes mid-flow must not be able
   // to lose either.
-  //   PUSH_PAIR_START — a nonce + the QR text to show.
-  //   PUSH_PAIR_POLL  — has the phone answered yet? Called while the QR is up.
-  //   PUSH_LIST       — the phones already paired, for the popup's list.
-  //   PUSH_FORGET     — unpair one; the phone keeps its subscription but nothing
-  //                     will ever push to it again, which is what "forget" means
-  //                     when the sender is the only party holding the address.
-  //   PUSH_TEST       — send one now: the only way to find out whether the phone is
-  //                     actually set to vibrate for it.
+  //   PUSH_PAIR_START  — a nonce + the QR text to show.
+  //   PUSH_PAIR_POLL   — has the phone answered yet? Called while the QR is up.
+  //   PUSH_PAIR_RESUME — is one already outstanding? Asked when the popup opens.
+  //   PUSH_PAIR_CANCEL — give up on the outstanding one.
+  //   PUSH_LIST        — the phones already paired, for the popup's list.
+  //   PUSH_FORGET      — unpair one; the phone keeps its subscription but nothing
+  //                      will ever push to it again, which is what "forget" means
+  //                      when the sender is the only party holding the address.
+  //   PUSH_TEST        — send one now: the only way to find out whether the phone is
+  //                      actually set to vibrate for it.
+  //
+  // RESUME and CANCEL exist because of how long the iPhone flow takes. A Chrome popup
+  // closes the instant the browser loses focus, and the user is holding a phone in the
+  // other hand for the whole Add-to-Home-Screen dance — so the surface driving the poll
+  // is guaranteed to disappear halfway through. The background keeps polling on an
+  // alarm; these two let the popup rejoin the pairing it started rather than mint a
+  // second nonce, which would delete the row the phone is about to claim.
   | { type: 'PUSH_PAIR_START'; platform: PhonePlatform }
   | { type: 'PUSH_PAIR_POLL'; nonce: string; platform: PhonePlatform }
+  | { type: 'PUSH_PAIR_RESUME' }
+  | { type: 'PUSH_PAIR_CANCEL' }
   | { type: 'PUSH_LIST' }
   | { type: 'PUSH_FORGET'; endpoint: string }
   | { type: 'PUSH_TEST' };
@@ -334,15 +345,19 @@ export type MessageType =
  *  to the Home Screen and opened from there. */
 export type PhonePlatform = 'android' | 'ios';
 
-/** Reply to PUSH_PAIR_START. `url` is what the QR encodes and what a user on the
- *  same machine can click instead. */
+/** Reply to PUSH_PAIR_START and to PUSH_PAIR_RESUME. `url` is what the QR encodes and
+ *  what a user on the same machine can click instead. */
 export interface PairStart {
   ok: boolean;
   nonce?: string;
   url?: string;
   /** How long the nonce is good for, mirrored from pairing_ttl() in SQL so the popup
-   *  can count it down instead of letting it expire silently. */
+   *  can count it down instead of letting it expire silently. On a RESUME this is what
+   *  is *left*, not the full ten minutes. */
   ttlMs?: number;
+  /** Which phone the pairing was started for. Only RESUME needs it — the popup asking
+   *  to rejoin does not know which set of steps it should be showing. */
+  platform?: PhonePlatform;
   error?: string;
 }
 
