@@ -2,7 +2,6 @@
   "name": "Focus",
   "short_name": "Focus",
   "description": "Buzzes your phone when you drift off task.",
-  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#0f172a",

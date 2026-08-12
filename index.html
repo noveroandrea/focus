@@ -8,7 +8,15 @@
 <!-- The manifest is what makes Add to Home Screen produce an APP rather than a
      bookmark, which on iOS is the difference between being allowed to subscribe to
      push and not. Android does not need it for push at all — it subscribes straight
-     from the tab — but it costs nothing and makes the icon right on both. -->
+     from the tab — but it costs nothing and makes the icon right on both.
+
+     ⚠ IT DELIBERATELY HAS NO "start_url", AND ADDING ONE BREAKS iOS PAIRING. ⚠
+     When a manifest declares start_url, that is the URL the installed app launches —
+     not the URL that was on screen when it was installed. This page is opened as
+     ?p=<pairing code>, so a start_url of "./" meant the Home Screen icon opened a
+     codeless page and the app asked the user to scan the QR it had just scanned.
+     With start_url absent the spec says it defaults to the document URL, and the
+     query string comes along. See web/README.md and BUGS.md. -->
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="icon" href="icon-192.png">
@@ -42,6 +50,7 @@
   ol { margin: 0; padding-left: 20px; }
   li { margin-bottom: 8px; font-size: 14px; }
   li:last-child { margin-bottom: 0; }
+  p { font-size: 14px; }
   .share { display: inline-flex; align-items: center; justify-content: center;
            width: 20px; height: 20px; border-radius: 5px;
            background: rgba(147,197,253,0.18); color: #93c5fd; font-size: 13px;
@@ -53,6 +62,13 @@
   }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   button.ghost { background: rgba(148,163,184,0.16); color: #cbd5e1; font-weight: 600; }
+  button.mini { padding: 8px 12px; font-size: 13px; margin-top: 6px; }
+  input {
+    width: 100%; margin-top: 8px; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid rgba(148,163,184,0.28); background: rgba(15,23,42,0.6);
+    color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
   .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
   .tabs button { padding: 8px; font-size: 13px; }
   .tabs button[aria-selected="true"] { background: #3b82f6; color: #fff; }
@@ -60,6 +76,7 @@
   .note { font-size: 12px; color: #94a3b8; margin: 12px 0 0; }
   .ok   { color: #4ade80; }
   .bad  { color: #f87171; }
+  .warn { color: #fbbf24; }
   .big  { font-size: 44px; text-align: center; margin: 6px 0 2px; }
   .hide { display: none !important; }
 </style>
@@ -69,13 +86,29 @@
   <h1>Focus</h1>
   <p class="sub">Pair this phone so it buzzes when you drift off task.</p>
 
-  <!-- No pairing code: somebody opened the page directly. -->
+  <!-- No pairing code, in an ordinary browser tab: somebody opened the page directly. -->
   <section id="no-code" class="card hide">
     <h2>Start on your computer</h2>
-    <p style="font-size:14px;margin:0">
+    <p style="margin:0">
       Open the Focus extension, go to <strong>Settings → Phone nudge</strong> and scan
       the QR code it shows. This page only works with the link from there.
     </p>
+  </section>
+
+  <!-- No pairing code, INSIDE the installed app. A different situation entirely, and
+       the one the user is most likely to be in: they came here from the QR, installed
+       the app, and the code did not survive the trip. Sending them back to the computer
+       would be telling them to redo what they just did. -->
+  <section id="recover" class="card hide">
+    <h2>One thing missing</h2>
+    <p style="margin:0">
+      This app does not know which computer it belongs to. Go back to <strong>Safari</strong>,
+      open the same link again, tap <strong>Copy code</strong> — then come back here and paste it.
+    </p>
+    <button id="paste" class="mini">Paste pairing code</button>
+    <input id="code-in" class="hide" type="text" inputmode="text" autocapitalize="off"
+           autocomplete="off" spellcheck="false" placeholder="Paste the code here">
+    <p id="recover-msg" class="note"></p>
   </section>
 
   <div id="flow" class="hide">
@@ -102,20 +135,28 @@
     <section id="steps-ios" class="card hide">
       <h2>iPhone — add to the Home Screen first</h2>
       <ol>
+        <li>Tap <strong>Copy code</strong> below. You may need it in a moment.</li>
         <li>Tap the <span class="share">↑</span> <strong>Share</strong> button in Safari.</li>
         <li>Scroll down and tap <strong>Add to Home Screen</strong>, then <strong>Add</strong>.</li>
         <li>Open the new <strong>Focus</strong> icon from your Home Screen.</li>
         <li>Tap <strong>Turn on notifications</strong> there, then <strong>Allow</strong>.</li>
       </ol>
+      <button id="copy" class="ghost mini">Copy code</button>
+      <input id="code-out" class="hide" type="text" readonly>
+      <p class="note warn" id="safari-note">
+        This has to be <strong>Safari</strong>. Brave has no <em>Add to Home Screen</em> in
+        its share menu, and only a Home Screen app is allowed to receive notifications on
+        iOS. If you scanned the QR with a different browser, open the link in Safari.
+      </p>
       <p class="note">
-        iOS only allows notifications for web apps added to the Home Screen — there is
-        no way around this step, and it only has to be done once.
+        It is a few extra taps, once. After this the phone buzzes with the app closed and
+        the screen locked, like any other notification.
       </p>
     </section>
 
     <section id="ios-standalone" class="card hide">
       <h2>iPhone — last step</h2>
-      <p style="font-size:14px;margin:0">
+      <p style="margin:0">
         You are in the installed app. Tap below and choose <strong>Allow</strong>.
       </p>
     </section>
@@ -127,7 +168,7 @@
   <section id="done" class="card hide">
     <div class="big">✅</div>
     <h2 style="text-align:center">Paired</h2>
-    <p style="font-size:14px;margin:0;text-align:center">
+    <p style="margin:0;text-align:center">
       Your computer just sent a test notification. If you did not feel it, check this
       app's notification settings — Focus can send them, but only your phone decides
       whether they vibrate.
