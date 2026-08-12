@@ -74,7 +74,7 @@ const COMPANION_TITLE = 'Focus companion';
  *  companion" must not drag a whole browser window above everything, and an
  *  always-on-top window large enough to cover what you are working on is precisely
  *  the failure that got an earlier full-screen overlay deleted. The companion opens
- *  at 300×210 and is meant for a screen corner. Checked when the window appears. */
+ *  at 210×182 and is meant for a screen corner. Checked when the window appears. */
 const MAX_PIN_W = 900;
 const MAX_PIN_H = 700;
 

@@ -1,7 +1,8 @@
-import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, round2 } from '../types';
+import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, TelegramResult, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, clampIdleTime, round2 } from '../types';
 import {
   STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS, WORKING_FRESH_MS,
-  IDLE_PENALTY, idlePenaltyDelayMs, autoPauseDelayMs,
+  IDLE_PENALTY, IDLE_WARNING_MS, TELEGRAM_COOLDOWN_MS,
+  idlePenaltyDelayMs, autoPauseDelayMs,
 } from './timings';
 // Every heartbeat source — page input, focused PDF/viewer tabs, OS-wide activity —
 // lives in ./heartbeats. This file owns the state; that one decides when it beats.
@@ -210,8 +211,16 @@ function programIsDriving(): boolean {
 // Placement lives here rather than in the popup for two reasons: the popup closes
 // the moment the window opens, taking any callback with it, and chrome.system.display
 // is a background-only concern.
-const COMPANION_W = 300;
-const COMPANION_H = 260;   // canvas + the two whitelist bars + the pin line
+// 30% off each side of the original 300×260 — a quarter of the area. This window is
+// meant to be *beside* the work rather than looked at, so the smallest size that can
+// still be read at a glance is the right one; the drawing is resolution-independent
+// (a 480×240 picture scaled into whatever box it gets) and the two whitelist bars
+// ellipsize, so nothing breaks on the way down. The one part that does not shrink is
+// the window frame the platform draws, which is why the height loses proportionally
+// more of its content than the width. A platform that refuses a window this small
+// clamps it up to its own minimum, which costs nothing but the shrinking.
+const COMPANION_W = 210;
+const COMPANION_H = 182;   // canvas + the two whitelist bars + the pin line
 const COMPANION_MARGIN = 16;
 const COMPANION_IDS_KEY = 'pipWindowIds';
 
@@ -330,10 +339,92 @@ async function openCompanion(extra: boolean) {
   chrome.storage.local.set({ [COMPANION_IDS_KEY]: ids });
 }
 
+// ── The phone nudge ───────────────────────────────────────────────────────────
+// The one thing on screen cannot help with the one failure it exists for: you have
+// stopped looking at the screen. The beep needs the volume up and the room quiet, the
+// trembling character needs your eyes on it, and neither reaches a pocket. A phone
+// does, and it does it by vibrating — which is the whole point of firing at the START
+// of the 5-second warning rather than at the penalty: there is still time to come back
+// before anything is lost.
+//
+// Telegram, and not Web Push or an app of our own, because it is the only route that
+// costs nothing to build, needs nothing installed on the desktop, nothing hosted, no
+// keys to rotate and — decisively — no iOS build. It is one HTTPS POST from here.
+// Whether it actually buzzes is the phone's business (Telegram's per-chat notification
+// settings), which is exactly why the popup has a Test button: that is the only honest
+// way to find out.
+//
+// It is off by default, and the message names NO page and NO program. This is the only
+// thing the extension sends anywhere other than its own backend, and the timing of
+// these messages is itself a record of when the user drifts — so the payload is kept
+// to the one fact the user asked to be told.
+const TELEGRAM_API = 'https://api.telegram.org';
+/** Last nudge, in storage rather than a module variable — see TELEGRAM_COOLDOWN_MS. */
+const TELEGRAM_LAST_KEY = 'focusTelegramAt';
+let telegramLastAt = 0;
+
+function telegramConfigured(): boolean {
+  return settings.telegramEnabled === true
+    && !!settings.telegramToken?.trim()
+    && !!settings.telegramChatId?.trim();
+}
+
+/** POST one Telegram method, and turn every way it can fail into one shape. Telegram
+ *  answers 200 with `ok: false` for most real errors (bad token, unknown chat), so the
+ *  HTTP status alone proves nothing and the body has to be read either way. */
+async function telegramCall(method: string, body: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
+  const token = settings.telegramToken?.trim();
+  if (!token) return { ok: false, error: 'No bot token' };
+  try {
+    const r = await fetch(`${TELEGRAM_API}/bot${token}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => null) as { ok?: boolean; result?: unknown; description?: string } | null;
+    if (!data) return { ok: false, error: `HTTP ${r.status}` };
+    if (!data.ok) return { ok: false, error: data.description || `HTTP ${r.status}` };
+    return { ok: true, result: data.result };
+  } catch {
+    // No network, or Telegram unreachable. A missed nudge is a missed nudge; nothing
+    // else in the session depends on it, so it is never retried or queued.
+    return { ok: false, error: 'Could not reach Telegram' };
+  }
+}
+
+/** Fire the nudge, if everything about the moment says it should be fired. Called from
+ *  writeState on the active→idle edge, which is the same instant the sprite starts its
+ *  warning — one edge, one definition, no second timer to drift from it. */
+function buzzPhone(): void {
+  if (!settings.enabled || settings.forceActive || !telegramConfigured()) return;
+  const now = Date.now();
+  // Only a real lapse. The idle flag is cleared by things that are not one — the
+  // popup's "remove this domain" drops it outright, mid-click — and a phone that
+  // buzzes for a button the user just pressed is a phone they learn to ignore before
+  // the first genuine nudge arrives. Both real paths into idle (the OS anchor in
+  // applyOsIdleReading and the backup expireStaleHeartbeat) can only fire once the
+  // whole idleTime has passed with no input, so that is the test, and it needs no
+  // second flag to be kept in step with them.
+  if (now - state.lastHeartbeat < clampIdleTime(settings.idleTime) * 1000 - 500) return;
+  if (now - telegramLastAt < TELEGRAM_COOLDOWN_MS) return;
+  telegramLastAt = now;
+  chrome.storage.local.set({ [TELEGRAM_LAST_KEY]: now });
+  void telegramCall('sendMessage', {
+    chat_id: settings.telegramChatId.trim(),
+    text: `⏳ Focus — you have gone idle. ${Math.round(IDLE_WARNING_MS / 1000)}s to come back before it counts against you.`,
+    // Explicit, because the default is what a silent notification would use and this
+    // message exists ONLY to make a noise in a pocket.
+    disable_notification: false,
+  });
+}
+
 // ── Init from storage ─────────────────────────────────────────────────────────
-chrome.storage.local.get(['focusFlowState', 'focusFlowSettings'], (result) => {
+chrome.storage.local.get(['focusFlowState', 'focusFlowSettings', TELEGRAM_LAST_KEY], (result) => {
   // Left behind by a version that tried to detect a broken chrome.idle at runtime.
   chrome.storage.local.remove('idleApiProven');
+  // A revived worker has forgotten when it last nudged, and the gap it has forgotten
+  // is exactly the one where the user was away long enough to be dropped.
+  if (typeof result[TELEGRAM_LAST_KEY] === 'number') telegramLastAt = result[TELEGRAM_LAST_KEY];
   if (result.focusFlowState) {
     state = { ...state, ...(result.focusFlowState as SessionState) };
   }
@@ -434,9 +525,17 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // rollover zeroing both counters is correctly not forwarded as a huge negative
 // delta — the server runs its own rollover.
 function writeState(newState: Partial<SessionState>) {
+  const wasActive = state.isHeartbeatActive;
   state = { ...state, ...newState };
   chrome.storage.local.set({ focusFlowState: state });
   broadcastState();
+  // The active→idle edge IS the start of the warning — the same transition every
+  // surface starts its countdown on. Hooked here rather than beside the countdown in
+  // trackIdlePenalty for the same reason the server sync hooks into updateState: this
+  // is the single funnel every writer goes through, so a future path into idle cannot
+  // forget to nudge. (touchState does not come through here, which is correct: it is
+  // the "still active" refresh, and it never changes this flag.)
+  if (wasActive && !state.isHeartbeatActive) buzzPhone();
 }
 
 function updateState(newState: Partial<SessionState>) {
@@ -761,6 +860,45 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
 
     case 'CLASSIFY_PAGE': {
       classifyPage(message.url, message.title).then(sendResponse);
+      break;
+    }
+
+    // Read the chat id off the bot's own inbox. Nobody knows their own chat id and
+    // there is no way to look it up in the app, so the alternative is telling people
+    // to message a third-party "id bot" — which means handing a stranger's bot the
+    // first message of the setup. One getUpdates on their own bot is the whole answer.
+    case 'TELEGRAM_LINK': {
+      void telegramCall('getUpdates', { limit: 10, timeout: 0 }).then((r) => {
+        if (!r.ok) { sendResponse({ ok: false, error: r.error } satisfies TelegramResult); return; }
+        const updates = Array.isArray(r.result) ? r.result : [];
+        // The most recent chat that has said anything, so a user who has been talking
+        // to their bot for other reasons still lands on the conversation they just used.
+        let chatId = '';
+        for (const u of updates) {
+          const chat = (u as { message?: { chat?: { id?: number | string } } })?.message?.chat;
+          if (chat?.id != null) chatId = String(chat.id);
+        }
+        if (!chatId) {
+          sendResponse({
+            ok: false,
+            error: 'No message yet — open the bot in Telegram, send it anything, then press Find again',
+          } satisfies TelegramResult);
+          return;
+        }
+        sendResponse({ ok: true, chatId } satisfies TelegramResult);
+      });
+      break;
+    }
+
+    // The only way to learn whether the phone will actually buzz: Telegram's per-chat
+    // notification settings are the phone's business, not ours, and a nudge that
+    // arrives silently is indistinguishable from one that never arrived.
+    case 'TELEGRAM_TEST': {
+      void telegramCall('sendMessage', {
+        chat_id: settings.telegramChatId?.trim(),
+        text: '✅ Focus — this is what an idle nudge will feel like.',
+        disable_notification: false,
+      }).then((r) => sendResponse({ ok: r.ok, error: r.error } satisfies TelegramResult));
       break;
     }
 

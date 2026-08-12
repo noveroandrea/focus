@@ -98,6 +98,20 @@ export const IDLE_GRACE_MS = 5000;
 /** Points removed from distractedScore, once, when a lapse outlasts warning+grace. */
 export const IDLE_PENALTY = 10;
 
+/** Shortest gap between two phone nudges.
+ *
+ *  Not a setting, and the number is doing real work rather than tuning: the warning
+ *  starts every time you look away for `idleTime`, which on an ordinary afternoon is
+ *  dozens of times an hour. A buzz per lapse is not a nudge, it is a phone that goes
+ *  off constantly and gets silenced by lunchtime — which costs the feature its whole
+ *  point. Five minutes makes it a reminder that you have drifted rather than a report
+ *  on every glance out of the window.
+ *
+ *  Persisted (see TELEGRAM_LAST_KEY), because an MV3 worker is suspended between
+ *  events and a cooldown living in a module variable is a cooldown that resets itself
+ *  exactly when the user has been away long enough for the worker to be dropped. */
+export const TELEGRAM_COOLDOWN_MS = 5 * 60_000;
+
 // ── Sprite animation ───────────────────────────────────────────────────────────
 /** Delay between the sprite's walking steps (one step is queued per heartbeat). */
 export const STEP_DELAY_MS = 130;

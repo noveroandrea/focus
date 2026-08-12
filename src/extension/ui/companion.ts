@@ -523,7 +523,7 @@ function makeBar() {
   // The undo, shown in place of the button once something is on the list. Quiet by
   // design — a ✕ next to the tick rather than a second coloured button: taking
   // something OFF the whitelist is the rarer action and the one you would rather not
-  // hit by accident, and this row is 300px wide with a domain already competing for
+  // hit by accident, and this row is ~200px wide with a domain already competing for
   // it. The tick says what the state is; this changes it.
   const remove = document.createElement('button');
   Object.assign(remove.style, {

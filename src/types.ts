@@ -128,6 +128,27 @@ export interface Settings {
   classifyNumThreads: number;
   /** Prompt sent to the model for page classification (URL/title/snippet are appended automatically) */
   classifyPrompt: string;
+  /** Buzz the user's phone at the start of the 5-second warning, via a Telegram bot.
+   *
+   *  Off by default and inert until both fields below are filled in. Telegram rather
+   *  than a push service or an app of our own because it is the only option that
+   *  needs nothing installed on the desktop, nothing hosted, no keys to rotate and no
+   *  iOS build: one HTTPS POST from the service worker, and the phone the user
+   *  already has notifications from does the rest.
+   *
+   *  Note this is the ONE thing the extension sends anywhere other than its own
+   *  backend, so it is opt-in and the message names no page and no program — only
+   *  that a lapse started. The timing alone is behavioural data, and it lands on
+   *  Telegram's servers. */
+  telegramEnabled: boolean;
+  /** Bot token from @BotFather (`123456:ABC-…`). A credential, held in
+   *  chrome.storage.local exactly like `classifyApiKey`. */
+  telegramToken: string;
+  /** Which chat to send to — the numeric id of the user's own conversation with
+   *  their bot. Filled in by the popup's "Find" button rather than by hand: nobody
+   *  knows their own chat id, and it is one `getUpdates` call away once they have
+   *  said anything to the bot. */
+  telegramChatId: string;
 }
 
 /** Clamp the icon-change interval to the supported heartbeat range. */
@@ -240,6 +261,9 @@ export const DEFAULT_SETTINGS: Settings = {
   classifyApiKey: '',
   classifyModel: 'qwen-yesno',
   classifyNumThreads: 2,
+  telegramEnabled: false,
+  telegramToken: '',
+  telegramChatId: '',
   classifyPrompt: 'Is this page where the user actively reads, studies, or writes technical or academic content? Answer YES for: search results, study material, math/engineering related material, research papers, documentation, articles, reference tools, writing editors. Answer NO if the page is primarily for passive consumption or social interaction — regardless of how professional it looks. For YouTube, base your answer only on the video title.',
 };
 
@@ -298,7 +322,25 @@ export type MessageType =
   | { type: 'SERVER_TEAM_BOARD'; team: string; metric: 'live' | 'avg7' | 'avg30' }
   | { type: 'SERVER_COMPETITION_BOARD'; competition: string; metric: 'live' | 'avg7' | 'avg30' }
   | { type: 'SERVER_MEMBER_PROFILE'; userId: string }
-  | { type: 'SERVER_FLAG_DOMAIN'; domain: string };
+  | { type: 'SERVER_FLAG_DOMAIN'; domain: string }
+  // The phone nudge. Both are popup-only setup steps, and both live in the background
+  // for the same reason the classifier proxy does: the bot token is a credential the
+  // background already holds, and a popup that closes mid-request loses the answer.
+  //   TELEGRAM_LINK — read the chat id off the bot's own inbox (getUpdates), so the
+  //                   user never has to find a number nobody knows how to find.
+  //   TELEGRAM_TEST — send the buzz now, which is the only way to know the phone is
+  //                   actually set to vibrate for it.
+  | { type: 'TELEGRAM_LINK' }
+  | { type: 'TELEGRAM_TEST' };
+
+/** Reply to the two Telegram setup messages. `error` is Telegram's own `description`
+ *  where there is one — it is written to be shown ("Unauthorized", "chat not found"). */
+export interface TelegramResult {
+  ok: boolean;
+  /** TELEGRAM_LINK only: the chat id found, for the popup to save. */
+  chatId?: string;
+  error?: string;
+}
 
 /** Reply to the three team messages. `error` carries the database's own message
  *  ("Team X already exists — join it instead"), which is written to be shown. */

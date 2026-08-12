@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, localDateKey, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle, SPRITE_MODES, clampSpriteMode } from '../../types';
+import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, TelegramResult, localDateKey, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle, SPRITE_MODES, clampSpriteMode } from '../../types';
 import { FileText, Activity, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus } from 'lucide-react';
 import { IDLE_WARNING_MS } from '../timings';
 import '../../index.css';
@@ -310,8 +310,26 @@ const SettingsTab = ({ settings, onChange }: {
   onChange: (s: Settings) => void;
 }) => {
   const [companionInfoOpen, setCompanionInfoOpen] = useState(false);
+  // The two Telegram buttons are the only settings controls that talk to the outside
+  // world, so they are the only ones that can be in progress or come back wrong.
+  const [tgBusy, setTgBusy] = useState<'' | 'link' | 'test'>('');
+  const [tgNote, setTgNote] = useState<{ ok: boolean; text: string } | null>(null);
 
   const set = (patch: Partial<Settings>) => onChange({ ...settings, ...patch });
+
+  const askTelegram = (type: 'TELEGRAM_LINK' | 'TELEGRAM_TEST') => {
+    setTgBusy(type === 'TELEGRAM_LINK' ? 'link' : 'test');
+    setTgNote(null);
+    chrome.runtime.sendMessage({ type }, (res?: TelegramResult) => {
+      setTgBusy('');
+      if (chrome.runtime.lastError || !res) { setTgNote({ ok: false, text: 'No answer from the extension' }); return; }
+      if (!res.ok) { setTgNote({ ok: false, text: res.error ?? 'Failed' }); return; }
+      // Saving the id found is the entire point of Find — leaving the user to copy a
+      // number out of a status line would be a worse version of typing it in.
+      if (res.chatId) set({ telegramChatId: res.chatId });
+      setTgNote({ ok: true, text: res.chatId ? `Linked to chat ${res.chatId}` : 'Sent — your phone should have buzzed' });
+    });
+  };
 
   return (
     <div className="space-y-5 text-sm">
@@ -687,6 +705,99 @@ const SettingsTab = ({ settings, onChange }: {
         <p className="text-[9px] text-slate-400">
           URL and title are appended to the prompt automatically.
         </p>
+      </section>
+
+      {/* Phone nudge. Last, because it is the only feature that leaves the machine —
+          and the only one where the useful control is a Test button rather than a
+          value, since whether the phone actually buzzes is the phone's business. */}
+      <section className="space-y-2">
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Phone nudge</h3>
+
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] text-slate-600 leading-tight">
+            Buzz my phone when I go idle<br />
+            <span className="text-[10px] text-slate-400">
+              a Telegram message the moment the {Math.round(IDLE_WARNING_MS / 1000)}s warning starts
+            </span>
+          </span>
+          <div
+            onClick={() => set({ telegramEnabled: !settings.telegramEnabled })}
+            className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.telegramEnabled ? 'bg-blue-500' : 'bg-slate-300'}`}
+          >
+            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.telegramEnabled ? 'translate-x-5' : ''}`} />
+          </div>
+        </div>
+
+        {settings.telegramEnabled && (
+          <>
+            <p className="text-[9px] text-slate-400 leading-snug">
+              The screen can't help with the one thing it's for — you've stopped looking at it.
+              Setup, once: message <strong>@BotFather</strong> in Telegram, send <code>/newbot</code>,
+              paste the token it gives you below, then open your new bot, say anything to it and
+              press <strong>Find</strong>.
+            </p>
+
+            <label className="flex items-center justify-between gap-3">
+              <span className="text-[11px] text-slate-600 leading-tight">
+                Bot token<br />
+                <span className="text-[10px] text-slate-400">from @BotFather</span>
+              </span>
+              <input
+                type="password"
+                value={settings.telegramToken ?? ''}
+                onChange={e => set({ telegramToken: e.target.value })}
+                className="w-40 text-right text-[12px] border border-slate-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                placeholder="123456:ABC-…"
+              />
+            </label>
+
+            <label className="flex items-center justify-between gap-3">
+              <span className="text-[11px] text-slate-600 leading-tight">
+                Chat<br />
+                <span className="text-[10px] text-slate-400">found for you — no need to type it</span>
+              </span>
+              <input
+                type="text"
+                value={settings.telegramChatId ?? ''}
+                onChange={e => set({ telegramChatId: e.target.value })}
+                className="w-40 text-right text-[12px] border border-slate-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                placeholder="(press Find)"
+              />
+            </label>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => askTelegram('TELEGRAM_LINK')}
+                disabled={tgBusy !== '' || !settings.telegramToken?.trim()}
+                title="Read the chat id from your bot's own inbox — say anything to the bot first"
+                className="flex-1 cursor-pointer rounded-lg bg-slate-100 px-2 py-1.5 text-[10px] font-bold text-slate-600 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {tgBusy === 'link' ? 'Looking…' : 'Find my chat'}
+              </button>
+              <button
+                onClick={() => askTelegram('TELEGRAM_TEST')}
+                disabled={tgBusy !== '' || !settings.telegramToken?.trim() || !settings.telegramChatId?.trim()}
+                title="Send one now — the only way to know your phone is set to vibrate for it"
+                className="flex-1 cursor-pointer rounded-lg bg-blue-500 px-2 py-1.5 text-[10px] font-bold text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {tgBusy === 'test' ? 'Sending…' : 'Send test buzz'}
+              </button>
+            </div>
+
+            {tgNote && (
+              <p className={`text-[10px] leading-snug ${tgNote.ok ? 'text-green-600' : 'text-red-500'}`}>
+                {tgNote.text}
+              </p>
+            )}
+
+            <p className="text-[9px] text-slate-400 leading-snug">
+              At most one every 5 minutes — a buzz per lapse is a phone you'd silence by lunchtime.
+              The message names no page and no program, but it does tell Telegram's servers when you
+              drift: this is the only thing Focus sends anywhere other than its own backend.
+              Vibration itself is your phone's setting for that chat.
+            </p>
+          </>
+        )}
       </section>
 
     </div>

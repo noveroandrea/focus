@@ -25,6 +25,7 @@ on your machine. An **optional** local AI helper (Ollama) can auto-detect study 
 - [The sprite](#the-sprite)
 - [The popup menu](#the-popup-menu)
 - [Floating companion](#floating-companion)
+- [Phone nudge (Telegram)](#phone-nudge-telegram)
 - [Desktop agent (Windows, macOS, Linux)](#desktop-agent-windows-macos-linux)
   - [Run it](#run-it)
   - [How the extension uses it](#how-the-extension-uses-it)
@@ -622,6 +623,45 @@ the agent.
 
 ---
 
+## Phone nudge (Telegram)
+
+Everything else Focus does needs you to be looking at the screen — and the one failure it
+exists to catch is that you have stopped. The beep needs the volume up and the room quiet;
+the trembling character needs your eyes on it. A phone in your pocket needs neither.
+
+Switch on **Phone nudge** in Settings and Focus sends one Telegram message the moment the
+5-second warning starts — while there is still time to come back before anything is lost.
+Whether that makes the phone vibrate is your phone's setting for that chat, which is why
+there is a **Send test buzz** button: it is the only honest way to find out.
+
+**Setup, once (about a minute):**
+
+1. In Telegram, message **@BotFather** and send `/newbot`. Answer its two questions.
+2. Copy the token it gives you (`123456:ABC-…`) into **Bot token** in Settings.
+3. Open your new bot and **send it anything** — a full stop will do. A bot cannot message
+   you first; this is what opens the conversation.
+4. Press **Find my chat**, then **Send test buzz**.
+
+**At most one nudge every 5 minutes.** Not adjustable, and not an oversight: the warning
+starts every time you look away for `idleTime`, which on an ordinary afternoon is dozens of
+times an hour. A buzz per lapse is not a nudge — it is a phone you would silence by
+lunchtime, which costs the feature the whole point.
+
+**Why Telegram and not a proper push notification.** Web Push would need a hosted page,
+VAPID keys and a PWA the user installs; a real app would need an iOS build. Telegram needs a
+bot token and one HTTPS POST, and works identically on Android and iOS with an app most
+people already have. If you would rather self-host, `buzzPhone()` in
+`src/extension/background.ts` is one `fetch` — ntfy, Gotify and Home Assistant are the same
+shape and roughly the same five lines.
+
+> **This is the only thing Focus sends anywhere other than its own backend.** The message
+> names no page and no program, but the *timing* of these messages is itself a record of
+> when you drift, and it lands on Telegram's servers. That is why the feature is off by
+> default. Anyone running the study should say so in the consent form, or use a self-hosted
+> target instead.
+
+---
+
 ## Optional: Ollama AI auto-classify
 
 When you visit a page that is **not** whitelisted, Focus can ask a **local** LLM (via
@@ -924,6 +964,11 @@ The build in `dist/` is a valid MV3 extension. Before submitting:
   the machine. If you point it at a **remote** backend, the URL and title go to that server
   (and your API key is sent to it as a Bearer token); nothing is sent anywhere else. The
   feature is off unless a backend is reachable.
+- The optional **phone nudge** sends a fixed message ("you have gone idle") to **your own
+  Telegram bot**, at most once every 5 minutes, and only while it is switched on. No page,
+  no program and no score is included — but the timing tells Telegram's servers when you go
+  idle, which is why it is off by default and why it is the only feature that talks to
+  anything other than the AI address and the sync backend you configure.
 - Console logs are prefixed `Focus:`. Inspect the service worker from
   `chrome://extensions` → Focus → **Service Worker**.
 
