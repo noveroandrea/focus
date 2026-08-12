@@ -505,6 +505,36 @@ feeding it the server's own reply posts that reply back as a delta, compounding 
 round trip. The reconciled value is `server + still_pending`, because deltas queued
 mid-flight are not in the server's figure yet and dropping them makes the number jump twice.
 
+### A local Postgres with pgcrypto in `public` hid a Supabase-only failure
+**Status: fixed — `20260812110000_pairing_search_path.sql`**
+
+*Symptom.* Pairing a phone failed at the first step. The popup said the server refused
+the request; the service worker logged `create_pairing failed (400)`.
+
+*Cause.* `create_pairing` was declared `set search_path = public` and called
+`gen_random_bytes(16)` unqualified. **Supabase installs pgcrypto into the `extensions`
+schema**, not `public`, so the call resolved to nothing:
+`function gen_random_bytes(integer) does not exist`. `20260730160000_team_passwords.sql`
+had already documented this for `crypt()`/`gen_salt()` — the trap was known and the new
+migration walked into it anyway.
+
+*Why testing missed it.* The migrations were verified against a scratch PostgreSQL
+instance where `create extension pgcrypto` put the functions in `public`, which is the
+default everywhere except Supabase. The broken version passed locally and failed only in
+production. **A local database is not a copy of Supabase**; when a migration touches an
+extension, reproduce the layout (`create schema extensions; create extension pgcrypto
+with schema extensions;`) or the test proves nothing.
+
+*Fix.* `set search_path = public, extensions`, with the call left unqualified — which
+resolves on Supabase and on a plain install both, and a schema in `search_path` that does
+not exist is ignored rather than an error. `extensions.gen_random_bytes(...)` was the
+other option and is worse: it hard-codes the Supabase layout into a file that also has to
+run locally, which is where the bug hid in the first place.
+
+*Also worth knowing.* The migration that shipped the bug was already applied to
+production, so the fix is a NEW migration rather than an edit. Editing an applied
+migration fixes fresh installs and leaves every existing database broken.
+
 ### Web Push encryption is unverifiable by inspection, so it was verified by decryption
 **Status: verified — `src/extension/push.ts`**
 
