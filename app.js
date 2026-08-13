@@ -135,15 +135,6 @@ function render() {
   show($('steps-ios'), iosPreInstall);
   show($('ios-standalone'), platform === 'ios' && standalone);
   show($('go'), !iosPreInstall);
-
-  $('code-out').value = pairingLink();
-}
-
-/** The link to carry across the install. Rebuilt rather than read off `location`,
- *  because the code may have arrived by paste or from the mirror, in which case the
- *  address bar has no `?p=` on it to copy. */
-function pairingLink() {
-  return `${location.origin}${location.pathname}?p=${encodeURIComponent(code)}`;
 }
 
 $('tab-android').addEventListener('click', () => { platform = 'android'; render(); });
@@ -157,43 +148,12 @@ try { mirrored = localStorage.getItem(STORE_KEY); } catch { mirrored = null; }
 if (!useCode(fromUrl)) useCode(mirrored);
 render();
 
-// ── Carrying the link by hand ────────────────────────────────────────────────
-/** Put `text` on the clipboard, by whichever of the two mechanisms this browser allows.
- *
- *  The async API is tried first and is refused often enough on iOS — an unfocused
- *  document, a gesture the engine did not credit, a lockdown profile — that a button
- *  relying on it alone appears to do nothing at all, which is what happened here. The
- *  fallback is the old selection + execCommand, with the readonly attribute lifted for
- *  the duration: **iOS will not select the contents of a readonly field**, so leaving it
- *  set makes the fallback fail silently in exactly the same way as the thing it is
- *  supposed to rescue. The field is on screen either way, so the third path — long-press
- *  and copy, no permission involved — is always available. */
-async function copyToClipboard(text, el) {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch { /* fall through to the selection path */ }
-
-  if (!el) return false;
-  const wasReadonly = el.readOnly;
-  el.readOnly = false;
-  el.value = text;
-  el.focus();
-  el.setSelectionRange(0, text.length);
-  let ok = false;
-  try { ok = document.execCommand('copy'); } catch { ok = false; }
-  el.readOnly = wasReadonly;
-  return ok;
-}
-
-$('copy').addEventListener('click', async () => {
-  const ok = await copyToClipboard(pairingLink(), $('code-out'));
-  say(ok
-    ? 'Link copied. Now add this page to your Home Screen.'
-    : 'Copying was refused — press and hold the link above, then Copy.',
-    ok ? 'ok' : 'bad');
-});
-
+// ── Recovering a code that did not survive the install ───────────────────────
+// The copy-the-link half of this pair is gone, along with the field it wrote to.
+// It existed only to work around `start_url` in the manifest relaunching the installed
+// app at "./" and dropping the `?p=` code; removing `start_url` fixed that at the
+// source. Reading the clipboard stays, because it costs one button and rescues the
+// case where the code genuinely was lost.
 $('paste').addEventListener('click', async () => {
   let text = '';
   try { text = await navigator.clipboard.readText(); } catch { text = ''; }

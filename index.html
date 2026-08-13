@@ -148,15 +148,14 @@
         <li>Tap the new <strong>Focus</strong> icon and allow notifications.</li>
       </ol>
       <p class="note warn">This page must be opened in Safari.</p>
-
-      <!-- Always on screen, never revealed by a failure. The Copy button is the
-           convenience; the field is the guarantee — a link the user can long-press and
-           copy by hand works on every phone, and needs no permission to be granted. -->
-      <p class="note" style="margin-bottom:0">
-        If the app opens asking for the link, this is it:
-      </p>
-      <input id="code-out" type="text" readonly>
-      <button id="copy" class="ghost mini">Copy link</button>
+      <!-- The copy-the-link field that used to sit here is gone. It existed because
+           `start_url` in the manifest was launching the installed app at "./" and
+           dropping the ?p= code, so the icon opened asking to scan a QR the user had
+           just scanned, and the link had to be carried across by hand. Removing
+           `start_url` fixed that at the source — the spec then defaults it to the
+           document URL, which is the one carrying the code — so the manual carrier is
+           dead weight on the one screen that should be two steps. The #recover card
+           below still exists for the case where the code genuinely did not survive. -->
       <p class="note">
         It is a few extra taps, once. After this the phone buzzes with the app closed and
         the screen locked, like any other notification.
