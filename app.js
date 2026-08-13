@@ -26,13 +26,23 @@
 //      Android tab, and that is all it was ever able to do.
 //
 //  Hence the third route, which is the only one that is guaranteed: the system
-//  clipboard, which every app on the phone shares. The iOS steps offer "Copy code"
-//  before the install and the installed app offers "Paste pairing code" if it opens
-//  without one. It is two taps that most users will never see, and it is the difference
-//  between a flow that fails silently and one that can always be finished.
+//  clipboard, which every app on the phone shares. The iOS steps show the **whole link**
+//  with a Copy button, and the installed app offers to paste it back. The link rather
+//  than the bare code, deliberately: it is what the user already has in the address bar,
+//  it is what a person recognises as "the thing I was sent", and the parser pulls the
+//  code out of it — so copying by hand from Safari's own address bar works just as well
+//  as the button, which matters on a platform that can refuse clipboard access outright.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const STORE_KEY = 'focusPairing';
+
+// Which code this device has already spent. The app relaunches at the URL it was
+// installed with — the same ?p= every time — and that code is single-use and gone from
+// the server the moment the desktop collects it. Without a record of having spent it,
+// reopening the app offered to pair again with a dead code and answered "that pairing
+// code has expired", which reads as a broken pairing rather than a finished one. A
+// DIFFERENT code arriving is a genuine re-pair and still goes through the whole flow.
+const DONE_KEY = 'focusPairedCode';
 
 // <32 hex nonce>.<base64url VAPID public key>. Validated rather than trusted because
 // this now accepts typed and pasted input, and "nothing happened" is a terrible answer
@@ -94,16 +104,25 @@ const standalone = window.matchMedia('(display-mode: standalone)').matches
 
 let platform = isIOS ? 'ios' : 'android';
 
+function alreadyDone() {
+  try { return !!code && localStorage.getItem(DONE_KEY) === code; } catch { return false; }
+}
+
 function render() {
   const paired = !!(nonce && vapidKey);
+  const done = alreadyDone();
+
+  // Finished, and reopened. Nothing here to do again — showing the button would offer a
+  // code that has already been spent.
+  show($('done'), done);
 
   // No code at all: two different situations that must not share a card. In a browser
   // tab the user has wandered in and belongs back at their computer. In the installed
   // app they have already done the work and are one paste away from finishing.
-  show($('no-code'), !paired && !standalone);
-  show($('recover'), !paired && standalone);
-  show($('flow'), paired);
-  if (!paired) return;
+  show($('no-code'), !paired && !standalone && !done);
+  show($('recover'), !paired && standalone && !done);
+  show($('flow'), paired && !done);
+  if (!paired || done) return;
 
   $('tab-android').setAttribute('aria-selected', String(platform === 'android'));
   $('tab-ios').setAttribute('aria-selected', String(platform === 'ios'));
@@ -116,6 +135,15 @@ function render() {
   show($('steps-ios'), iosPreInstall);
   show($('ios-standalone'), platform === 'ios' && standalone);
   show($('go'), !iosPreInstall);
+
+  $('code-out').value = pairingLink();
+}
+
+/** The link to carry across the install. Rebuilt rather than read off `location`,
+ *  because the code may have arrived by paste or from the mirror, in which case the
+ *  address bar has no `?p=` on it to copy. */
+function pairingLink() {
+  return `${location.origin}${location.pathname}?p=${encodeURIComponent(code)}`;
 }
 
 $('tab-android').addEventListener('click', () => { platform = 'android'; render(); });
@@ -129,21 +157,41 @@ try { mirrored = localStorage.getItem(STORE_KEY); } catch { mirrored = null; }
 if (!useCode(fromUrl)) useCode(mirrored);
 render();
 
-// ── Carrying the code by hand ────────────────────────────────────────────────
-$('copy').addEventListener('click', async () => {
+// ── Carrying the link by hand ────────────────────────────────────────────────
+/** Put `text` on the clipboard, by whichever of the two mechanisms this browser allows.
+ *
+ *  The async API is tried first and is refused often enough on iOS — an unfocused
+ *  document, a gesture the engine did not credit, a lockdown profile — that a button
+ *  relying on it alone appears to do nothing at all, which is what happened here. The
+ *  fallback is the old selection + execCommand, with the readonly attribute lifted for
+ *  the duration: **iOS will not select the contents of a readonly field**, so leaving it
+ *  set makes the fallback fail silently in exactly the same way as the thing it is
+ *  supposed to rescue. The field is on screen either way, so the third path — long-press
+ *  and copy, no permission involved — is always available. */
+async function copyToClipboard(text, el) {
   try {
-    await navigator.clipboard.writeText(code);
-    say('Copied. Now add this page to your Home Screen — if the app asks for the code, paste it there.', 'ok');
-  } catch {
-    // Clipboard access can be refused outright. Showing the code is not a fallback so
-    // much as the same offer made a slower way: select it, copy it by hand.
-    const out = $('code-out');
-    show(out, true);
-    out.value = code;
-    out.focus();
-    out.select();
-    say('Copy the code above by hand, then add this page to your Home Screen.');
-  }
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch { /* fall through to the selection path */ }
+
+  if (!el) return false;
+  const wasReadonly = el.readOnly;
+  el.readOnly = false;
+  el.value = text;
+  el.focus();
+  el.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  el.readOnly = wasReadonly;
+  return ok;
+}
+
+$('copy').addEventListener('click', async () => {
+  const ok = await copyToClipboard(pairingLink(), $('code-out'));
+  say(ok
+    ? 'Link copied. Now add this page to your Home Screen.'
+    : 'Copying was refused — press and hold the link above, then Copy.',
+    ok ? 'ok' : 'bad');
 });
 
 $('paste').addEventListener('click', async () => {
@@ -155,7 +203,7 @@ $('paste').addEventListener('click', async () => {
   show($('code-in'), true);
   $('code-in').focus();
   sayRecover(
-    text ? 'That was not a pairing code. Paste it into the box.'
+    text ? 'That was not a Focus pairing link. Paste it into the box.'
          : 'Paste it into the box instead — tap and hold, then Paste.',
     'bad',
   );
@@ -247,9 +295,13 @@ async function pair() {
       return;
     }
 
-    try { localStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
-    show($('flow'), false);
-    show($('done'), true);
+    // Remember WHICH code was spent, not merely that one was: a new QR from the desktop
+    // brings a different code and must still be able to pair this phone again.
+    try {
+      localStorage.removeItem(STORE_KEY);
+      localStorage.setItem(DONE_KEY, code);
+    } catch { /* private mode — the app just offers to pair again, harmlessly */ }
+    render();
   } catch (err) {
     say(`Something went wrong: ${String(err).slice(0, 120)}`, 'bad');
     $('go').disabled = false;

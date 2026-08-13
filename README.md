@@ -156,11 +156,18 @@ and two of the three ways of carrying it can fail:
 The code is still mirrored to `localStorage`, but only for what it can actually do:
 surviving a reload, or a second tab on Android. It cannot cross onto an iPhone.
 
-So the guaranteed route is the clipboard. The iOS steps offer **Copy code** *before*
-the install, and the installed app offers **Paste pairing code** whenever it opens
-without one (falling back to a plain text box if the clipboard API is refused — a whole
-pasted link is accepted as well as the bare code). Most users never see either: the URL
-normally works, and this is the path that makes "normally" not matter.
+So the guaranteed route is the clipboard, and what it carries is the **whole link**, not
+the bare code: it is what is already in the address bar, it is what a person recognises,
+and the parser pulls the code back out of it. The iOS steps keep the link on screen in a
+selectable field with a **Copy link** button, and the installed app offers to **paste the
+link** whenever it opens without a code.
+
+Three ways to get it across, in order of how much they can refuse: the async clipboard
+API, then selection + `execCommand` (with `readonly` lifted for the call — **iOS will not
+select the contents of a readonly field**, and leaving it set makes the fallback fail as
+silently as the thing it rescues), then long-press → Copy on the visible field, which
+needs no permission at all. Most users see none of it: the URL normally survives, and
+this is what makes "normally" not matter.
 
 **Pairing does not need the popup to stay open.** The extension's popup closes the
 moment the browser loses focus, which during this flow is guaranteed. The background
@@ -175,15 +182,33 @@ panel rejoins the same QR rather than issuing a new code.
   settings. The extension can send them; only the phone decides whether they buzz.
   Aggressive battery managers (MIUI, some Samsung profiles) also delay browser
   notifications; this is the one real reliability gap versus a native app.
-- **Nothing arrives on iOS** — confirm you opened the app from the **Home Screen
+- **Nothing arrives on iOS while the Focus app is open** — that is iOS working as
+  designed, and it is the single most confusing thing about testing this. **A
+  notification is never displayed while the app it belongs to is the one on screen.**
+  Native apps opt out of that with a delegate; a web app cannot. Leave the app or lock
+  the phone, then send the test. (Test pushes carry a five-minute TTL for exactly this
+  reason; the idle nudge deliberately does not — see `push.ts`.)
+- **Nothing arrives on iOS at all** — confirm you opened the app from the **Home Screen
   icon** and not from Safari, and that Focus appears in Settings → Notifications.
-- **The Home Screen icon asks for a pairing code** — the code did not survive the
-  install. Go back to Safari, open the QR link again, tap **Copy code**, then paste it
-  in the app. If this happens every time, check that nobody has put a `start_url` back
-  into `manifest.webmanifest`.
+- **There is no Safari in Settings → Notifications** — and there never will be. iOS
+  delivers web push to the *installed Home Screen web app*, never to the browser, so the
+  entry to look for is **Focus**, listed among the apps. It is created the moment
+  permission is granted inside the app, so it does not exist until you have tapped
+  *Allow* there — an install alone does not produce it. (macOS Safari does show web
+  notifications itself; that does not carry over to the phone.)
+- **The Home Screen icon asks for the link** — the code did not survive the install. Go
+  back to Safari, copy the link (the button on that page, or the address bar), then
+  paste it in the app. If this happens every time, check that nobody has put a
+  `start_url` back into `manifest.webmanifest`.
 - **There is no "Add to Home Screen" in the share menu** — you are not in Safari. Brave
   on iOS does not offer it. Open the same link in Safari; the QR link is an ordinary
   URL and can be pasted there.
+- **The phone disappears from the popup right after pairing** — a push was rejected.
+  Open `chrome://extensions` → Focus → **Service Worker** and look for
+  `Focus: push rejected (…)`. A **403** with `BadJwtToken` is the VAPID `sub` claim:
+  Apple requires a parseable `mailto:`/`https:` URL and refuses things FCM accepts
+  (`@localhost` being the one that shipped once). A **404/410** is a genuinely dead
+  subscription — pair again.
 - **It worked, then stopped** — subscriptions expire, and iOS drops them for apps left
   unopened for long stretches. The extension prunes a subscription the moment the push
   service says it is gone (404/410) and the popup shows no paired phone; pair again.

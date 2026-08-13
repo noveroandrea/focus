@@ -103,11 +103,11 @@
     <h2>One thing missing</h2>
     <p style="margin:0">
       This app does not know which computer it belongs to. Go back to <strong>Safari</strong>,
-      open the same link again, tap <strong>Copy code</strong> — then come back here and paste it.
+      copy the link you opened there — then come back and paste it here.
     </p>
-    <button id="paste" class="mini">Paste pairing code</button>
-    <input id="code-in" class="hide" type="text" inputmode="text" autocapitalize="off"
-           autocomplete="off" spellcheck="false" placeholder="Paste the code here">
+    <button id="paste" class="mini">Paste the link</button>
+    <input id="code-in" class="hide" type="text" inputmode="url" autocapitalize="off"
+           autocomplete="off" spellcheck="false" placeholder="Paste the link here">
     <p id="recover-msg" class="note"></p>
   </section>
 
@@ -135,19 +135,21 @@
     <section id="steps-ios" class="card hide">
       <h2>iPhone — add to the Home Screen first</h2>
       <ol>
-        <li>Tap <strong>Copy code</strong> below. You may need it in a moment.</li>
         <li>Tap the <span class="share">↑</span> <strong>Share</strong> button in Safari.</li>
         <li>Scroll down and tap <strong>Add to Home Screen</strong>, then <strong>Add</strong>.</li>
         <li>Open the new <strong>Focus</strong> icon from your Home Screen.</li>
         <li>Tap <strong>Turn on notifications</strong> there, then <strong>Allow</strong>.</li>
       </ol>
-      <button id="copy" class="ghost mini">Copy code</button>
-      <input id="code-out" class="hide" type="text" readonly>
-      <p class="note warn" id="safari-note">
-        This has to be <strong>Safari</strong>. Brave has no <em>Add to Home Screen</em> in
-        its share menu, and only a Home Screen app is allowed to receive notifications on
-        iOS. If you scanned the QR with a different browser, open the link in Safari.
+      <p class="note warn">This page must be opened in Safari.</p>
+
+      <!-- Always on screen, never revealed by a failure. The Copy button is the
+           convenience; the field is the guarantee — a link the user can long-press and
+           copy by hand works on every phone, and needs no permission to be granted. -->
+      <p class="note" style="margin-bottom:0">
+        If the app opens asking for the link, this is it:
       </p>
+      <input id="code-out" type="text" readonly>
+      <button id="copy" class="ghost mini">Copy link</button>
       <p class="note">
         It is a few extra taps, once. After this the phone buzzes with the app closed and
         the screen locked, like any other notification.
@@ -168,10 +170,17 @@
   <section id="done" class="card hide">
     <div class="big">✅</div>
     <h2 style="text-align:center">Paired</h2>
-    <p style="margin:0;text-align:center">
-      Your computer just sent a test notification. If you did not feel it, check this
-      app's notification settings — Focus can send them, but only your phone decides
-      whether they vibrate.
+    <p style="margin:0 0 10px;text-align:center">
+      Your computer has sent a test notification.
+    </p>
+    <p class="note warn" style="margin:0">
+      <strong>Close this app to see it.</strong> iPhone never shows a notification while
+      the app it belongs to is the one on screen — go to the Home Screen or lock the
+      phone, and it appears there.
+    </p>
+    <p class="note">
+      Nothing else to do here. Notifications for this app live under
+      <strong>Settings → Notifications → Focus</strong>, not under Safari.
     </p>
   </section>
 </main>
