@@ -525,6 +525,16 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 // ── Init from storage ─────────────────────────────────────────────────────────
+// Resolves once `settings` holds what is actually on disk rather than the module's
+// initial DEFAULT_SETTINGS. **Anything in an event listener that reads `settings` and
+// then WRITES that reading anywhere must await this first.** Reading storage is async,
+// so between the module being evaluated and the callback below running there is a
+// window in which `settings` is the defaults — and Chrome dispatches lifecycle events
+// inside it. See the onInstalled listener, which lost whitelists for exactly that
+// reason.
+let markSettingsLoaded!: () => void;
+const settingsReady = new Promise<void>((resolve) => { markSettingsLoaded = resolve; });
+
 chrome.storage.local.get(['focusFlowState', 'focusFlowSettings', NUDGE_LAST_KEY], (result) => {
   // Left behind by a version that tried to detect a broken chrome.idle at runtime.
   chrome.storage.local.remove('idleApiProven');
@@ -541,6 +551,7 @@ chrome.storage.local.get(['focusFlowState', 'focusFlowSettings', NUDGE_LAST_KEY]
     chrome.storage.local.set({ focusFlowSettings: DEFAULT_SETTINGS });
   }
   state.enabled = settings.enabled;
+  markSettingsLoaded();
   setNamedPrograms(settings.allowedPrograms ?? []);
   if (settings.forceActive) state.isHeartbeatActive = true;
   updateActionIcon();
@@ -563,10 +574,24 @@ chrome.runtime.onStartup.addListener(() => { void flush(); });
 // A fresh install or update has no pending deltas, but this creates the user's
 // server row and seeds the whitelist so the study has their configuration from the
 // start rather than only after their first accidental edit.
+//
+// **`await settingsReady` is the whole correctness of this listener, not a tidy-up.**
+// onInstalled also fires on every RELOAD of an unpacked extension, and it fires before
+// the storage read above has come back — so `settings` was still DEFAULT_SETTINGS, and
+// these two lines queued the built-in domain list and an EMPTY program list as the
+// user's whitelist. queueDomains/queuePrograms replace rather than merge (`p_domains`,
+// `p_programs` in apply_score_delta), so every domain the user had added was deleted
+// server-side and every program was wiped — `allowedPrograms` defaults to `[]` — and
+// then applyState() faithfully copied that back over local storage. Adding a domain,
+// seeing it land in Supabase, and finding it gone after a reload was this and nothing
+// else. See BUGS.md.
 chrome.runtime.onInstalled.addListener(() => {
-  void flush();
-  void queueDomains(settings.allowedDomains);
-  void queuePrograms(settings.allowedPrograms ?? []);
+  void (async () => {
+    await settingsReady;
+    void flush();
+    void queueDomains(settings.allowedDomains);
+    void queuePrograms(settings.allowedPrograms ?? []);
+  })();
 });
 
 // Pick up settings changes written directly by the popup.

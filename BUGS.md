@@ -446,6 +446,46 @@ top-level names cannot clash with the previous injection.
 
 ## Server, auth and database
 
+### Reloading the extension deleted every added domain and every program
+**Status: fixed — `background.ts`**
+
+*Symptom.* Whitelist a domain or a program; it appears in Supabase immediately, exactly
+as designed. Reload the extension — and it is gone. Not just from the popup: gone from
+`user_domains` / `user_programs` too. Programs came off worst, since **all** of them
+vanished every time, while domains fell back to the built-in defaults.
+
+*Cause.* `chrome.runtime.onInstalled` fires on every reload of an unpacked extension, and
+its listener seeded the server from the module-level `settings`:
+
+```ts
+chrome.runtime.onInstalled.addListener(() => {
+  void queueDomains(settings.allowedDomains);
+  void queuePrograms(settings.allowedPrograms ?? []);
+});
+```
+
+But `settings` is only filled in by the callback of a `chrome.storage.local.get`, which is
+**asynchronous**, and Chrome dispatches onInstalled inside the window before it returns. So
+`settings` was still `DEFAULT_SETTINGS` — the built-in domain list, and `allowedPrograms:
+[]`. `queueDomains`/`queuePrograms` **replace rather than merge** (`p_domains`, `p_programs`
+in `apply_score_delta`), so that posted the defaults as the user's whole whitelist and the
+server deleted the rest. `applyState()` then did its job perfectly and copied the result
+back over local storage, so the evidence was consistent everywhere and looked like the
+edit had never been saved.
+
+Nothing here is individually wrong, which is why it survived: the listener is right to
+seed, `queueDomains` is right to replace, and `applyState` is right to trust the server.
+The bug is only in *when* the first one runs.
+
+*Fix.* A `settingsReady` promise resolved by the storage callback, awaited by the listener
+before it reads `settings`. The rule it encodes is the general one: **anything in a
+lifecycle listener that reads `settings` and then writes that reading anywhere must await
+`settingsReady` first** — the module's initial value is not the user's configuration, it
+is a placeholder that happens to be a valid-looking whitelist.
+
+Not fixed by gating on `details.reason === 'install'`: that hides this path but leaves the
+same trap for the next listener, and a genuine update should still be able to seed.
+
 ### `SECURITY DEFINER` functions were callable with any `user_id`
 **Status: fixed — 408fcec (migration `20260729210000`)**
 
