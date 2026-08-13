@@ -130,6 +130,15 @@ export interface CompanionState {
   osHeld: boolean;
   iconChangeAt: number;
   penaltyAt: number;
+  /** What the last penalty cost, for the fly-up's label — a lapse charges −5, then −10,
+   *  then −15, so there is no single number to hard-code. */
+  penaltyAmount: number;
+  /** When the next stage lands and what it takes; 0 when nothing is pending. Computed
+   *  in the background (the final stage is pinned to the auto-pause, so it depends on
+   *  cryBeepDuration) and broadcast, so this canvas and the in-page sprite count down
+   *  to the same instant. */
+  nextPenaltyAt: number;
+  nextPenaltyAmount: number;
 }
 
 interface Particle { x: number; y: number; vx: number; vy: number; color: string; size: number; born: number; life: number }
@@ -236,7 +245,7 @@ export function createCompanionCanvas(opts: { idleWarningMs: number; growDuratio
       }
       if (s.penaltyAt && s.penaltyAt !== lastPenaltyAt) {
         lastPenaltyAt = s.penaltyAt;
-        flyUp('−10', '#ef4444', 88, 2600);
+        flyUp(`−${s.penaltyAmount || 0}`, '#ef4444', 88, 2600);
       }
     }
     lastFocus = s.focusScore ?? 0;
@@ -293,6 +302,15 @@ export function createCompanionCanvas(opts: { idleWarningMs: number; growDuratio
     if (idleSince && now - idleSince < opts.idleWarningMs) {
       const remain = Math.max(0, (idleSince + opts.idleWarningMs - now) / 1000);
       return { text: `W ${Math.ceil(remain)}s`, color: '#fbbf24' };
+    }
+    // Past the warning: what the lapse is about to cost, and when. Straight from the
+    // broadcast rather than computed here — the last stage is pinned to the auto-pause
+    // and so depends on cryBeepDuration, which this panel is not given.
+    if (s.nextPenaltyAt > now) {
+      return {
+        text: `−${s.nextPenaltyAmount} in ${Math.ceil((s.nextPenaltyAt - now) / 1000)}s`,
+        color: '#f87171',
+      };
     }
     return null;
   }
@@ -388,8 +406,16 @@ export function createCompanionCanvas(opts: { idleWarningMs: number; growDuratio
 
     const ph = currentPhase();
     if (ph) {
+      // Shrunk to fit rather than trusted to. "I 20s" and "W 4s" always fitted; the
+      // penalty countdown does not — with a long beep duration the last stage can be
+      // minutes away, and "−15 in 240s" runs off the right edge at the full size. The
+      // plate is measured from the text, so an overflowing string takes its background
+      // over the edge with it and reads as a broken layout rather than a long number.
+      const maxW = CANVAS_W - 24 - (sx - 12) - 24;
       ctx.font = 'bold 34px system-ui, sans-serif';
-      plate(sx - 12, 134, ctx.measureText(ph.text).width + 24, 46);
+      const w = ctx.measureText(ph.text).width;
+      if (w > maxW) ctx.font = `bold ${Math.max(20, Math.floor(34 * maxW / w))}px system-ui, sans-serif`;
+      plate(sx - 12, 134, Math.min(w, maxW) + 24, 46);
       ctx.fillStyle = ph.color;
       ctx.fillText(ph.text, sx, 168);
     }

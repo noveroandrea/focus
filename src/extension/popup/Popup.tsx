@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, PairStart, PairedPhone, PhonePlatform, localDateKey, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle, SPRITE_MODES, clampSpriteMode } from '../../types';
-import { FileText, Activity, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus, Smartphone, X } from 'lucide-react';
+import { FileText, Activity, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus, Smartphone, X, Copy, Check } from 'lucide-react';
 // Drawn in the popup, never fetched: the URL encoded here carries a single-use
 // pairing secret, and asking a chart service to render it would hand them the pairing.
 import qrcode from 'qrcode-generator';
@@ -329,6 +329,7 @@ const PhonePairing = () => {
   const [now, setNow] = useState(Date.now());
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const refresh = () =>
     chrome.runtime.sendMessage({ type: 'PUSH_LIST' }, (res?: PairedPhone[]) => {
@@ -367,8 +368,17 @@ const PhonePairing = () => {
           setPair(null);
           setPlatform(null);
           refresh();
+          // Deliberately not "your phone just buzzed" on iOS: it almost certainly did
+          // not. A notification is never shown while its own web app is the thing on
+          // screen, and the user is holding that app open at this exact moment — so
+          // promising a buzz sends them to debug a system that is working.
           setNote(res.delivered
-            ? { ok: true, text: 'Paired — your phone should have just buzzed.' }
+            ? {
+              ok: true,
+              text: platform === 'ios'
+                ? 'Paired. Leave the Focus app or lock the phone — the test notification appears then, not while you are looking at the app.'
+                : 'Paired — your phone should have just buzzed.',
+            }
             : { ok: false, text: 'Paired, but the test notification did not go through. Try Send test.' });
         },
       );
@@ -394,6 +404,31 @@ const PhonePairing = () => {
     });
   };
 
+  // The same pairing, in text. A QR needs a second device with a working camera pointed
+  // at this screen, which is not always what the user has: the phone may already be in
+  // their hand with a chat window open to themselves, the screen may be a laptop being
+  // shared, or the camera may simply refuse. The link is what the QR encodes, so mailing
+  // it to yourself and mailing the QR are the same act — including the part where the
+  // pairing secret is in it, which is why both expire in ten minutes and work once.
+  const urlRef = useRef<HTMLInputElement>(null);
+
+  const copyUrl = () => {
+    if (!pair?.url) return;
+    const done = () => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    };
+    // execCommand is the fallback and not the leftover: the async clipboard API rejects
+    // when the document is not focused, which a popup loses easily, and a copy button
+    // that silently does nothing is worse than the deprecated call that still works.
+    navigator.clipboard?.writeText(pair.url).then(done).catch(() => {
+      const el = urlRef.current;
+      if (!el) return;
+      el.select();
+      if (document.execCommand('copy')) done();
+    });
+  };
+
   const forget = (endpoint: string) =>
     chrome.runtime.sendMessage({ type: 'PUSH_FORGET', endpoint }, () => {
       void chrome.runtime.lastError;
@@ -407,7 +442,7 @@ const PhonePairing = () => {
       void chrome.runtime.lastError;
       setBusy(false);
       setNote(res?.ok
-        ? { ok: true, text: 'Sent — your phone should have buzzed.' }
+        ? { ok: true, text: 'Sent — your phone should buzz. On iPhone, lock it first: nothing is shown while the Focus app is on screen.' }
         : { ok: false, text: 'Nothing was delivered. The subscription may have expired; pair again.' });
     });
   };
@@ -441,6 +476,22 @@ const PhonePairing = () => {
 
   return (
     <div className="space-y-2">
+      {/* First, and outside the list of paired phones — it used to live inside it, which
+          meant the one control that answers "is this working at all?" disappeared in
+          exactly the situation where you go looking for it: no phone paired, or one
+          silently pruned after the push service rejected it. Disabled says that plainly;
+          absent said nothing. */}
+      <button
+        onClick={test}
+        disabled={busy || phones.length === 0}
+        title={phones.length === 0
+          ? 'Pair a phone first — there is nothing to send to'
+          : 'Send one now — the only way to know your phone is set to vibrate for it'}
+        className="w-full cursor-pointer rounded-lg bg-blue-500 px-2 py-1.5 text-[10px] font-bold text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+      >
+        Send test buzz
+      </button>
+
       {phones.length > 0 && (
         <div className="space-y-1 rounded-xl border border-slate-100 p-1">
           {phones.map((ph) => (
@@ -461,14 +512,6 @@ const PhonePairing = () => {
               </button>
             </div>
           ))}
-          <button
-            onClick={test}
-            disabled={busy}
-            title="Send one now — the only way to know your phone is set to vibrate for it"
-            className="w-full cursor-pointer rounded-lg bg-blue-500 px-2 py-1.5 text-[10px] font-bold text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Send test buzz
-          </button>
         </div>
       )}
 
@@ -511,7 +554,38 @@ const PhonePairing = () => {
           </div>
 
           {secondsLeft > 0 ? (
-            <img src={qr} alt="Pairing QR code" className="mx-auto block w-40 rounded-lg bg-white p-1" />
+            <>
+              <img src={qr} alt="Pairing QR code" className="mx-auto block w-40 rounded-lg bg-white p-1" />
+
+              {/* The same link in text, for when there is no camera pointed at this
+                  screen. Read-only and select-all-on-focus, so the fallback to copying
+                  it by hand is one keystroke rather than a careful drag. */}
+              <div className="space-y-1">
+                <p className="text-[9px] leading-snug text-slate-400">
+                  No camera? Copy the link and open it on the phone — same pairing.
+                </p>
+                <div className="flex items-center gap-1">
+                  <input
+                    ref={urlRef}
+                    readOnly
+                    value={pair.url}
+                    onFocus={(e) => e.currentTarget.select()}
+                    aria-label="Pairing link"
+                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-1.5 py-1 font-mono text-[9px] text-slate-500 focus:border-blue-400 focus:outline-none"
+                  />
+                  <button
+                    onClick={copyUrl}
+                    title="Copy the pairing link"
+                    className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-[10px] font-bold transition-colors ${
+                      copied ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600 hover:bg-slate-300'
+                    }`}
+                  >
+                    {copied ? <Check size={11} /> : <Copy size={11} />}
+                    {copied ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+            </>
           ) : (
             <p className="py-4 text-center text-[10px] text-slate-400">
               This code has expired — pick your phone again for a new one.
@@ -523,7 +597,6 @@ const PhonePairing = () => {
             {platform === 'ios' ? (
               <>
                 <li>Scan it with the Camera app and open the link <strong>in Safari</strong>.</li>
-                <li>Tap <strong>Copy code</strong> on that page.</li>
                 <li>Tap <strong>Share</strong> → <strong>Add to Home Screen</strong> → <strong>Add</strong>.</li>
                 <li>Open the new <strong>Focus</strong> icon.</li>
                 <li>Tap <strong>Turn on notifications</strong>, then <strong>Allow</strong>.</li>
@@ -540,7 +613,8 @@ const PhonePairing = () => {
             <p className="text-[9px] leading-snug text-slate-400">
               iPhones only allow notifications for web apps added to the Home Screen, and
               only <strong>Safari</strong> can add one — Brave has no <em>Add to Home Screen</em>.
-              You can close this popup while you do it; pairing finishes on its own.
+              If the new icon opens asking for the link, copy it from that Safari page and
+              paste it in. You can close this popup meanwhile; pairing finishes on its own.
             </p>
           )}
 
@@ -971,8 +1045,10 @@ const SettingsTab = ({ settings, onChange }: {
         {settings.pushEnabled && <PhonePairing />}
 
         <p className="text-[9px] text-slate-400 leading-snug">
-          At most one nudge every 5 minutes — a buzz per lapse is a phone you'd silence by
-          lunchtime. The message names no page and no program, and it goes from this browser
+          One nudge when you drift, then a repeat every 5 seconds counting down to what it
+          will cost — until you come back, or Focus switches itself to Not working and says
+          so. At most one such burst every 5 minutes: a buzz per lapse is a phone you'd
+          silence by lunchtime. The message names no page and no program, and it goes from this browser
           straight to your phone: nothing about it reaches any server.
         </p>
       </section>
@@ -1012,7 +1088,8 @@ const Popup = () => {
         const empty: SessionState = {
           isHeartbeatActive: false, lastHeartbeat: 0, activeWindowId: null, enabled: true,
           currentIconId: 0, heartbeatCount: 0, iconChangeAt: 0, focusScore: 0, distractedScore: 0,
-          scoreDate: localDateKey(), penaltyAt: 0, osHeld: false,
+          scoreDate: localDateKey(), penaltyAt: 0, penaltyAmount: 0,
+          nextPenaltyAt: 0, nextPenaltyAmount: 0, osHeld: false,
         };
         if (chrome.runtime.lastError) { setState(empty); return; }
         setState(res ?? empty);

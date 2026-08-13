@@ -184,6 +184,26 @@ A 60 px circular companion injected into every **authorized** page:
 The shrink amount is a direct function of `heartbeatCount / iconChangeHeartbeats`, so the
 sprite size always tells you how close you are to the next character.
 
+### What a lapse costs
+
+Drifting off is not one flat charge — it gets worse the longer it runs, and the readout
+under the score says what is coming next (`−10 in 24s`) so it is never a surprise:
+
+| When | Cost |
+|---|---|
+| 10 s idle (after the warning + grace) | **−5** |
+| 30 s later | **−10** |
+| When Focus gives up and switches itself to *Not working* | **−15** |
+
+The first one is deliberately the smallest: ten seconds is a glance out of the window, and
+charging −15 for that is how a feature gets switched off. Coming back at any point stops
+the staircase where it is, and the whole thing resets for the next lapse.
+
+The last step is pinned to the auto-pause rather than a clock of its own, so the **beep
+duration** slider stays the single answer to "how long does a lapse go on for". Set it
+short enough (under ~35 s) and there is simply no room for the middle step — the schedule
+drops it rather than promising a penalty that could never land.
+
 ---
 
 ## The popup menu
@@ -631,9 +651,23 @@ quiet; the trembling character needs your eyes on it. A phone in your pocket nee
 neither.
 
 Switch it on in Settings and Focus sends **one notification the moment the 5-second
-warning starts** — while there is still time to come back before anything is lost. It
-arrives on a locked phone with the app closed, because it rides the same push channel
-native apps use.
+warning starts** — while there is still time to come back before anything is lost — and
+then **repeats every 5 seconds**, counting down to what the lapse is about to cost
+(*"5 seconds before −5"*, *"22 seconds before −10"*, then just **FOCUS!** once the last
+one has landed). They arrive on a locked
+phone with the app closed, because they ride the same push channel native apps use.
+
+The repeating stops when you come back, or when the lapse outlasts the beep and Focus
+switches itself to *Not working* — about a minute with the default settings, and governed
+by the same **beep duration** slider that decides how long everything else nags you. That
+last moment gets one final message, **⏸️ Not working**, which is the only one that reports
+rather than warns. Your phone shows **one** notification throughout rather than a dozen:
+each push replaces the last and re-alerts.
+
+The countdowns in those messages are written a few seconds **ahead**, because a push takes
+a few seconds to arrive and a number computed at send time lands already wrong. They round
+in your favour, so the phone under-promises by about a second rather than running out
+early.
 
 ### Pair a phone (one QR)
 
@@ -654,10 +688,14 @@ programmatic install. It is a few extra taps, once.
 
 Two iPhone-only notes, both of which will otherwise look like the pairing is broken:
 **it has to be Safari** (Brave has no *Add to Home Screen* in its share menu), and if
-the new icon opens asking for a **pairing code**, go back to Safari, tap *Copy code* on
-the same page and paste it in — the app is installed separately from the tab and the
-code does not always come with it. You can close the popup while you do all this;
-pairing finishes on its own.
+the new icon opens **asking for the link**, go back to Safari, copy the link from that
+page and paste it in — the app is installed separately from the tab and the code does
+not always come with it. You can close the popup while you do all this; pairing finishes
+on its own.
+
+The same link sits under the QR with a **Copy** button, for when there is no camera
+pointed at the screen — send it to yourself and open it on the phone. It is exactly what
+the QR encodes, secret included, and expires on the same ten-minute clock.
 
 Your computer sends a test notification the instant pairing completes — which is the
 only honest way to find out whether the phone is set to vibrate for it, since that is

@@ -14,13 +14,29 @@ export interface SessionState {
   iconChangeAt: number;
   /** Points earned by focusing: +30/iconChangeHeartbeats per character change. Only ever rises. */
   focusScore: number;
-  /** Points lost to distraction: −10 per idle lapse. Only ever falls, so it goes negative. */
+  /** Points lost to distraction: up to −5, −10 and −15 as one idle lapse drags on.
+   *  Only ever falls, so it goes negative. */
   distractedScore: number;
   /** Local calendar day (YYYY-MM-DD) the two scores above belong to. When the day
    *  changes, the old day is banked into DayScore[] history and the scores reset. */
   scoreDate: string;
-  /** Timestamp nonce bumped each time an idle penalty is applied — triggers the "−10" sprite animation */
+  /** Timestamp nonce bumped each time an idle penalty is applied — triggers the fly-up
+   *  animation on every surface. */
   penaltyAt: number;
+  /** What that penalty took, so the fly-up can say −5, −10 or −15 instead of a constant.
+   *  Carried rather than derived from the score: the server reconciles distractedScore
+   *  after every post, so a change in it is not evidence that anything happened here. */
+  penaltyAmount: number;
+  /** When the NEXT penalty of this lapse lands, and what it will cost. 0 when nothing is
+   *  pending — active, paused, or the lapse has already paid every stage.
+   *
+   *  Broadcast rather than recomputed per surface, and that is the point: the sprite, the
+   *  companion canvas and the phone nudge all count down to this number, so none of them
+   *  can disagree with the scoring or with each other. The schedule itself depends on
+   *  `cryBeepDuration` (the last stage is pinned to the auto-pause), which a content
+   *  script has no business knowing. */
+  nextPenaltyAt: number;
+  nextPenaltyAmount: number;
   /** True while the session is being kept alive by OS-wide activity (you're working
    *  in another application) rather than by input on the page itself. Activity
    *  anywhere counts as working, so the idle countdown legitimately stops falling —

@@ -379,7 +379,8 @@ const Dashboard = () => {
     const empty: SessionState = {
       isHeartbeatActive: false, lastHeartbeat: 0, activeWindowId: null, enabled: true,
       currentIconId: 0, heartbeatCount: 0, iconChangeAt: 0, focusScore: 0, distractedScore: 0,
-      scoreDate: localDateKey(), penaltyAt: 0, osHeld: false,
+      scoreDate: localDateKey(), penaltyAt: 0, penaltyAmount: 0,
+      nextPenaltyAt: 0, nextPenaltyAmount: 0, osHeld: false,
     };
     chrome.runtime.sendMessage({ type: 'GET_STATE' }, (res?: SessionState) => {
       setState(chrome.runtime.lastError ? empty : (res ?? empty));

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.focus-companion"
+          path="/org/gnome/shell/extensions/focus-companion/">
+
+    <!-- 0–255, the unit Clutter's actor opacity takes and the same unit the Windows
+         agent's LWA_ALPHA takes, so one number means the same thing on both platforms
+         and nothing has to be converted anywhere.
+
+         The floor is 40 rather than 0 on purpose: a companion at 0 is an invisible
+         window that still takes clicks, which reads as a broken desktop rather than a
+         setting the user chose, and the way back is a preferences dialog they can no
+         longer see the reason to open. 255 is fully solid. -->
+    <key name="companion-opacity" type="i">
+      <default>180</default>
+      <range min="40" max="255"/>
+      <summary>Companion window opacity</summary>
+      <description>
+        How solid the floating companion window is drawn, from 40 (very faint) to 255
+        (fully opaque). Applied by the compositor, because a browser cannot make its
+        own window see-through. Takes effect immediately on any open companion.
+      </description>
+    </key>
+
+  </schema>
+</schemalist>

@@ -23,8 +23,20 @@ UUID="focus-companion@focus.dev"
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DEST="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$UUID"
 
-mkdir -p "$DEST"
-cp "$SRC/metadata.json" "$SRC/extension.js" "$DEST/"
+mkdir -p "$DEST/schemas"
+cp "$SRC/metadata.json" "$SRC/extension.js" "$SRC/prefs.js" "$DEST/"
+cp "$SRC/schemas/"*.gschema.xml "$DEST/schemas/"
+
+# GSettings reads a COMPILED binary, never the XML beside it, and an extension whose
+# schema was not compiled fails at getSettings() — which happens inside enable(), so
+# the whole extension appears broken rather than just its preferences. Compiling here
+# is the difference between one command and a puzzle.
+if command -v glib-compile-schemas >/dev/null 2>&1; then
+  glib-compile-schemas "$DEST/schemas"
+else
+  echo "⚠ glib-compile-schemas not found — install glib2 dev tools, or the opacity"
+  echo "  setting will not load. (Debian/Ubuntu: libglib2.0-dev-bin, Fedora: glib2-devel)"
+fi
 echo "Installed to $DEST"
 
 # Mark it enabled for the NEXT login.
@@ -75,6 +87,13 @@ Then start the agent:  cd desktop && npm start
 
 The floating companion window will also start pinning itself above other windows —
 open it from the extension popup's Working button.
+
+How see-through that window is can be changed at any time, with it open, from:
+
+  gnome-extensions prefs focus-companion@focus.dev
+
+(or the gear beside the extension in the Extensions app). The slider applies as you
+drag it — this one setting does NOT need another logout.
 
 To undo:  gnome-extensions disable focus-companion@focus.dev
           rm -rf ~/.local/share/gnome-shell/extensions/focus-companion@focus.dev

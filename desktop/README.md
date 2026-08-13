@@ -157,6 +157,38 @@ Each needs Accessibility permission (System Settings → Privacy & Security → 
 because it manipulates other applications' windows. That is exactly the permission this
 agent is designed never to ask for.
 
+## See-through
+
+The companion can also be made translucent, so you can tell what is underneath it. This is
+the same wall as pinning and has the same three answers, for the same reason: a browser
+cannot make its own window see-through either. `chrome.windows.create` opens a real
+toplevel that the browser paints onto an opaque surface, so no CSS in the window can reach
+past it — the one API that could went away with Chrome Apps.
+
+| | Who fades it | How you set it |
+|---|---|---|
+| **Windows** | this agent | `FOCUS_COMPANION_OPACITY=180`, then restart the agent |
+| **Linux / GNOME** | the Shell bridge | `gnome-extensions prefs focus-companion@focus.dev` — live |
+| **macOS** | nobody | — |
+
+Both use the same 0–255 scale, where 255 is fully solid and the default is **180** (≈70%).
+On GNOME the slider applies as you drag it, with the companion open. On Windows the value
+is read from the environment at start-up, but it is re-applied on every pin pass, so
+restarting the agent updates a companion that is already open — you do not have to reopen
+the window.
+
+**What you get is uniform translucency, not a transparent background behind opaque
+content.** Both platforms fade the whole window, so the character and the score dim by as
+much as the panel under them. That is unavoidable from outside the window: only the page
+could separate the two, and this is not a page. It is also **not** click-through — the
+companion still takes the clicks that land on it.
+
+Don't go too low. The companion exists to be caught out of the corner of your eye, and the
+idle tremble and countdown depend on it staying legible; faded far enough to comfortably
+read what is behind it, it stops registering at all. The GNOME slider floors at 40 for the
+same reason — an invisible window that still takes clicks reads as a broken desktop rather
+than a setting you chose.
+
 ## Wayland
 
 A Wayland client **cannot** see which other application has focus. That is a security

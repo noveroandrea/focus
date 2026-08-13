@@ -1,8 +1,8 @@
 import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, PairStart, PairedPhone, PhonePlatform, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, clampIdleTime, round2 } from '../types';
 import {
   STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS, WORKING_FRESH_MS,
-  IDLE_PENALTY, IDLE_WARNING_MS, NUDGE_COOLDOWN_MS, PAIRING_TTL_MS,
-  idlePenaltyDelayMs, autoPauseDelayMs,
+  IDLE_WARNING_MS, NUDGE_COOLDOWN_MS, NUDGE_REPEAT_MS, PUSH_LATENCY_MS, PAIRING_TTL_MS,
+  penaltyStages, autoPauseDelayMs,
 } from './timings';
 // Every heartbeat source — page input, focused PDF/viewer tabs, OS-wide activity —
 // lives in ./heartbeats. This file owns the state; that one decides when it beats.
@@ -26,6 +26,7 @@ import { isServerConfigured, isPushConfigured, PUSH_LANDING_URL } from './server
 // the server's only part in this is carrying a subscription across during pairing.
 import {
   publicKeyB64, listSubscriptions, addSubscription, removeSubscription, sendPush,
+  TEST_PUSH_TTL_S, PAUSE_PUSH_TTL_S,
 } from './push';
 // The optional desktop agent — reports which PROGRAM is in front. Purely a sensor:
 // every decision about what that means lives in ./heartbeats.
@@ -57,6 +58,9 @@ let state: SessionState = {
   distractedScore: 0,
   scoreDate: '',
   penaltyAt: 0,
+  penaltyAmount: 0,
+  nextPenaltyAt: 0,
+  nextPenaltyAmount: 0,
   osHeld: false,
 };
 
@@ -222,16 +226,19 @@ function programIsDriving(): boolean {
 // Placement lives here rather than in the popup for two reasons: the popup closes
 // the moment the window opens, taking any callback with it, and chrome.system.display
 // is a background-only concern.
-// 30% off each side of the original 300×260 — a quarter of the area. This window is
-// meant to be *beside* the work rather than looked at, so the smallest size that can
+// 23% off each side of the original 300×260 — a little under 60% of the area. This
+// window is meant to be *beside* the work rather than looked at, so a size that can
 // still be read at a glance is the right one; the drawing is resolution-independent
 // (a 480×240 picture scaled into whatever box it gets) and the two whitelist bars
 // ellipsize, so nothing breaks on the way down. The one part that does not shrink is
 // the window frame the platform draws, which is why the height loses proportionally
 // more of its content than the width. A platform that refuses a window this small
 // clamps it up to its own minimum, which costs nothing but the shrinking.
-const COMPANION_W = 210;
-const COMPANION_H = 182;   // canvas + the two whitelist bars + the pin line
+//
+// It was 210×182 until the companion became translucent: fading the whole window
+// spends some of the contrast the small size was relying on, so it took 10% back.
+const COMPANION_W = 231;
+const COMPANION_H = 200;   // canvas + the two whitelist bars + the pin line
 const COMPANION_MARGIN = 16;
 const COMPANION_IDS_KEY = 'pipWindowIds';
 
@@ -365,6 +372,56 @@ async function openCompanion(extra: boolean) {
 const NUDGE_LAST_KEY = 'focusNudgeAt';
 let nudgeLastAt = 0;
 
+/** When the next repeat is due, or 0 while no lapse is nudging. Deliberately NOT
+ *  persisted, unlike the cooldown above: a repeat is a rhythm inside one lapse, and a
+ *  revived worker resuming one it never saw start would open with a burst for a lapse
+ *  that may have ended while it was asleep. The cooldown has the opposite requirement —
+ *  it exists to survive precisely that gap. */
+let nudgeRepeatAt = 0;
+
+/** This lapse's schedule, at the beep duration currently configured. */
+function stages(): { at: number; amount: number }[] {
+  return penaltyStages(clampCryBeepDuration(settings.cryBeepDuration));
+}
+
+/** The line the phone shows. A countdown while there is still something to lose — that
+ *  is the whole content of the nudge, since "come back now and it costs nothing" is a
+ *  different message from "you are already paying" — and a bare shout once every stage
+ *  has landed, because there is no longer a number to offer.
+ *
+ *  Written for the moment it will be READ, not the moment it is sent: PUSH_LATENCY_MS
+ *  ahead, because a push takes a few seconds to reach a phone and the countdown it
+ *  carries is stale on arrival by exactly that much. Once the compensated number reaches
+ *  zero the penalty will have landed before the phone lights up, so there is nothing left
+ *  to count down to and it becomes the shout early rather than promising a second that
+ *  will already be gone. */
+function nudgeText(now: number): string {
+  if (!state.nextPenaltyAt) return 'FOCUS!';
+  const secs = Math.round((state.nextPenaltyAt - now - PUSH_LATENCY_MS) / 1000);
+  if (secs <= 0) return 'FOCUS!';
+  return `${secs} second${secs === 1 ? '' : 's'} before −${state.nextPenaltyAmount}`;
+}
+
+/** Nudge again, every NUDGE_REPEAT_MS, for as long as the lapse is still being nagged
+ *  about. Called from the one-second status loop rather than a timer of its own: a
+ *  second timer would be a second thing to keep alive in a worker that suspends, and the
+ *  loop is already running for the penalty and the auto-pause this rides alongside. */
+function repeatNudge(now: number): void {
+  if (!nudgeRepeatAt || now < nudgeRepeatAt) return;
+  // Ended by the same thing that ends the beep: the session has decided you are not
+  // working, so it stops asking. Nothing here counts repeats or holds a deadline of its
+  // own — cryBeepDuration is the one "how long does Focus nag me" knob.
+  if (!settings.enabled || settings.forceActive || settings.pushEnabled === false) {
+    nudgeRepeatAt = 0;
+    return;
+  }
+  // Advanced from the schedule, not from now: the status loop ticks once a second, so
+  // measuring from the send would let up to a second of jitter accumulate on every
+  // repeat and the gap would drift away from five seconds.
+  nudgeRepeatAt = now + NUDGE_REPEAT_MS;
+  void sendPush(nudgeText(now), '');
+}
+
 /** Fire the nudge, if everything about the moment says it should be fired. Called from
  *  writeState on the active→idle edge, which is the same instant the sprite starts its
  *  warning — one edge, one definition, no second timer to drift from it. */
@@ -382,6 +439,10 @@ function buzzPhone(): void {
   if (now - nudgeLastAt < NUDGE_COOLDOWN_MS) return;
   nudgeLastAt = now;
   chrome.storage.local.set({ [NUDGE_LAST_KEY]: now });
+  // From here the lapse keeps asking. One buzz is easy to miss — the phone is in a
+  // pocket, or you glanced at it and put it down — and missing it is the exact failure
+  // this feature exists for.
+  nudgeRepeatAt = now + NUDGE_REPEAT_MS;
 
   // Fire-and-forget: with no phone paired this returns immediately, and a nudge that
   // fails is never retried — it is only worth delivering inside the few seconds the
@@ -444,7 +505,11 @@ async function collectPairing(nonce: string, platform: PhonePlatform): Promise<n
   // Straight away, and from here rather than from the popup: this is the moment the
   // user is holding the phone and looking at it, which is the only moment a "did it
   // vibrate?" answer is worth anything — and by construction the popup is shut.
-  return await sendPush('✅ Focus', 'Paired. This is what an idle nudge will feel like.');
+  // With a real TTL, not the nudge's drop-or-nothing: on iOS a notification is never
+  // shown while its own web app is the thing on screen, which is exactly where the user
+  // is standing at this instant. Queued for a few minutes it appears the moment they
+  // leave the app or lock the phone — which is the only place they could have seen it.
+  return await sendPush('✅ Focus', 'Paired. This is what an idle nudge will feel like.', TEST_PUSH_TTL_S);
 }
 
 // Module scope, so it exists synchronously when Chrome wakes the worker to deliver the
@@ -534,8 +599,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
       // nothing left over from the previous lapse can land on this fresh one.
       idleWasActive = true;
       idleSince = 0;
-      idlePenaltyApplied = false;
+      penaltiesPaid = 0;
       autoPauseApplied = false;
+      nudgeRepeatAt = 0;
       // The Working / Not-working button was clicked — one of the three moments the
       // client checks in. Hooked here rather than in the popup so it fires however
       // the toggle was flipped (the button, or the auto-pause after a long idle).
@@ -646,7 +712,7 @@ function broadcastState() {
 //  derived delays live in ./timings.ts, shared with the sprite.)
 let idleWasActive = state.isHeartbeatActive; // tracks the active→idle edge
 let idleSince = 0;              // when the current idle lapse began
-let idlePenaltyApplied = false; // one penalty per idle lapse
+let penaltiesPaid = 0;          // how many of this lapse's stages have landed
 let autoPauseApplied = false;   // one auto "Not working" switch per idle lapse
 
 // ── Day boundaries live on the server ─────────────────────────────────────────
@@ -660,15 +726,20 @@ let autoPauseApplied = false;   // one auto "Not working" switch per idle lapse
 // state.scoreDate is now set from the server's live_day, so "today" in the popup
 // means the server's focus-day rather than a locally computed date.
 
-// Called once per second from the status loop. Detects the transition into idle
-// and, once that lapse has outlasted the warning + grace phases, deducts the
-// penalty a single time until activity resumes.
+// Called once per second from the status loop. Detects the transition into idle and
+// walks the lapse down its penalty schedule (penaltyStages in timings.ts), deducting
+// each stage once, until activity resumes.
 function trackIdlePenalty() {
   const now = Date.now();
   if (state.isHeartbeatActive) {
     idleWasActive = true;
-    idlePenaltyApplied = false;
+    penaltiesPaid = 0;
     autoPauseApplied = false;
+    nudgeRepeatAt = 0;   // you came back — that is the answer the repeats were asking for
+    // Nothing is owed, so nothing is counting down. Cleared through updateState so every
+    // surface drops its countdown on the same broadcast that says you are active again,
+    // rather than each noticing separately a poll later.
+    if (state.nextPenaltyAt) updateState({ nextPenaltyAt: 0, nextPenaltyAmount: 0 });
     return;
   }
   // Anchor the lapse. Two ways in: the active→idle edge, and finding ourselves
@@ -688,13 +759,35 @@ function trackIdlePenalty() {
   if (idleWasActive || !idleSince) {
     idleWasActive = false;
     idleSince = now;
-    idlePenaltyApplied = false;
+    penaltiesPaid = 0;
     autoPauseApplied = false;
   }
-  if (!idlePenaltyApplied && now - idleSince > idlePenaltyDelayMs()) {
-    idlePenaltyApplied = true;
-    // penaltyAt is a nonce the sprite watches to play the "−10" fly-up once.
-    updateState({ distractedScore: round2(state.distractedScore - IDLE_PENALTY), penaltyAt: now });
+
+  // Walk the schedule. A loop rather than one test because a worker that was suspended
+  // (or a machine that was asleep) can come back with two stages already due, and paying
+  // them one per second afterwards would charge for the wrong seconds. They are SUMMED
+  // into a single write so the fly-up says −15 once instead of racing two nonces set in
+  // the same millisecond, of which only the last would ever be seen.
+  const schedule = stages();
+  const elapsed = now - idleSince;
+  let due = 0;
+  while (penaltiesPaid < schedule.length && elapsed > schedule[penaltiesPaid].at) {
+    due += schedule[penaltiesPaid].amount;
+    penaltiesPaid++;
+  }
+  const next = schedule[penaltiesPaid];
+  const nextAt = next ? idleSince + next.at : 0;
+  // One write for the money and the countdown together: they are the same event seen
+  // twice, and splitting them would broadcast a moment where a penalty had landed and
+  // every surface was still counting down to it.
+  if (due || state.nextPenaltyAt !== nextAt) {
+    updateState({
+      ...(due
+        ? { distractedScore: round2(state.distractedScore - due), penaltyAt: now, penaltyAmount: due }
+        : {}),
+      nextPenaltyAt: nextAt,
+      nextPenaltyAmount: next?.amount ?? 0,
+    });
   }
   // The beep has nagged for its full duration and you're still gone → you're not
   // working, so stop nagging and say so. We only WRITE the setting: the
@@ -706,8 +799,29 @@ function trackIdlePenalty() {
   const nagEndsAt = autoPauseDelayMs(clampCryBeepDuration(settings.cryBeepDuration));
   if (!autoPauseApplied && now - idleSince > nagEndsAt) {
     autoPauseApplied = true;
+    // The last word, and the only one that reports rather than warns: every message
+    // before it was asking you to come back, and this one says the asking is over. Sent
+    // from here rather than through buzzPhone/repeatNudge because those refuse while
+    // forceActive — which is precisely what the next line turns on.
+    //
+    // Only if this lapse was actually nudging. A burst suppressed by the cooldown should
+    // stay entirely silent: a phone that says nothing for a minute and then announces a
+    // status change is a phone reporting on a machine the user was never told about.
+    if (nudgeRepeatAt && settings.enabled && settings.pushEnabled !== false) {
+      // A real TTL, unlike the countdowns: this one is a statement of fact that stays
+      // true until the user presses Working, so it is worth queuing for a moment's
+      // unreachability. Short all the same — arriving after they have already come back
+      // and resumed would make it a lie.
+      void sendPush('⏸️ Not working', 'Focus stopped counting. Press Working when you are back.', PAUSE_PUSH_TTL_S);
+    }
     chrome.storage.local.set({ focusFlowSettings: { ...settings, forceActive: true } });
   }
+  // Last, and gated on the local flag rather than on settings.forceActive: the switch
+  // above only WRITES the setting, and `settings` does not change until the
+  // storage.onChanged listener has run — so reading it here would let one final repeat
+  // out in the same tick that decided the nagging was over.
+  if (autoPauseApplied) nudgeRepeatAt = 0;
+  else repeatNudge(now);
 }
 
 // ── Window focus (activeWindowId only) ───────────────────────────────────────
@@ -996,7 +1110,7 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
     }
 
     case 'PUSH_TEST': {
-      void sendPush('✅ Focus', 'This is what an idle nudge will feel like.')
+      void sendPush('✅ Focus', 'This is what an idle nudge will feel like.', TEST_PUSH_TTL_S)
         .then((delivered) => sendResponse({ ok: delivered > 0, delivered }));
       break;
     }

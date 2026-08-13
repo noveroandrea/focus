@@ -24,6 +24,9 @@ interface SessionState {
   focusScore: number;
   distractedScore: number;
   penaltyAt: number;
+  penaltyAmount: number;
+  nextPenaltyAt: number;
+  nextPenaltyAmount: number;
   osHeld: boolean;
 }
 
@@ -311,6 +314,16 @@ function currentPhase(): { text: string; color: string } | null {
     const remain = Math.max(0, (warningStartAt + IDLE_WARNING_MS - now) / 1000);
     return { text: `W ${Math.ceil(remain)}s`, color: '#fbbf24' }; // amber — warning
   }
+  // Past the warning and still gone: count down to the next stage of the penalty, and
+  // name the amount. This used to be the one phase with nothing on screen — the beep and
+  // the grow said "you are idle" while the thing actually about to happen, and the only
+  // thing coming back would avoid, went unannounced. `nextPenaltyAt` is computed in the
+  // background because the last stage is pinned to the auto-pause and therefore depends
+  // on cryBeepDuration, which no content script should have to know.
+  if (st.nextPenaltyAt > now) {
+    const remain = Math.ceil((st.nextPenaltyAt - now) / 1000);
+    return { text: `−${st.nextPenaltyAmount} in ${remain}s`, color: '#f87171' }; // red — costing
+  }
   return null;
 }
 
@@ -444,19 +457,29 @@ function triggerFireworks() {
   }
 }
 
-/** Idle-penalty feedback: a huge red "−10" that pops up over the sprite, holds
- *  at full size for ~2 s, then fades — ~3 s total. Fired once per idle lapse
- *  (driven by the background's penaltyAt). Sized to the viewport so it reads big
- *  on any screen. Rendered at the screen centre so the grown idle sprite never
- *  covers it. */
-function triggerPenalty() {
-  // Panel mode draws its own −10 on the canvas; a second one filling the page on
+/** Idle-penalty feedback: a huge red "−5" / "−10" / "−15" that pops up over the
+ *  sprite, holds at full size for ~2 s, then fades — ~3 s total. Fired once per stage
+ *  of the lapse (driven by the background's penaltyAt). Sized to the viewport so it
+ *  reads big on any screen. Rendered at the screen centre so the grown idle sprite
+ *  never covers it.
+ *
+ *  The amount is read from the broadcast rather than assumed, because there is no
+ *  longer one amount: a lapse costs −5, then −10, then −15, and a label that always
+ *  said the same number would be wrong twice out of three times. */
+function triggerPenalty(amount: number) {
+  // Same as the fireworks above, and for the same reason: this label is rendered at
+  // the screen centre rather than inside `wrapEl`, so switching the sprite off never
+  // stopped it. A "−15" across a page with no companion on it is exactly the drawing
+  // that was turned off. The beep is the part that deliberately survives — that
+  // belongs to the idle escalation, not to the drawing.
+  if (!spriteEnabled) return;
+  // Panel mode draws its own fly-up on the canvas; a second one filling the page on
   // top of it would be the same event announced twice.
   if (spriteMode === 'panel') return;
   const rootEl = document.getElementById('focus-flow-root');
   if (!rootEl) return;
   const label = document.createElement('div');
-  label.textContent = '−10';
+  label.textContent = `−${amount}`;
   const fontSize = Math.max(120, Math.min(window.innerWidth * 0.28, 320));
   Object.assign(label.style, {
     position: 'fixed',
@@ -487,6 +510,13 @@ function triggerPenalty() {
 /** Play the icon-change celebration: fireworks + a quick spin pop, then the new
  *  character restarts at full size (heartbeat count is back to 0). */
 function triggerIconChange() {
+  // Switched off: `spriteEnabled` is a kill switch for everything drawn INTO THE PAGE,
+  // and the fireworks are drawn into the page — they go in `#focus-flow-root`, not in
+  // the hidden `wrapEl`, so hiding the circle never hid them. A burst of confetti over
+  // a page whose companion the user switched off is the one thing that setting exists
+  // to prevent. The floating companion window is a different document and keeps its
+  // own burst; so does the `panel` canvas, which is why that guard stays separate.
+  if (!spriteEnabled) return;
   if (spriteMode === 'panel') return;   // the canvas fires its own burst and "+N"
   if (changeTimer) clearTimeout(changeTimer);
   stopScaleAnimation();
@@ -740,7 +770,7 @@ function applyState(s: SessionState) {
     }
     if (s.penaltyAt && s.penaltyAt !== lastPenaltyAt) {
       lastPenaltyAt = s.penaltyAt;
-      triggerPenalty();
+      triggerPenalty(s.penaltyAmount || 0);
     }
   }
 }

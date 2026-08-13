@@ -84,7 +84,9 @@ export const VIEWER_CLASSIFY_DELAY_MS = 2500;
 //    ───────────  ────────────────  ──────────────────────────────────────────
 //    warning      0 … WARNING       crying FACE only — a silent heads-up
 //    grace        WARNING … +GRACE  beep + grow start, but no points are docked
-//    penalty      > WARNING+GRACE   −IDLE_PENALTY lands on distractedScore (once)
+//    penalty 1    > WARNING+GRACE   −5  lands on distractedScore
+//    penalty 2    > +PENALTY_GAP    −10 lands on top of it
+//    penalty 3    = WARNING+beepDur −15, together with the auto-pause below
 //    auto-pause   > WARNING+beepDur status auto-switches to "Not working" (once)
 //
 //  Keep IDLE_WARNING_MS identical on both sides — that's the whole reason it lives
@@ -95,8 +97,50 @@ export const IDLE_WARNING_MS = 5000;
 /** Grace after the warning: idle behaviour is running but scores are untouched. */
 export const IDLE_GRACE_MS = 5000;
 
-/** Points removed from distractedScore, once, when a lapse outlasts warning+grace. */
-export const IDLE_PENALTY = 10;
+/** The three amounts a lapse can cost, in the order they land.
+ *
+ *  **A rising staircase, not one flat charge.** A single penalty says the same thing
+ *  whether you looked away for eleven seconds or eleven minutes, so it teaches nothing
+ *  about the difference; three say "this is getting worse" while there is still
+ *  something to come back to. The first is deliberately the SMALLEST — the moment it
+ *  fires you have been gone for ten seconds, which is a glance out of the window and
+ *  not a betrayal, and a −15 for that is the sort of thing that gets a feature switched
+ *  off. */
+export const IDLE_PENALTY_1 = 5;
+export const IDLE_PENALTY_2 = 10;
+export const IDLE_PENALTY_3 = 15;
+
+/** Gap between the first penalty and the second. Long enough that the countdown to it
+ *  is a real chance to come back rather than a formality, and short enough to arrive
+ *  while the beep is still going. */
+export const IDLE_PENALTY_GAP_MS = 30_000;
+
+/** One idle lapse's whole penalty schedule, in order, measured from the moment the
+ *  session went idle.
+ *
+ *  **The single description of what a lapse costs and when.** Scoring reads it, the
+ *  countdown on every surface reads it, and the phone nudge's text reads it — so they
+ *  cannot describe different futures. Adding a stage here changes all four.
+ *
+ *  The last stage is pinned to the auto-pause rather than given a time of its own: that
+ *  is the moment Focus decides you have stopped working, so it is the last moment a
+ *  penalty means anything, and tying the two together keeps `cryBeepDuration` the single
+ *  answer to "how long does a lapse go on for".
+ *
+ *  Which is also why the earlier stages are FILTERED and not merely listed. That slider
+ *  goes down to 10 s, where the lapse is over at 15 s and the −10 at 40 s would be a
+ *  countdown to something that can never happen. Anything not strictly before the end
+ *  is dropped, so the schedule is always increasing and always reachable. */
+export function penaltyStages(beepDurationS: number): { at: number; amount: number }[] {
+  const end = autoPauseDelayMs(beepDurationS);
+  const first = idlePenaltyDelayMs();
+  const stages = [
+    { at: first, amount: IDLE_PENALTY_1 },
+    { at: first + IDLE_PENALTY_GAP_MS, amount: IDLE_PENALTY_2 },
+  ].filter((s) => s.at < end);
+  stages.push({ at: end, amount: IDLE_PENALTY_3 });
+  return stages;
+}
 
 /** Shortest gap between two phone nudges.
  *
@@ -112,6 +156,42 @@ export const IDLE_PENALTY = 10;
  *  itself exactly when the user has been away long enough for the worker to be
  *  dropped. */
 export const NUDGE_COOLDOWN_MS = 5 * 60_000;
+
+/** Gap between repeats once a lapse has already nudged you once.
+ *
+ *  The first nudge is a tap on the shoulder and is easy to miss — the phone is in a
+ *  pocket, face down, or you glanced at it and put it back. Repeating turns it into
+ *  something you have to answer, which is the point of a nudge to a person who has
+ *  already stopped noticing the screen.
+ *
+ *  It does NOT need an end of its own, and deliberately does not have one: the repeat
+ *  stops when the session stops nagging — you come back (active again), or the lapse
+ *  outlasts the beep and the extension switches itself to "Not working", which with the
+ *  default 60 s beep is about 65 s and a dozen repeats. Tying it to the existing
+ *  auto-pause rather than counting repeats means there is one answer to "how long does
+ *  Focus nag me", the cryBeepDuration slider, and no second number to keep in step.
+ *
+ *  The phone shows ONE notification throughout, not a dozen: sw.js sends every push
+ *  under the same `tag` with `renotify`, so each replaces the last and re-alerts. */
+export const NUDGE_REPEAT_MS = 5000;
+
+/** How stale a nudge's countdown is by the time the phone shows it.
+ *
+ *  A push is not instant: signing, the POST to Apple or Google, their relay to the
+ *  device, and the phone waking its service worker add up to a few seconds — measured at
+ *  about three on a real iPhone. The countdown was computed at SEND time, so it arrived
+ *  describing a moment that had already passed: "15 seconds before −10" on a screen
+ *  where the real number was 12.
+ *
+ *  So the text is written for the future rather than the present, and this is the amount
+ *  it is written ahead by. Four rather than the measured three deliberately: the error
+ *  should fall on the side of the phone under-promising, since a countdown that turns out
+ *  to have been generous is a second of unexpected grace, while one that runs out early
+ *  is the feature lying to you about the only number it exists to tell you.
+ *
+ *  Only the PHONE text uses this. The countdowns on screen are live and exact — there is
+ *  nothing in flight to compensate for. */
+export const PUSH_LATENCY_MS = 4000;
 
 /** How long a phone-pairing QR stays valid.
  *
@@ -142,7 +222,7 @@ export const GROW_DURATION_MS = 20_000;
 export const ICON_POP_MS = 700;
 
 // ── Derived timeline helpers ───────────────────────────────────────────────────
-/** Wall-clock time from "went Idle" to the −10 penalty landing. */
+/** Wall-clock time from "went Idle" to the FIRST penalty landing. */
 export function idlePenaltyDelayMs(): number {
   return IDLE_WARNING_MS + IDLE_GRACE_MS;
 }

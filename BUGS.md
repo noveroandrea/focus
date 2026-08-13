@@ -182,6 +182,34 @@ regardless of `idleTime`.
 
 ## Scoring and status
 
+### Switching the sprite off still fired fireworks and "−15" across the page
+**Status: fixed — `sprite.ts`**
+
+*Symptom.* With **Show sprite** off — the setting whose whole promise is that nothing is
+drawn into the page — a character change still burst confetti over the page, and every
+idle penalty still threw a screen-sized red `−15` across it. The circle itself was
+correctly invisible, which made it look less like a setting being ignored than like the
+page had started celebrating on its own.
+
+*Cause.* `applyMode()` implements the kill switch as `wrapEl.style.display = 'none'`, and
+that is genuinely everything the *circle* is. But the two celebrations are not in `wrapEl`
+— `triggerFireworks()` appends its dots to `#focus-flow-root`, and `triggerPenalty()`
+deliberately renders its label at the screen centre so that a grown idle sprite cannot
+cover it. Both were parented outside the element the switch hides, so hiding it never
+touched them. Each already carried a `spriteMode === 'panel'` guard, which is probably why
+the missing one was never noticed: the functions *looked* like they were gated.
+
+*Fix.* An explicit `if (!spriteEnabled) return;` in both, beside the existing panel guard
+rather than at the call site — the nonce (`lastIconChangeAt` / `lastPenaltyAt`) is already
+advanced *before* the call, so returning early keeps the bookkeeping in step and re-enabling
+the sprite cannot replay a burst that was skipped.
+
+*Not* fixed by hiding `#focus-flow-root`: the score readout and the phase countdown live
+there too and are wanted. And deliberately unchanged: the **beep**, which belongs to the
+idle escalation rather than to the drawing, and the floating companion window and the
+`panel` canvas, which are their own surfaces and keep their own bursts — someone who
+stopped the sprite walking over their page has not asked the companion to go quiet.
+
 ### Clicking "Working" docked 10 points and did nothing
 **Status: fixed — `background.ts`**
 
@@ -585,14 +613,91 @@ same install boundary, chosen without checking whether either crosses it.
    because a missing key in a JSON file is exactly the kind of thing someone helpfully adds
    back, and JSON cannot hold the comment itself.
 2. **The clipboard**, which is the only channel that genuinely crosses the partition: the
-   iOS steps offer **Copy code** before the install, and the installed app offers **Paste
-   pairing code** whenever it opens without one. Most users will never see either.
+   iOS steps keep the pairing **link** on screen with a Copy button, and the installed app
+   offers to paste it back. Most users will never see either.
+
+*And the fallback needed a fallback.* The first version of that button called
+`navigator.clipboard.writeText` and, on failure, revealed a `readonly` field for the user
+to copy by hand. On a real iPhone it appeared to do nothing: the async API is refused far
+more often than its spec suggests, **and iOS will not select the contents of a readonly
+field**, so the rescue failed as silently as the thing it was rescuing. Now the field is
+visible from the start (long-press → Copy needs no permission at all), and the button
+tries the async API, then selection + `execCommand` with `readonly` lifted for the call.
+It also copies the **whole link** rather than the bare code — that is what is already in
+Safari's address bar, so the user has a fourth route that involves none of our code.
 
 *The general lesson.* "Two mechanisms, one will work" is only true if they fail
 independently. Both of these were downstream of the same platform boundary, so the
 redundancy was imaginary — and the platform in question could not be tested on the
 development machine, which is precisely when a stated fallback deserves to be checked
 rather than assumed.
+
+### Apple rejected every push over one word in the VAPID token
+**Status: fixed — `vapidSubject()` in `src/extension/push.ts`**
+
+The VAPID JWT's `sub` claim was `mailto:focus-extension@localhost`. **`localhost` is not a
+domain**, and `web.push.apple.com` validates that claim: 403, every push, forever. FCM
+accepts the identical token without comment, so nothing on Android and nothing in the
+decrypt-it-yourself verification ever saw it — the test proved the *payload* was right and
+said nothing about whether a real service would take the *token*.
+
+It presented as everything except a token problem. Pairing completed, the phone showed
+✅ Paired (that is `claim_pairing` succeeding, which involves no push at all), and then the
+phone simply never buzzed. `sub` now comes from `PUSH_LANDING_URL` — an `https:` URL, the
+sender's only public face, and always set whenever a subscription can exist.
+
+*The second bug, which hid the first.* `sendPush` pruned the subscription on 401/403 as
+well as 404/410, reasoning that a rejected token stays rejected. Same premise, wrong
+conclusion: **401/403 are about the sender**, so they fail identically for every device —
+and when the fault is ours, deleting the pairing destroys the user's setup over a bug they
+cannot see and throws away the evidence. The visible symptom was a *Send test buzz* button
+greyed out with no phone listed, minutes after a successful pairing. Only 404/410 prune
+now; 401/403 keep the subscription and log the service's own explanation (Apple names it —
+`BadJwtToken`), which is the difference between a diagnosis and a guess.
+
+*The lesson worth keeping.* Two push services are not one interface with two
+implementations. Every failure here was Apple enforcing something Google ignores, and the
+only way to find any of them was a real iPhone: a stubbed `fetch` verifies your crypto, not
+their acceptance criteria.
+
+### The pairing test fired at the one moment iOS cannot show it
+**Status: fixed — `TEST_PUSH_TTL_S`, and the wording on both surfaces**
+
+Pairing succeeded, Apple accepted the push (`delivered > 0`, so the desktop said "your
+phone should have just buzzed") and the phone showed nothing. Neither half was broken:
+
+**iOS does not display a notification while the web app it belongs to is the app on
+screen.** Native apps opt into that with `UNUserNotificationCenterDelegate`; a web app has
+no equivalent and no way to ask. The confirmation push is sent the instant the desktop
+collects the subscription — which is one or two seconds after the user tapped *Allow*, so
+by construction they are staring at the one app whose notifications are being suppressed.
+The single most confusing possible moment to prove the feature works.
+
+Made worse by `TTL: 0`. Right for a nudge (a warning that arrives after the penalty is
+worse than none), actively wrong for a test: the push service is told to discard rather
+than queue, so it could not arrive later either. Tests now use `TEST_PUSH_TTL_S` (5
+minutes) and the nudge keeps the default 0 — the TTL is a parameter precisely because
+those two messages have opposite deadlines.
+
+The rest is wording, which is most of the fix: the popup says *leave the app or lock the
+phone* instead of promising a buzz, and the app's own "Paired" card leads with **close
+this app to see it**. Also worth knowing, and now in the README: **Safari never appears in
+Settings → Notifications on iOS**, because the notification belongs to the installed web
+app — the entry is called *Focus*, and it does not exist until permission is granted
+inside the app.
+
+### Reopening the paired app said the code had expired
+**Status: fixed — `focusPairedCode` in `web/app.js`**
+
+A Home Screen web app relaunches at the URL it was installed with, so it reopens carrying
+the same `?p=` code every time — and that code is single-use and deleted from the server
+the moment the desktop collects it. The app had no memory of having spent it, so it
+offered the pairing flow again and `claim_pairing` answered false: **"that pairing code has
+expired or was already used"**, shown to a user whose pairing had just completed perfectly.
+
+It now records *which* code it spent and shows the finished card instead. Which code, not
+merely that one was spent: a new QR from the desktop carries a different code and must
+still be able to re-pair the same phone.
 
 ### A pairing outlived the popup that was watching it
 **Status: fixed — `PUSH_PAIR_RESUME` / `PUSH_PAIR_CANCEL` + the `focus-pair-poll` alarm**

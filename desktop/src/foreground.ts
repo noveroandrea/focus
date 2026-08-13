@@ -55,6 +55,29 @@ const PIN_TITLE = 'Focus companion';
 const PIN_MAX_W = 900;
 const PIN_MAX_H = 700;
 
+/** How opaque the companion window is left on Windows, 0–255 — the same unit and the
+ *  same meaning as the GNOME bridge's `companion-opacity`, so one number describes the
+ *  window on either platform.
+ *
+ *  Windows can do this for the same reason it can pin: one process may change another's
+ *  window here, needing no elevation and no injection. `SetLayeredWindowAttributes`
+ *  sits beside the `SetWindowPos` that was already there, and buys the same uniform
+ *  translucency — the whole window fades, character and score included.
+ *
+ *  It is an ENVIRONMENT VARIABLE and not a settings file, because the agent has no
+ *  settings file and should not grow one: it has no account, no window and no tray,
+ *  and every configuration decision in this project belongs to the extension or, on
+ *  GNOME, to the piece with a preferences dialog. Read once at start-up, so changing
+ *  it means restarting the agent — but not reinstalling anything, and not reopening
+ *  the companion, since the value is re-applied on every pin pass.
+ *
+ *  255 disables it: the window is left exactly as the browser painted it, and the
+ *  layered style is never set. */
+const COMPANION_OPACITY = (() => {
+  const raw = Number.parseInt(process.env.FOCUS_COMPANION_OPACITY ?? '', 10);
+  return Number.isFinite(raw) ? Math.min(255, Math.max(40, raw)) : 180;
+})();
+
 let child: ChildProcessByStdio<null, Readable, Readable> | null = null;
 let buffer = '';
 let last: Foreground | null = null;
@@ -80,11 +103,12 @@ export function note(): string | null {
  *  no elevation. The label is the executable's FileDescription — the string Task
  *  Manager shows — which comes from the binary's version resource, not a window.
  *
- *  It also pins the companion window (see PIN_TITLE), which is Windows' equivalent
- *  of what the GNOME bridge does from inside the compositor: Windows has no built-in
- *  always-on-top, so without this the only route is a third-party tool like
- *  PowerToys. SetWindowPos(HWND_TOPMOST) needs no elevation and no injection — one
- *  process may raise another's window here, unlike Wayland or macOS.
+ *  It also pins AND fades the companion window (see PIN_TITLE), which is Windows'
+ *  equivalent of what the GNOME bridge does from inside the compositor: Windows has no
+ *  built-in always-on-top, so without this the only route is a third-party tool like
+ *  PowerToys, and a browser cannot make its own window see-through on any platform.
+ *  SetWindowPos(HWND_TOPMOST) and SetLayeredWindowAttributes need no elevation and no
+ *  injection — one process may change another's window here, unlike Wayland or macOS.
  *
  *  `$procId`, NOT `$pid`: `$pid` is a read-only automatic variable in PowerShell. */
 const WINDOWS_SCRIPT = `
@@ -113,25 +137,40 @@ public static class FocusPin {
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
+  [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
+  [DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, uint flags);
   [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
   static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
   const int GWL_EXSTYLE = -20;
   const int WS_EX_TOPMOST = 0x00000008;
+  const int WS_EX_LAYERED = 0x00080000;
+  const uint LWA_ALPHA = 0x00000002;
   const uint SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOACTIVATE = 0x0010;
-  public static void Pin(string title, int maxW, int maxH) {
+  public static void Pin(string title, int maxW, int maxH, int alpha) {
     EnumWindows(delegate (IntPtr h, IntPtr l) {
       if (!IsWindowVisible(h)) return true;
       StringBuilder sb = new StringBuilder(160);
       GetWindowTextW(h, sb, sb.Capacity);
       if (!sb.ToString().StartsWith(title, StringComparison.Ordinal)) return true;
-      // Already topmost: leave it alone, so a window the user un-pinned by hand
-      // is not fought over twice a second.
-      if ((GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) return true;
       RECT r;
       if (!GetWindowRect(h, out r)) return true;
       if (r.Right - r.Left > maxW || r.Bottom - r.Top > maxH) return true;
-      SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+      // Translucency: what the GNOME bridge does with the window actor, done here
+      // with the layered-window style. Applied on EVERY pass rather than once, so
+      // restarting the agent with a different value updates companions that are
+      // already open — the size guard above is what keeps that safe.
+      if (alpha < 255) {
+        int ex = GetWindowLong(h, GWL_EXSTYLE);
+        if ((ex & WS_EX_LAYERED) == 0) SetWindowLong(h, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+        SetLayeredWindowAttributes(h, 0, (byte)alpha, LWA_ALPHA);
+      }
+
+      // The pin, unlike the fade, is one-shot: a window the user un-pinned by hand
+      // must not be fought over twice a second.
+      if ((GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0)
+        SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
       return true;
     }, IntPtr.Zero);
   }
@@ -157,7 +196,7 @@ while ($true) {
   # Every fourth pass: enumerating every top-level window is far dearer than one
   # foreground read, and a companion window that appears is not urgent to the second.
   $tick++
-  if ($tick % 4 -eq 0) { [FocusPin]::Pin('${PIN_TITLE}', ${PIN_MAX_W}, ${PIN_MAX_H}) }
+  if ($tick % 4 -eq 0) { [FocusPin]::Pin('${PIN_TITLE}', ${PIN_MAX_W}, ${PIN_MAX_H}, ${COMPANION_OPACITY}) }
   Start-Sleep -Milliseconds 500
 }
 `;

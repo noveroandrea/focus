@@ -37,8 +37,11 @@
  *  A Wayland client cannot raise its own window above others — the compositor
  *  decides — which is why the floating companion otherwise has to be pinned by
  *  hand with a window-manager shortcut. But this code IS inside the compositor,
- *  where make_above() is one call. So it keeps the companion window on top
- *  automatically, and reads no title for anything else. This is the ONLY place in
+ *  where make_above() is one call. So it keeps the companion window on top,
+ *  in a free screen's corner, and slightly see-through — the three facts about its
+ *  own window that a Wayland client is not allowed to decide, and the reason all
+ *  three are here rather than in the extension that owns everything else. It
+ *  reads no title for anything else. This is the ONLY place in
  *  the project that touches a window title, and it compares it against one fixed
  *  string rather than reporting it anywhere.
  * ───────────────────────────────────────────────────────────────────────────── */
@@ -74,18 +77,51 @@ const COMPANION_TITLE = 'Focus companion';
  *  companion" must not drag a whole browser window above everything, and an
  *  always-on-top window large enough to cover what you are working on is precisely
  *  the failure that got an earlier full-screen overlay deleted. The companion opens
- *  at 210×182 and is meant for a screen corner. Checked when the window appears. */
+ *  at 231×200 and is meant for a screen corner. Checked when the window appears. */
 const MAX_PIN_W = 900;
 const MAX_PIN_H = 700;
 
 /** Gap from the work area's corner, in logical pixels. */
 const PLACE_MARGIN = 16;
 
+/** The GSettings key holding how opaque the companion window is left, 0–255.
+ *
+ *  A browser cannot make its own window see-through: `chrome.windows.create` opens a
+ *  real toplevel that the browser paints onto an opaque surface, and no CSS in
+ *  pip.html can reach past that — `background: transparent` simply falls through to
+ *  the browser's base colour. The API that could (Chrome Apps' `transparentBackground`)
+ *  went away with Chrome Apps. So this is the same wall as pinning and has the same
+ *  one answer: the compositor can, and this code runs inside it.
+ *
+ *  What it buys is UNIFORM translucency, not a transparent background behind opaque
+ *  content — Clutter applies the alpha to the whole actor, so the character and the
+ *  score fade by exactly as much as the panel they sit on. That is the honest cost of
+ *  doing it from out here, and it is why the useful range sits high: the companion
+ *  exists to be noticed from the corner of your eye, and one dimmed far enough to
+ *  read what is behind it is one you stop seeing.
+ *
+ *  It is a SETTING rather than a constant for a reason particular to this platform:
+ *  the right value depends on the wallpaper behind the window, so it can only be found
+ *  by looking — and GNOME Shell loads extension code only at start-up, so every
+ *  experiment with a constant cost a whole logout. A GSetting costs nothing, and the
+ *  handler below repaints the open companions as the slider moves. The default (180,
+ *  ≈70%) lives in the schema; prefs.js draws the slider.
+ *
+ *  It does NOT make the window click-through — it still takes the clicks that land on
+ *  it. Seeing what is underneath and being able to use it are separate features, and
+ *  the second one nobody asked for. */
+const OPACITY_KEY = 'companion-opacity';
+
 export default class FocusCompanionExtension extends Extension {
     enable() {
         this._current = '';
         this._dbus = Gio.DBusExportedObject.wrapJSObject(IFACE, this);
         this._dbus.export(Gio.DBus.session, OBJECT_PATH);
+
+        // Watched rather than read once: the whole point of moving this out of a
+        // constant was that trying a value should not cost a logout.
+        this._settings = this.getSettings();
+        this._opacityId = this._settings.connect(`changed::${OPACITY_KEY}`, () => this._applyOpacity());
 
         this._refresh();
         this._focusId = global.display.connect('notify::focus-window', () => this._refresh());
@@ -125,7 +161,19 @@ export default class FocusCompanionExtension extends Extension {
             this._titleIds.clear();
             this._titleIds = null;
         }
+        if (this._opacityId) {
+            this._settings.disconnect(this._opacityId);
+            this._opacityId = null;
+        }
+        this._settings = null;
         if (this._placed) {
+            // Hand the windows back the way they were found. A disabled extension that
+            // left every companion faded would look exactly like a bug, and the setting
+            // that explains it is in a dialog belonging to the extension just switched
+            // off.
+            for (const win of this._placed.keys()) {
+                try { win.get_compositor_private().opacity = 255; } catch { /* window gone */ }
+            }
             this._placed.clear();
             this._placed = null;
         }
@@ -248,6 +296,8 @@ export default class FocusCompanionExtension extends Extension {
                 return false;
             win.make_above();
             this._place(win);
+
+            this._fade(win);
         } catch {
             // A window that closed mid-check, or a Shell version without
             // make_above. Failing here costs the automatic pin and nothing else —
@@ -255,6 +305,33 @@ export default class FocusCompanionExtension extends Extension {
             return false;
         }
         return true;
+    }
+
+    /** Fade one companion to the configured opacity.
+     *
+     *  The window ACTOR is the handle on how a window is composited, as opposed to
+     *  where it sits — the one thing a client genuinely cannot reach for itself. It is
+     *  null for the frame or two around mapping, which costs nothing at the _pin call
+     *  site: that runs on the notify::title pass, and a window with a title has been
+     *  mapped. */
+    _fade(win) {
+        const actor = win.get_compositor_private();
+        if (actor && this._settings)
+            actor.opacity = this._settings.get_int(OPACITY_KEY);
+    }
+
+    /** Re-fade every companion, on any change to the setting.
+     *
+     *  Iterating `_placed` rather than keeping a second list: it already holds exactly
+     *  the windows this extension recognised as companions, and it is already emptied
+     *  on `unmanaged`, so there is no way for the two to disagree about which windows
+     *  exist. */
+    _applyOpacity() {
+        if (!this._placed)
+            return;
+        for (const win of this._placed.keys()) {
+            try { this._fade(win); } catch { /* window closed mid-iteration */ }
+        }
     }
 
     /** Recompute the focused application. Called only on a real focus change, so
