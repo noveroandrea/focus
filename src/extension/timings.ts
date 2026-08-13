@@ -142,20 +142,33 @@ export function penaltyStages(beepDurationS: number): { at: number; amount: numb
   return stages;
 }
 
-/** Shortest gap between two phone nudges.
+/** Shortest gap between two phone nudges. **Zero — every real lapse nudges.**
  *
- *  Not a setting, and the number is doing real work rather than tuning: the warning
- *  starts every time you look away for `idleTime`, which on an ordinary afternoon is
- *  dozens of times an hour. A buzz per lapse is not a nudge, it is a phone that goes
- *  off constantly and gets silenced by lunchtime — which costs the feature its whole
- *  point. Five minutes makes it a reminder that you have drifted rather than a report
- *  on every glance out of the window.
+ *  This was 5 minutes, and the reasoning was: the warning starts every time you look
+ *  away for `idleTime`, dozens of times on an ordinary afternoon, so a buzz per lapse is
+ *  a phone that gets silenced by lunchtime. That argument was written when a lapse sent
+ *  ONE push, and it stopped being true when the lapse learned to repeat: a single lapse
+ *  now sends a burst — one every NUDGE_REPEAT_MS until you come back or the auto-pause
+ *  fires — so the "don't be annoying" budget is already spent inside one lapse, and all
+ *  a cross-lapse cooldown could still do was swallow the *next* real one.
  *
- *  Persisted (see NUDGE_LAST_KEY in background.ts), because an MV3 worker is suspended
- *  between events and a cooldown living in a module variable is a cooldown that resets
- *  itself exactly when the user has been away long enough for the worker to be
- *  dropped. */
-export const NUDGE_COOLDOWN_MS = 5 * 60_000;
+ *  And swallowing it silently was the actual damage. The nudge is the only surface that
+ *  works when you have stopped looking at the screen, so a suppressed one is not a
+ *  quieter warning, it is no warning — while the points come off exactly the same. It
+ *  read as "the notifications randomly stop and later come back", because that is
+ *  precisely what a five-minute window looks like from outside.
+ *
+ *  Kept as a constant rather than deleted, because the guard in buzzPhone is one line
+ *  and this is the knob to turn if the phone ever does become too chatty. At 0 that
+ *  guard can never fire. What bounds the rate now is the shape of the event itself:
+ *  buzzPhone runs only on the active→idle edge, and reaching another one costs real
+ *  input followed by a full `idleTime` of silence.
+ *
+ *  `nudgeLastAt` is still persisted (see NUDGE_LAST_KEY in background.ts) so raising
+ *  this is a one-character change: an MV3 worker is suspended between events, and a
+ *  cooldown living in a module variable resets itself exactly when the user has been
+ *  away long enough for the worker to be dropped. */
+export const NUDGE_COOLDOWN_MS = 0;
 
 /** Gap between repeats once a lapse has already nudged you once.
  *

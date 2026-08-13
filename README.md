@@ -776,12 +776,22 @@ step. GitHub Pages takes two commands and a checkbox; see
 [`web/README.md`](web/README.md). Until it is published and its address is in
 `PUSH_LANDING_URL`, the popup says so rather than showing a QR that leads nowhere.
 
-### At most one nudge every 5 minutes
+### Every lapse nudges
 
-Not adjustable, and not an oversight: the warning starts every time you look away for
-`idleTime`, which on an ordinary afternoon is dozens of times an hour. A buzz per lapse
-is not a nudge — it is a phone you would silence by lunchtime, which costs the feature
-the whole point.
+There is **no cooldown between lapses**. Go idle, the phone buzzes; come back, work, drift
+off again, and it buzzes again.
+
+This used to be capped at one nudge per five minutes, on the reasoning that a buzz per
+lapse is a phone you would silence by lunchtime. That held when a lapse sent a single
+push — but a lapse now *repeats*, one push every five seconds until you come back or the
+auto-pause fires, so the restraint already lives inside the lapse. All the cap could still
+do was swallow the next real one, silently, while the points came off exactly the same. It
+also made the feature look broken in the most confusing way possible: notifications that
+stop for a while and later start again, with nothing on screen explaining either.
+
+What limits the rate now is the shape of the event. A nudge fires only on the
+active→idle edge, and reaching another one costs real input followed by a full `idleTime`
+of silence.
 
 ---
 
@@ -1094,7 +1104,7 @@ The build in `dist/` is a valid MV3 extension. Before submitting:
   (and your API key is sent to it as a Bearer token); nothing is sent anywhere else. The
   feature is off unless a backend is reachable.
 - The optional **phone nudge** sends a fixed message ("you have gone idle") to **your own
-  phone**, at most once every 5 minutes. It goes from your browser to your phone's push
+  phone** each time you go idle. It goes from your browser to your phone's push
   service and nowhere else: the notification is encrypted so that only your phone can read
   it, and **no server involved in Focus ever learns that one was sent**. The pairing QR
   puts a subscription on the server for at most ten minutes, and it is deleted the moment

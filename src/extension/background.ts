@@ -426,17 +426,36 @@ function repeatNudge(now: number): void {
  *  writeState on the active→idle edge, which is the same instant the sprite starts its
  *  warning — one edge, one definition, no second timer to drift from it. */
 function buzzPhone(): void {
-  if (!settings.enabled || settings.forceActive || settings.pushEnabled === false) return;
   const now = Date.now();
-  // Only a real lapse. The idle flag is cleared by things that are not one — the
-  // popup's "remove this domain" drops it outright, mid-click — and a phone that
-  // buzzes for a button the user just pressed is a phone they learn to ignore before
-  // the first genuine nudge arrives. Both real paths into idle (the OS anchor in
-  // applyOsIdleReading and the backup expireStaleHeartbeat) can only fire once the
-  // whole idleTime has passed with no input, so that is the test, and it needs no
-  // second flag to be kept in step with them.
-  if (now - state.lastHeartbeat < clampIdleTime(settings.idleTime) * 1000 - 500) return;
-  if (now - nudgeLastAt < NUDGE_COOLDOWN_MS) return;
+  const idleSec = clampIdleTime(settings.idleTime);
+
+  // Five reasons this can decline, and between them they are the entire answer to "why
+  // did my phone stop buzzing?" — a question that is otherwise unanswerable from the
+  // outside, because the send path is provably fine whenever *Send test buzz* works, so
+  // every symptom points at sendPush and none of the causes are there. They used to
+  // return silently. Now each says which one it was: this runs once per active→idle
+  // edge, so naming it costs one line a lapse.
+  //
+  // The lapse test is the subtle one. The idle flag is cleared by things that are not
+  // lapses — the popup's "remove this domain" drops it outright, mid-click — and a phone
+  // that buzzes for a button the user just pressed is one they learn to ignore before the
+  // first genuine nudge arrives. Both real paths into idle (the OS anchor in
+  // applyOsIdleReading, and the backup expireStaleHeartbeat) can only fire once the whole
+  // idleTime has passed with no input, so that is the test, and it needs no second flag
+  // kept in step with them.
+  const blocked =
+    !settings.enabled ? 'the extension is switched off'
+      : settings.forceActive ? 'the session is paused — press Working to resume'
+        : settings.pushEnabled === false ? 'phone nudges are off in Settings'
+          : now - state.lastHeartbeat < idleSec * 1000 - 500
+            ? `not a real lapse (last input ${Math.round((now - state.lastHeartbeat) / 1000)}s ago, idleTime is ${idleSec}s)`
+            : now - nudgeLastAt < NUDGE_COOLDOWN_MS
+              ? `cooldown, ${Math.ceil((NUDGE_COOLDOWN_MS - (now - nudgeLastAt)) / 1000)}s still to run of ${NUDGE_COOLDOWN_MS / 1000}s`
+              : null;
+  if (blocked) {
+    console.log('Focus: phone nudge NOT sent —', blocked);
+    return;
+  }
   nudgeLastAt = now;
   chrome.storage.local.set({ [NUDGE_LAST_KEY]: now });
   // From here the lapse keeps asking. One buzz is easy to miss — the phone is in a
@@ -629,6 +648,17 @@ chrome.storage.onChanged.addListener((changes, area) => {
       penaltiesPaid = 0;
       autoPauseApplied = false;
       nudgeRepeatAt = 0;
+      // Resuming is an explicit "I am working now", which starts a new session — so the
+      // cooldown left over from the previous one must not silently eat its first lapse.
+      // That is the shape of the whole complaint "it just stopped buzzing": a lapse runs
+      // its course, the auto-pause fires, the user presses Working, goes idle again a
+      // minute later, and the guard that exists to stop nagging refuses the one nudge
+      // they were waiting for. Only on the way BACK — pausing keeps its cooldown, since
+      // nothing is going to nudge while paused anyway.
+      if (!settings.forceActive) {
+        nudgeLastAt = 0;
+        chrome.storage.local.remove(NUDGE_LAST_KEY);
+      }
       // The Working / Not-working button was clicked — one of the three moments the
       // client checks in. Hooked here rather than in the popup so it fires however
       // the toggle was flipped (the button, or the auto-pause after a long idle).
