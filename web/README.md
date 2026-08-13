@@ -182,12 +182,13 @@ panel rejoins the same QR rather than issuing a new code.
   settings. The extension can send them; only the phone decides whether they buzz.
   Aggressive battery managers (MIUI, some Samsung profiles) also delay browser
   notifications; this is the one real reliability gap versus a native app.
-- **Nothing arrives on iOS while the Focus app is open** — that is iOS working as
-  designed, and it is the single most confusing thing about testing this. **A
-  notification is never displayed while the app it belongs to is the one on screen.**
-  Native apps opt out of that with a delegate; a web app cannot. Leave the app or lock
-  the phone, then send the test. (Test pushes carry a five-minute TTL for exactly this
-  reason; the idle nudge deliberately does not — see `push.ts`.)
+- **~~Nothing arrives on iOS while the Focus app is open~~** — this was believed to be
+  iOS working as designed, on the rule that a notification is never displayed while the
+  app it belongs to is on screen. **Testing on a real iPhone disproved it**: the test push
+  arrives with the Focus app open and in the foreground. The instruction to leave the app
+  before testing has been removed everywhere. Test pushes still carry a five-minute TTL,
+  but for the reason that always applied — a confirmation has no deadline, and a dropped
+  one proves nothing — while the idle nudge deliberately uses `TTL: 0`; see `push.ts`.
 - **Nothing arrives on iOS at all** — confirm you opened the app from the **Home Screen
   icon** and not from Safari, and that Focus appears in Settings → Notifications.
 - **There is no Safari in Settings → Notifications** — and there never will be. iOS

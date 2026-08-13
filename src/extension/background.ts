@@ -505,10 +505,12 @@ async function collectPairing(nonce: string, platform: PhonePlatform): Promise<n
   // Straight away, and from here rather than from the popup: this is the moment the
   // user is holding the phone and looking at it, which is the only moment a "did it
   // vibrate?" answer is worth anything — and by construction the popup is shut.
-  // With a real TTL, not the nudge's drop-or-nothing: on iOS a notification is never
-  // shown while its own web app is the thing on screen, which is exactly where the user
-  // is standing at this instant. Queued for a few minutes it appears the moment they
-  // leave the app or lock the phone — which is the only place they could have seen it.
+  // With a real TTL, not the nudge's drop-or-nothing. The original reason given here —
+  // that iOS hides a notification while its own web app is in the foreground — turned
+  // out not to hold on a real iPhone, which showed it with the app open. The TTL stays
+  // because the honest reason never depended on that: a confirmation has no deadline,
+  // its whole job is to prove the pipe works, and a silent drop (phone locked, no
+  // signal, mid-install) is the one outcome that teaches the user nothing at all.
   return await sendPush('✅ Focus', 'Paired. This is what an idle nudge will feel like.', TEST_PUSH_TTL_S);
 }
 

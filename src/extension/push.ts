@@ -48,10 +48,13 @@
 //  `TEST_PUSH_TTL_S`.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** How long a *test* push may sit in the push service's queue. Long enough for the user
- *  to lock the phone and look at it — on iOS a notification is not shown at all while
- *  its web app is the thing on screen, so "test it while staring at the app" cannot
- *  work, and the message has to survive the few seconds that takes. */
+/** How long a *test* push may sit in the push service's queue.
+ *
+ *  This once said the wait was for iOS hiding a notification while its own web app is in
+ *  the foreground. That turned out not to happen — a real iPhone showed the test with the
+ *  app open — but the TTL stays, because the reason above it never depended on that: a
+ *  confirmation has no deadline, and a silent drop (the phone locked, out of signal, or
+ *  halfway through being set up) is the one outcome that proves nothing either way. */
 export const TEST_PUSH_TTL_S = 300;
 
 /** How long the "switched to Not working" message may wait. It is the one push that

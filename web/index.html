@@ -134,11 +134,18 @@
 
     <section id="steps-ios" class="card hide">
       <h2>iPhone — add to the Home Screen first</h2>
+      <!-- Two steps, not four. The Add-to-Home-Screen requirement is the whole reason
+           this card exists — iOS gives the Push API to Home Screen web apps and to
+           nothing else — and everything after "tap the icon" is a single Allow the app
+           asks for by itself. Spelling that out as separate numbered steps made a
+           two-minute job look like a procedure. -->
       <ol>
-        <li>Tap the <span class="share">↑</span> <strong>Share</strong> button in Safari.</li>
-        <li>Scroll down and tap <strong>Add to Home Screen</strong>, then <strong>Add</strong>.</li>
-        <li>Open the new <strong>Focus</strong> icon from your Home Screen.</li>
-        <li>Tap <strong>Turn on notifications</strong> there, then <strong>Allow</strong>.</li>
+        <li>
+          Tap the <span class="share">↑</span> <strong>Share</strong> button, then
+          <strong>Add to Home Screen</strong>. This is required — notifications do not
+          work from a Safari tab.
+        </li>
+        <li>Tap the new <strong>Focus</strong> icon and allow notifications.</li>
       </ol>
       <p class="note warn">This page must be opened in Safari.</p>
 
@@ -173,10 +180,15 @@
     <p style="margin:0 0 10px;text-align:center">
       Your computer has sent a test notification.
     </p>
-    <p class="note warn" style="margin:0">
-      <strong>Close this app to see it.</strong> iPhone never shows a notification while
-      the app it belongs to is the one on screen — go to the Home Screen or lock the
-      phone, and it appears there.
+    <!-- This used to insist the app had to be closed before the test would appear, on
+         the understanding that iOS suppresses a notification while its own web app is
+         in the foreground. Testing on a real iPhone showed it arriving with the app
+         open, so the warning was wrong and, worse, told the user to go and look
+         somewhere else for something already on screen. The test push still carries a
+         real TTL — that is about a queue, not about the foreground. -->
+    <p class="note" style="margin:0">
+      If it has not arrived yet, give it a few seconds — or lock the phone and it will
+      be waiting on the Lock Screen.
     </p>
     <p class="note">
       Nothing else to do here. Notifications for this app live under

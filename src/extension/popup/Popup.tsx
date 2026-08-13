@@ -368,16 +368,15 @@ const PhonePairing = () => {
           setPair(null);
           setPlatform(null);
           refresh();
-          // Deliberately not "your phone just buzzed" on iOS: it almost certainly did
-          // not. A notification is never shown while its own web app is the thing on
-          // screen, and the user is holding that app open at this exact moment — so
-          // promising a buzz sends them to debug a system that is working.
+          // This once told iOS users the notification would only appear after leaving
+          // the app, on the understanding that iOS suppresses one while its own web app
+          // is in the foreground. A real iPhone showed it arriving with the app open, so
+          // that was wrong — and sending someone away from a screen the thing is already
+          // on is worse than saying nothing. One message for both platforms now.
           setNote(res.delivered
             ? {
               ok: true,
-              text: platform === 'ios'
-                ? 'Paired. Leave the Focus app or lock the phone — the test notification appears then, not while you are looking at the app.'
-                : 'Paired — your phone should have just buzzed.',
+              text: 'Paired — your phone should have just buzzed.',
             }
             : { ok: false, text: 'Paired, but the test notification did not go through. Try Send test.' });
         },
