@@ -45,7 +45,7 @@ export default class FocusCompanionPrefs extends ExtensionPreferences {
         // the window under the dialog is the preview.
         const scale = new Gtk.Scale({
             orientation: Gtk.Orientation.HORIZONTAL,
-            adjustment: new Gtk.Adjustment({ lower: 40, upper: 255, step_increment: 5, page_increment: 20 }),
+            adjustment: new Gtk.Adjustment({ lower: 100, upper: 255, step_increment: 5, page_increment: 20 }),
             digits: 0,
             draw_value: true,
             value_pos: Gtk.PositionType.RIGHT,
@@ -58,7 +58,7 @@ export default class FocusCompanionPrefs extends ExtensionPreferences {
 
         const row = new Adw.ActionRow({
             title: 'Opacity',
-            subtitle: '40 is barely there, 255 is solid. The mark is the default.',
+            subtitle: '100 is faint, 255 is solid. The mark is the default.',
         });
         row.add_suffix(scale);
         group.add(row);

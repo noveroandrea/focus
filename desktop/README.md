@@ -171,7 +171,7 @@ past it — the one API that could went away with Chrome Apps.
 | **Linux / GNOME** | the Shell bridge | `gnome-extensions prefs focus-companion@focus.dev` — live |
 | **macOS** | nobody | — |
 
-Both use the same 0–255 scale, where 255 is fully solid and the default is **180** (≈70%).
+Both use the same **100–255** scale, where 255 is fully solid and the default is **180** (≈70%).
 On GNOME the slider applies as you drag it, with the companion open. On Windows the value
 is read from the environment at start-up, but it is re-applied on every pin pass, so
 restarting the agent updates a companion that is already open — you do not have to reopen
@@ -185,9 +185,11 @@ companion still takes the clicks that land on it.
 
 Don't go too low. The companion exists to be caught out of the corner of your eye, and the
 idle tremble and countdown depend on it staying legible; faded far enough to comfortably
-read what is behind it, it stops registering at all. The GNOME slider floors at 40 for the
-same reason — an invisible window that still takes clicks reads as a broken desktop rather
-than a setting you chose.
+read what is behind it, it stops registering at all. That is why the scale floors at **100**
+rather than 0 on both platforms: the limit is legibility, not invisibility. (A window at 0
+would be worse still — invisible but still taking clicks, which reads as a broken desktop
+rather than a setting you chose, and the way back is a dialog you can no longer see a reason
+to open.)
 
 ## Wayland
 

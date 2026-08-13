@@ -451,6 +451,63 @@ is going to pin the window and waiting would be pointless.
 > it with a WM shortcut. See [Why it no longer uses
 > picture-in-picture](#why-it-no-longer-uses-picture-in-picture).
 
+### How to see through it
+
+The companion can be made **translucent**, so you can tell what is underneath it instead of
+having a solid rectangle parked over the corner of your work.
+
+**A browser cannot do this to its own window**, which is why the setting is not in the
+extension's popup and never can be. `chrome.windows.create` opens a real desktop window that
+the browser paints onto an opaque surface, so no CSS inside the window can reach past it —
+the one API that could disappeared along with Chrome Apps. It is the same wall as pinning,
+and it has the same three answers:
+
+| Your system | Who fades it | Where you change it |
+|---|---|---|
+| **Linux / GNOME** | the [companion bridge](#wayland) | its preferences — **live**, see below |
+| **Windows** | the [desktop agent](#desktop-agent-windows-macos-linux) | an environment variable |
+| **macOS** | nobody | — |
+
+Both use the same scale: **100 to 255**, where 255 is fully solid. The default is **180**
+(about 70%).
+
+**On Linux / GNOME** — install the bridge (`desktop/gnome-extension/install.sh`, then log out
+and back in), and open its preferences:
+
+```bash
+gnome-extensions prefs focus-companion@focus.dev
+```
+
+or open the **Extensions** app, find *Focus companion bridge*, and click the **gear**. Drag
+the slider with a companion window open: it re-fades as you drag, no logout and no
+reinstall. This is a GNOME Shell extension and has nothing to do with the Chrome extension
+of the same name — the compositor is the only thing that can fade a window, so the setting
+lives where the work is done.
+
+**On Windows** — the agent reads one environment variable at start-up:
+
+```powershell
+setx FOCUS_COMPANION_OPACITY 180
+```
+
+Then restart the agent (`launch.sh stop`, then the Focus agent icon). For a single session
+you can instead run `$env:FOCUS_COMPANION_OPACITY=180` in the terminal you start it from.
+There is no dialog because the agent deliberately has no settings file, no window and no
+tray — every other preference in this project belongs to the extension. You do **not** need
+to reopen the companion: the value is re-applied on every pass, so restarting the agent
+updates windows that are already open.
+
+**What you actually get is uniform translucency** — not a transparent background behind
+opaque content. Both platforms fade the *whole* window, so the character and the score dim
+by exactly as much as the panel behind them. That is unavoidable from outside the window:
+only the page could separate the two, and this is not a page. It is also **not**
+click-through — the companion still takes any click that lands on it.
+
+**Don't go too low.** The whole job of this window is to be caught out of the corner of your
+eye, and the idle tremble and countdown depend on it staying readable; faded far enough to
+comfortably read what is behind it, it stops registering at all. That is why the scale stops
+at 100 rather than 0 — the limit is legibility, not invisibility.
+
 ### Why it's a separate extension window
 
 A content script can only draw *inside its page*, so it disappears the moment another app

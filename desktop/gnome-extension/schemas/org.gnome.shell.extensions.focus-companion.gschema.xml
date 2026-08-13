@@ -7,16 +7,19 @@
          agent's LWA_ALPHA takes, so one number means the same thing on both platforms
          and nothing has to be converted anywhere.
 
-         The floor is 40 rather than 0 on purpose: a companion at 0 is an invisible
-         window that still takes clicks, which reads as a broken desktop rather than a
-         setting the user chose, and the way back is a preferences dialog they can no
-         longer see the reason to open. 255 is fully solid. -->
+         The floor is 100 rather than 0, and it is about legibility rather than about
+         the window disappearing. A companion at 0 is an invisible window that still
+         takes clicks — a broken-looking desktop whose fix lives in a dialog the user
+         can no longer see a reason to open. But the real limit is higher than that:
+         the character, the score and the idle countdown all have to stay readable at a
+         glance from the corner of the eye, which is the entire job of this window, and
+         below about 100 they do not. 255 is fully solid. -->
     <key name="companion-opacity" type="i">
       <default>180</default>
-      <range min="40" max="255"/>
+      <range min="100" max="255"/>
       <summary>Companion window opacity</summary>
       <description>
-        How solid the floating companion window is drawn, from 40 (very faint) to 255
+        How solid the floating companion window is drawn, from 100 (faint) to 255
         (fully opaque). Applied by the compositor, because a browser cannot make its
         own window see-through. Takes effect immediately on any open companion.
       </description>

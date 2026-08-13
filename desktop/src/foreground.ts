@@ -75,7 +75,9 @@ const PIN_MAX_H = 700;
  *  layered style is never set. */
 const COMPANION_OPACITY = (() => {
   const raw = Number.parseInt(process.env.FOCUS_COMPANION_OPACITY ?? '', 10);
-  return Number.isFinite(raw) ? Math.min(255, Math.max(40, raw)) : 180;
+  // Clamped to the same 100..255 the GNOME slider offers, so a typo in a shell profile
+  // cannot produce a window that is unreadable on one platform and refused on the other.
+  return Number.isFinite(raw) ? Math.min(255, Math.max(100, raw)) : 180;
 })();
 
 let child: ChildProcessByStdio<null, Readable, Readable> | null = null;
