@@ -128,8 +128,19 @@ export interface Settings {
    *  an OS-level identity matched exactly against the agent's identifier (executable
    *  name on Windows, bundle id on macOS, process name on Linux).
    *
-   *  Empty by default. There is no useful cross-platform default list, and the popup
-   *  offers the program you are actually using with one click to add it. */
+   *  Seeded with the DESKTOP SHELL of all three platforms, and nothing else. There is
+   *  still no useful cross-platform default for real applications — an editor is
+   *  `code` here, `com.microsoft.VSCode` there — which is why the popup offers the
+   *  program you are actually using with one click. The shell is the exception worth
+   *  shipping: it is the same program on every machine of that OS, it is what the
+   *  agent reports during the gap between one window closing and the next taking
+   *  focus, and an unwhitelisted answer there expires the session to idle mid-task.
+   *
+   *  All three identifiers ship together and the two foreign ones are inert — they can
+   *  never match, since the agent only ever reports its own platform's form. That is
+   *  the same accepted cost as a user with two machines of different OSes (see the
+   *  cross-platform note in CLAUDE.md), and it keeps this one list correct wherever
+   *  the server sends it. */
   allowedPrograms: string[];
   /** Base address of the AI backend (Ollama-compatible HTTP API).
    *  Local: just host:port, e.g. http://localhost:11434. Remote: the full base URL. */
@@ -256,7 +267,11 @@ export const DEFAULT_SETTINGS: Settings = {
     'mail.google.com', 'outlook.live.com', 'outlook.office.com',
     'scholar.google.com', 'wikipedia.org', 'unipd.it',
   ],
-  allowedPrograms: [],
+  // The desktop shell, one identifier per platform. `gjs` is the GNOME desktop
+  // (the Shell's JavaScript process, what /proc/<pid>/comm reports); `explorer` is
+  // what PowerShell's ProcessName gives for Windows Explorer, which draws the
+  // Windows desktop and taskbar; `com.apple.finder` is Finder's bundle id.
+  allowedPrograms: ['gjs', 'explorer', 'com.apple.finder'],
   classifyUrl: 'http://localhost:11434',
   classifyApiKey: '',
   classifyModel: 'qwen-yesno',

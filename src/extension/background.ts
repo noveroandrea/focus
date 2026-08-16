@@ -926,8 +926,26 @@ initHeartbeats({
 // Let the server reconcile the displayed live score after each post.
 initSync({ onServerScores: applyServerScores });
 
+// ── The dashboard is work, and is not a whitelist entry ───────────────────────
+// Reading your own scores is the one page that cannot be earned on and must not be
+// punished for. It is hard-coded rather than seeded into `allowedDomains` for three
+// reasons, each of which the list would get wrong: the id in the URL is generated
+// per install (an unpacked extension changes it when the folder moves), so no fixed
+// string could match; `allowedDomains` is a *substring* test, so the entry would be
+// a bare id that silently matched anything containing it; and on `withserver` the
+// whitelist is replaced wholesale by the server's copy, which would carry one
+// machine's id to every other machine and drop it here. Hard-coded, it is correct on
+// every install and appears in no list the user can edit or accidentally delete.
+const DASHBOARD_URL = chrome.runtime.getURL('dashboard.html');
+
+/** The extension's own dashboard tab. */
+function isOwnDashboard(url: string): boolean {
+  return url.startsWith(DASHBOARD_URL);
+}
+
 // Mirrors heartbeat.ts: a URL is authorized when it matches a whitelisted domain.
 function isAllowedUrl(url: string): boolean {
+  if (isOwnDashboard(url)) return true;
   return settings.allowedDomains.some(d => d.trim() !== '' && url.includes(d.trim()));
 }
 

@@ -1110,10 +1110,15 @@ const Popup = () => {
     };
     chrome.runtime.onMessage.addListener(listener);
 
-    // Current tab URL (for whitelist toggle)
+    // Current tab URL (for whitelist toggle). One of our own pages is skipped, which
+    // leaves currentTabDomain empty and hides the toggle: the dashboard is already
+    // permanently authorized in background.ts, and `new URL(...).hostname` on a
+    // chrome-extension:// URL is the install's generated id — so the row would have
+    // offered to add a meaningless substring to the whitelist for a page that never
+    // needed one.
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tab = tabs?.[0];
-      if (tab?.url) {
+      if (tab?.url && !tab.url.startsWith(chrome.runtime.getURL(''))) {
         setCurrentTabUrl(tab.url);
         if (tab.id) setCurrentTabId(tab.id);
         try {

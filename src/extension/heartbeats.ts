@@ -96,12 +96,24 @@ function isTrackedUrl(url: string): boolean {
   return host.isAllowedUrl(url) || isPdfUrl(url);
 }
 
+/** Our own pages — `chrome-extension://<this id>/…`. Admitted as a *scheme* only;
+ *  which of them actually counts is still `isAllowedUrl`'s decision, and it says
+ *  yes to exactly one (the dashboard). Without this the scheme test below rejected
+ *  the dashboard before the whitelist was ever consulted, so reading your own
+ *  numbers looked exactly like walking away: no content script runs on an
+ *  extension page, so no HEARTBEAT can arrive either, and the OS poll — the one
+ *  source left — bailed out here. The idle countdown then ran to a penalty while
+ *  the user sat looking at the score it was docking. */
+const OWN_PAGE_PREFIX = chrome.runtime.getURL('');
+
 /** The tab the user is looking at, if it's one we track. The callback simply
  *  doesn't run otherwise, so every caller fails closed (no heartbeat). */
 function withTrackedActiveTab(fn: () => void) {
   chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
     const url = tabs[0]?.url;
-    if (!url || !/^(https?|file):/i.test(url) || !isTrackedUrl(url)) return;
+    if (!url) return;
+    const knownScheme = /^(https?|file):/i.test(url) || url.startsWith(OWN_PAGE_PREFIX);
+    if (!knownScheme || !isTrackedUrl(url)) return;
     fn();
   });
 }

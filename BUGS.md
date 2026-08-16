@@ -101,6 +101,54 @@ compositor over D-Bus for the state the UI was supposed to reflect.
 
 ## The idle model
 
+### Reading the dashboard counted as walking away
+**Status: fixed**
+
+Opening the extension's own dashboard tab and sitting there reading it ran the idle
+countdown to a penalty. The user was docked points for looking at the page that shows
+the points.
+
+Two gates, and it is worth being precise about which one actually did it, because
+fixing only the obvious one changes nothing:
+
+1. **No content script runs on a `chrome-extension://` page.** `manifest.json` matches
+   `<all_urls>`, which does not cover the extension's own origin — by design, and not
+   something a match pattern can opt into. So `heartbeat.js` is absent and no `HEARTBEAT`
+   can ever arrive from that tab. That alone is fine; it is the same situation as a PDF
+   viewer, and the OS idle poll exists to cover exactly it.
+2. **The OS poll refused the tab on its scheme.** `withTrackedActiveTab` tested
+   `/^(https?|file):/` *before* consulting `isTrackedUrl`, so the one remaining heartbeat
+   source bailed out early and the whitelist never got a say. This is the one that caused
+   the bug: whitelisting the dashboard by any means would not have helped while this test
+   stood.
+
+Fixed on both sides. `heartbeats.ts` admits our own origin as a **scheme**
+(`OWN_PAGE_PREFIX = chrome.runtime.getURL('')`) and leaves the verdict to
+`host.isAllowedUrl`, so the fail-closed shape is unchanged and no other extension page
+gains anything. `background.ts` gets `isOwnDashboard()`, consulted first in
+`isAllowedUrl`.
+
+> **The dashboard is hard-coded, not seeded into `allowedDomains`, and that is a
+> decision.** All three properties of that list would get it wrong: the extension id is
+> generated per install (an unpacked extension changes it when the folder moves), so no
+> fixed entry could match; the list is a **substring** test, so an entry that was a bare
+> id would silently match any URL containing it; and on `withserver` the list is replaced
+> wholesale by the server's copy, which would carry one machine's id to every other
+> machine and drop it here. Hard-coded, it is right on every install and cannot be
+> deleted by accident.
+
+Two things deliberately left alone. `matchingDomains()` has **no** matching exception —
+it answers "what would removing this page delete", and for the dashboard that is nothing;
+giving it one would produce a ✕ that visibly does nothing, the same defect recorded for
+`UNWHITELIST_PAGE`. And the **companion window is not included**: it is meant to be
+watched while you work somewhere else, so counting it as work would mean the session
+never went idle at all.
+
+The popup's per-page toggle now hides itself on our own pages. It was building
+`currentTabDomain` from `new URL(tab.url).hostname`, which on a `chrome-extension://`
+URL is the install's generated id — so the row offered to add that id to the whitelist,
+where it would have been a meaningless substring rule for a page that no longer needs one.
+
 ### The "I" countdown never moved
 **Status: fixed — c9b47fc, d9832b0**
 
