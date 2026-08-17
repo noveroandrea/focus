@@ -35,12 +35,12 @@ import {
   DEFAULT_SETTINGS, loadSettings, localDateKey,
 } from '../../types';
 import {
-  Activity, User, UserPlus, Users, Trophy, Plus, LogOut, Loader2, ExternalLink,
+  User, UserPlus, Users, Trophy, Plus, LogOut, Loader2, ExternalLink,
 } from 'lucide-react';
 import { SUMMARY_KEY } from '../server/config';
 import type { ServerSummary, TeamBoard, FriendsBoard, MemberScore } from '../server/sync';
 import {
-  FOCUS_COLOR, DISTRACTED_COLOR, Metric, MetricTabs, BarBoard, BarLegend, memberRow,
+  FOCUS_COLOR, DISTRACTED_COLOR, FocusMark, Metric, MetricTabs, BarBoard, BarLegend, memberRow,
   BoardFooter, BoardLoading, useBoard, useMemberships, useWeeklyFlag, FlagBadge,
   DailyHistory, AllowedPages, CompetitionSection, MemberProfileView, NameForm,
   FriendSearch, useGroupHistory, GroupHistoryLoading, GroupHistoryUnavailable,
@@ -439,7 +439,7 @@ const Dashboard = () => {
   if (status.configured && !status.signedIn) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-3 text-sm text-slate-500">
-        <Activity size={28} className="text-slate-300" />
+        <FocusMark size={28} className="text-slate-300" />
         <p>Sign in from the Focus popup to open the dashboard.</p>
       </div>
     );
@@ -471,7 +471,7 @@ const Dashboard = () => {
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-[1280px] items-center gap-3 px-6 py-3">
           <h1 className="flex items-center gap-2 text-base font-bold">
-            <Activity className="text-green-500" size={20} />
+            <FocusMark className="text-green-500" size={20} />
             Focus
             <span className="text-slate-300">/</span>
             <span className="font-medium text-slate-500">Dashboard</span>

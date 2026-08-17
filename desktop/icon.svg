@@ -1,7 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <!-- Focus agent. Deliberately legible at 16px: one ring, one dot, no detail that
-       turns to mush in a taskbar. Slate/green to match the extension's own palette. -->
+  <!-- Focus. One disc on a slate tile: legible at 16px, where a thin ring over a
+       dark ground turns into a smudge you have to go looking for. Slate/green to
+       match the extension's own palette, and redrawn from these same ratios by
+       makeIcon() in background.ts so the toolbar cannot disagree with the tile. -->
   <rect width="64" height="64" rx="14" fill="#0f172a"/>
-  <circle cx="32" cy="32" r="18" fill="none" stroke="#22c55e" stroke-width="4"/>
-  <circle cx="32" cy="32" r="6.5" fill="#22c55e"/>
+  <circle cx="32" cy="32" r="20" fill="#22c55e"/>
 </svg>

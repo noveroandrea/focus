@@ -40,6 +40,27 @@ export const DISTRACTED_COLOR = '#b91c1c'; // red-700
 export const DAY_MS = 86_400_000;
 export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+/** The product's mark, for the popup and dashboard headers — replacing lucide's
+ *  heartbeat glyph, which was a generic "activity" pictogram and not this product.
+ *
+ *  It is the ring and dot of `desktop/icon.svg`, WITHOUT that file's slate tile: a
+ *  toolbar icon and a launcher icon have to carry their own ground, and there the
+ *  ring lost to it (which is why the toolbar's version is a solid disc) — but a
+ *  header sits on white, so the ring keeps its contrast and reads as a mark rather
+ *  than a blob at the 20 px these headers use.
+ *
+ *  Drawn in `currentColor`, so the callers' existing `text-green-500` /
+ *  `text-slate-300` classes keep colouring it exactly as they coloured the glyph. */
+export const FocusMark = ({ size = 20, className = '' }: {
+  size?: number; className?: string;
+}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true"
+       className={`flex-shrink-0 ${className}`}>
+    <circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" strokeWidth="2.4" />
+    <circle cx="12" cy="12" r="3.4" fill="currentColor" />
+  </svg>
+);
+
 /** Mean of each score over the `days` complete days ENDING YESTERDAY. Today is
  *  excluded on purpose: it's still accumulating, so folding a half-finished day
  *  into the average would drag it down all morning and make the bar meaningless.

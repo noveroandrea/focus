@@ -17,9 +17,10 @@ npm run package        # build + focus-<version>.zip, ready to upload
 |---|---|
 | **1. Developer account** | $5 one-time fee at <https://chrome.google.com/webstore/devconsole>. Verify the publisher email; an unverified publisher cannot publish. |
 | **2. Privacy policy URL** | `web/privacy.html` is written and ready. Deploy it: `git subtree push --prefix web origin gh-pages`, then use <https://noveroandrea.github.io/focus/privacy.html>. **Fill in `[contact email]` first** — it is the only placeholder in the file, and a policy with no contact is a rejection. |
-| **3. Screenshots** | At least one, 1280×800 or 640×400 PNG. The obvious three: the popup on a whitelisted page, the companion window over an editor, the dashboard. **No mock data** — reviewers reject screenshots that show a UI the extension does not produce. |
-| **4. The OAuth redirect URI** | See the blocker below. Do this *before* you tell anyone to install it. |
-| **5. Ethics** | This build ships the study backend. Whatever your ethics approval says about consent, the extension is now the thing collecting the data — the consent flow has to exist before the listing goes public, not after. |
+| **3. Store icon** | Upload **`store/icon-128.png`** — 128×128, the ring mark inset into the middle 96×96 with transparent padding, which is the framing the listing asks for. (`icons/icon128.png` is the full-bleed version that ships *inside* the package; both are the same artwork, so the tile and the toolbar match.) |
+| **4. Screenshots** | At least one, 1280×800 or 640×400 PNG. The obvious three: the popup on a whitelisted page, the companion window over an editor, the dashboard. **No mock data** — reviewers reject screenshots that show a UI the extension does not produce. |
+| **5. The OAuth redirect URI** | See the blocker below. Do this *before* you tell anyone to install it. |
+| **6. Ethics** | This build ships the study backend. Whatever your ethics approval says about consent, the extension is now the thing collecting the data — the consent flow has to exist before the listing goes public, not after. |
 
 ### ⚠ Blocker: publishing changes the extension ID, which breaks sign-in
 

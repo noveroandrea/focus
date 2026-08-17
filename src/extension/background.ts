@@ -67,24 +67,44 @@ let state: SessionState = {
 let settings: Settings = { ...DEFAULT_SETTINGS };
 
 // ── Toolbar icon ──────────────────────────────────────────────────────────────
-// No static icon file ships with the extension; we draw it in the service worker
-// with OffscreenCanvas so its colour can reflect the working state: green while
-// "Working" on an authorized page, yellow while "Working" on a page that is NOT
-// whitelisted, grey while "Not working" (forceActive on). It reproduces the old
-// auto-generated look — a rounded square with a white "F".
+// Drawn in the service worker with OffscreenCanvas so its colour can carry the
+// working state: green while "Working" on an authorized page, yellow while
+// "Working" on a page that is NOT whitelisted, grey while "Not working"
+// (forceActive on).
+//
+// It is the SAME ARTWORK as `desktop/icon.svg` and `icons/*.png` — a slate rounded
+// square with one filled disc — with the status colour applied to the disc instead
+// of being baked in. That is not decoration: `icons/` is what Chrome shows before
+// the worker has started and what the store listing uses, so a different drawing
+// here would make the toolbar visibly change picture a second after every browser
+// launch. The geometry is the SVG's viewBox units over 64, kept as ratios so all
+// four sizes come out of one description.
+//
+// It is a SOLID disc and was briefly a thin ring with a small dot, which is the
+// mistake worth recording: at 16 px on a dark toolbar a 1 px stroke of green over
+// slate-900 is a smudge you have to go looking for, and this icon's whole job is to
+// be readable without being looked at. The disc's radius is the ring's OUTER edge,
+// so the mark occupies the same square it always did. Only the three colours differ
+// between states — never the shape, since "is it working?" has to be answerable out
+// of the corner of the eye.
+const ICON_GROUND = '#0f172a';   // slate-900, the SVG's rect fill
+
 function makeIcon(size: number, color: string): ImageData {
   const canvas = new OffscreenCanvas(size, size);
   const ctx = canvas.getContext('2d')!;
   ctx.clearRect(0, 0, size, size);
+
   ctx.beginPath();
-  ctx.roundRect(0, 0, size, size, size * 0.18);
-  ctx.fillStyle = color;
+  ctx.roundRect(0, 0, size, size, size * (14 / 64));
+  ctx.fillStyle = ICON_GROUND;
   ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.font = `bold ${Math.round(size * 0.72)}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('F', size / 2, size * 0.56);
+
+  const c = size / 2;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(c, c, size * (20 / 64), 0, Math.PI * 2);
+  ctx.fill();
+
   return ctx.getImageData(0, 0, size, size);
 }
 
@@ -112,7 +132,9 @@ function updateActionIcon() {
       // which page is in front (tab activated, tab navigated, window focused), so
       // the page the companion offers cannot drift from the one the icon describes.
       rememberPage(tabs[0]);
-      if (settings.forceActive) { paintActionIcon('#94a3b8'); return; } // grey
+      // Light grey (slate-300), not slate-400: the disc sits on a slate-900 ground,
+      // and a mid grey there reads as "the icon failed to draw" rather than "paused".
+      if (settings.forceActive) { paintActionIcon('#cbd5e1'); return; }
       const url = tabs[0]?.url ?? '';
       const whitelisted = !!url && isAllowedUrl(url);
       paintActionIcon(whitelisted ? '#22c55e' : '#eab308'); // green | yellow

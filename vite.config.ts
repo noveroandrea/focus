@@ -80,10 +80,14 @@ export default defineConfig(() => {
       viteStaticCopy({
         targets: [
           { src: 'manifest.json', dest: '.' },
-          // The static toolbar / store icons. Committed PNGs rather than generated:
-          // the Web Store needs a 128 px icon in the package, and `background.ts`
-          // repaints the toolbar in green/yellow/grey the moment the worker starts —
-          // so these are what Chrome shows before that and what the listing uses.
+          // The static toolbar icons: `desktop/icon.svg` rasterised to 16/32/48/128
+          // by `scripts/make-icons.py`, committed rather than built (no rasteriser is
+          // a build dependency, and the artwork changes about never). The Web Store
+          // requires a 128 px icon in the package, and `background.ts` repaints the
+          // toolbar in green/yellow/grey the moment the worker starts — so these are
+          // what Chrome shows before that, drawn to match. `store/icon-128.png` is
+          // the padded listing version and deliberately lives outside this directory,
+          // which is copied wholesale.
           { src: 'icons', dest: '.' },
         ],
       }),

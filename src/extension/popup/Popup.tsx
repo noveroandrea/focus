@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, PairStart, PairedPhone, PhonePlatform, localDateKey, DEFAULT_SETTINGS, FIXED_TIMINGS, loadSettings, CRY_BEEP_STYLES, clampCryBeepStyle, SPRITE_MODES, clampSpriteMode } from '../../types';
-import { FileText, Activity, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus, Smartphone, X, Copy, Check, Download } from 'lucide-react';
+import { FileText, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus, Smartphone, X, Copy, Check, Download } from 'lucide-react';
 // Drawn in the popup, never fetched: the URL encoded here carries a single-use
 // pairing secret, and asking a chart service to render it would hand them the pairing.
 import qrcode from 'qrcode-generator';
@@ -10,7 +10,7 @@ import { IDLE_WARNING_MS } from '../timings';
 import '../../index.css';
 // The sections themselves — shared verbatim with the dashboard page, which composes
 // the same components into a wide layout. See src/extension/ui/shared.tsx.
-import { CompetitionSection, FlagBadge, FriendsSection, NameForm, PersonalSection, TeamSection, useMemberships, useWeeklyFlag } from '../ui/shared';
+import { CompetitionSection, FlagBadge, FocusMark, FriendsSection, NameForm, PersonalSection, TeamSection, useMemberships, useWeeklyFlag } from '../ui/shared';
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
 const MainTab = ({ state, settings, currentTabDomain, currentTabUrl, onWhitelistToggle, onSettingsChange }: {
@@ -461,7 +461,7 @@ const SignInScreen = ({ busy, failed, onSignIn }: {
     <div className="w-[320px] bg-white text-slate-900 font-sans">
       <header className="border-b border-slate-100 px-4 pt-4 pb-3">
         <h1 className="flex items-center gap-2 text-lg font-bold">
-          <Activity className="text-slate-300" size={20} />
+          <FocusMark className="text-slate-300" size={20} />
           Focus
         </h1>
         <p className="mt-1 text-[10px] leading-snug text-slate-400">
@@ -1394,7 +1394,7 @@ const Popup = () => {
       <header className="px-4 pt-4 pb-3 border-b border-slate-100">
         <div className="flex items-center justify-between">
           <h1 className="text-lg font-bold flex items-center gap-2">
-            <Activity className={settings.forceActive ? 'text-slate-300' : 'text-green-500'} size={20} />
+            <FocusMark className={settings.forceActive ? 'text-slate-300' : 'text-green-500'} size={20} />
             Focus
           </h1>
           <div className="flex items-center gap-1.5">
