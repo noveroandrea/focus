@@ -20,3 +20,6 @@ Thumbs.db
 
 # Claude Code settings (personal, machine-specific)
 .claude/
+
+# Store package
+focus-*.zip

@@ -1159,24 +1159,41 @@ undone by a later tidy-up. Please add an entry whenever a fix is not obvious fro
 
 ## Publishing to the Chrome Web Store
 
-The build in `dist/` is a valid MV3 extension. Before submitting:
+```bash
+npm run package     # build, then focus-<version>.zip in the repo root, ready to upload
+```
 
-1. **Icons** — add 16/32/48/128 px PNGs and reference them in `manifest.json`
-   (`"icons"` + `"action": { "default_icon" }`). The store requires at least a 128 px icon.
-2. **Listing assets** — at least one 1280×800 (or 640×400) screenshot and a short + long
-   description.
-3. **Privacy** — because the content scripts match `<all_urls>` and the extension can call
-   `localhost`, you must provide a **privacy policy** and justify the broad host access in the
-   submission form (the justification: the companion must be injectable on any page the user
-   whitelists, and `localhost` is the optional local AI helper — no data leaves the machine).
-4. **Zip** `dist/` and upload it in the Chrome Web Store Developer Dashboard.
+**[`STORE.md`](STORE.md) is the submission itself** — listing copy, the single-purpose
+sentence, a justification per permission, the data-use disclosures, and the two risks worth
+knowing before you press submit. Read it rather than improvising in the dashboard form.
+
+Already done: 16/32/48/128 px icons (`icons/`, wired into `manifest.json` and copied by
+Vite), a privacy policy at [`web/privacy.html`](web/privacy.html), and a packaging step that
+leaves out the dev demo and *verifies* the zip still contains every file the popup,
+dashboard and companion reference.
+
+Still yours to do: the $5 developer account, screenshots, deploying the policy to GitHub
+Pages, and — **the one thing that will otherwise break sign-in for every user** — adding
+`https://<published-extension-id>.chromiumapp.org/` to the Google OAuth client's redirect
+URIs once the store has assigned the ID. `STORE.md` has the steps.
 
 ---
 
 ## Privacy
 
-- All state and settings are stored **locally** (`chrome.storage.local`). Nothing is sent to
-  any server controlled by the author.
+The published policy, and the URL the Chrome Web Store listing points at, is
+[`web/privacy.html`](web/privacy.html) → <https://noveroandrea.github.io/focus/privacy.html>.
+Keep the two in step; the summary below is the same facts in less space.
+
+- **Signed out, everything is local** (`chrome.storage.local`) and nothing leaves the machine.
+- **Signed in, the study backend receives**: score deltas and daily totals, the two
+  whitelists (domain strings and program identifiers *you* added), your time zone, and your
+  account email from Google sign-in. That is all — see `src/extension/server/sync.ts`.
+- **What is never recorded anywhere**: the URL of a page you visit, page content,
+  keystrokes, and window titles. Focus measures *whether* you are working, not what on.
+- **Teams and competitions are an opt-in disclosure**: a team-mate or accepted friend can
+  see your scores, your day history and your whitelisted domains (`get_member_profile`).
+  That last one is browsing-adjacent and belongs in the consent form.
 - The optional AI classifier sends **only the page URL and title** to **the AI address you
   configure** — by default your own local model (`http://localhost:11434`), so nothing leaves
   the machine. If you point it at a **remote** backend, the URL and title go to that server

@@ -78,7 +78,14 @@ export default defineConfig(() => {
       tailwindcss(),
       wrapContentScriptsInIIFE(),
       viteStaticCopy({
-        targets: [{ src: 'manifest.json', dest: '.' }],
+        targets: [
+          { src: 'manifest.json', dest: '.' },
+          // The static toolbar / store icons. Committed PNGs rather than generated:
+          // the Web Store needs a 128 px icon in the package, and `background.ts`
+          // repaints the toolbar in green/yellow/grey the moment the worker starts —
+          // so these are what Chrome shows before that and what the listing uses.
+          { src: 'icons', dest: '.' },
+        ],
       }),
     ],
     base: './',

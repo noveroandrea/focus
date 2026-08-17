@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Focus — privacy policy</title>
+<link rel="icon" href="icon-192.png">
+<meta name="theme-color" content="#0f172a">
+
+<!-- The Chrome Web Store will not accept a submission from an extension that handles
+     personal data without a privacy policy at a public URL, and this is that URL:
+     https://noveroandrea.github.io/focus/privacy.html — the same GitHub Pages site
+     that hosts the phone-pairing page, so it needs no second host and no build step.
+
+     It is written to be checkable against the code rather than to sound reassuring.
+     Every claim below names the file that implements it, because the reviewer's
+     question and the participant's question are the same one — "what leaves my
+     machine?" — and the answer is worth nothing if it cannot be verified. -->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: radial-gradient(circle at 30% 20%, #1e293b, #0f172a);
+    color: #e2e8f0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.6;
+    padding: 32px 20px 64px;
+    display: flex; justify-content: center;
+  }
+  main { width: 100%; max-width: 720px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .sub { color: #94a3b8; font-size: 13px; margin: 0 0 28px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+       color: #94a3b8; margin: 28px 0 10px; font-weight: 700; }
+  .card {
+    background: rgba(148,163,184,0.08);
+    border: 1px solid rgba(148,163,184,0.18);
+    border-radius: 16px; padding: 18px 20px; margin-bottom: 14px;
+  }
+  p, li { font-size: 15px; }
+  p { margin: 0 0 12px; }
+  p:last-child, ul:last-child, table:last-child { margin-bottom: 0; }
+  ul { margin: 0 0 12px; padding-left: 22px; }
+  li { margin-bottom: 8px; }
+  code { background: rgba(148,163,184,0.16); border-radius: 5px; padding: 1px 5px;
+         font-size: 13px; }
+  strong { color: #f1f5f9; }
+  a { color: #93c5fd; }
+  table { width: 100%; border-collapse: collapse; margin: 0 0 12px; }
+  th, td { text-align: left; padding: 8px 10px; font-size: 14px;
+           border-bottom: 1px solid rgba(148,163,184,0.18); vertical-align: top; }
+  th { color: #94a3b8; font-size: 12px; text-transform: uppercase;
+       letter-spacing: 0.06em; }
+  .no { color: #86efac; font-weight: 700; }
+  .wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+
+  <h1>Focus — privacy policy</h1>
+  <p class="sub">Last updated 17 August 2026 · Focus browser extension · © Andrea Novero · GPL-3.0</p>
+
+  <div class="card">
+    <p><strong>Focus is a research tool.</strong> It is part of doctoral research at the
+    University of Padova on sustained attention while studying and working. If you are using
+    it as a study participant, the consent form you signed governs the research use of your
+    data and takes precedence over this page wherever it is more specific.</p>
+    <p>The extension is <a href="https://www.gnu.org/licenses/gpl-3.0">free software</a>, so
+    every claim here can be checked in the source rather than taken on trust.</p>
+  </div>
+
+  <h2>What Focus records</h2>
+  <div class="card">
+    <p>Focus measures <strong>whether you are working</strong>, not what you are working on.
+    Its unit of measurement is a "heartbeat" — one second of detected activity on a page or a
+    program <em>you have put on your own whitelist</em>.</p>
+    <ul>
+      <li><strong>Activity counts</strong> — points earned for focus, points lost to going
+        idle, and the daily totals they add up to.</li>
+      <li><strong>Your whitelists</strong> — the domain strings (e.g. <code>arxiv.org</code>)
+        and program identifiers (e.g. <code>code</code>) you chose to have counted as work.
+        These are lists you wrote; they are not a browsing history.</li>
+      <li><strong>Your account email</strong>, from Google sign-in, and your time zone.</li>
+      <li><strong>Team and competition membership</strong>, if you join one.</li>
+    </ul>
+  </div>
+
+  <h2>What Focus never records</h2>
+  <div class="card">
+    <p>None of the following is stored, transmitted or logged anywhere, by design:</p>
+    <ul>
+      <li><span class="no">No browsing history.</span> The URL of a page you visit is never
+        sent to or stored on any server. Nothing records that you opened a page, only that
+        activity happened on a whitelisted one.</li>
+      <li><span class="no">No page content</span> — no text, no form input, no keystrokes.
+        The content scripts listen for the <em>fact</em> of a mouse move, key press or
+        scroll, never for which key.</li>
+      <li><span class="no">No window titles.</span> The optional desktop agent reads the
+        foreground program's identifier and refuses to report titles, because a title leaks
+        document names, message contents and page titles.</li>
+      <li><span class="no">No analytics, no advertising, no third-party trackers, no sale of
+        data,</span> and no use of your data for anything other than the research described
+        in your consent form.</li>
+    </ul>
+  </div>
+
+  <h2>Where data goes</h2>
+  <div class="card">
+    <div class="wrap">
+      <table>
+        <tr><th>Feature</th><th>What leaves your machine</th><th>To whom</th></tr>
+        <tr>
+          <td><strong>Sync</strong><br>(requires sign-in)</td>
+          <td>Score deltas, daily totals, your two whitelists, your time zone, your email
+              address</td>
+          <td>The study's <strong>Supabase</strong> database, hosted in the EU. Row-level
+              security means a request signed by your account can only reach your own
+              rows.</td>
+        </tr>
+        <tr>
+          <td><strong>Teams &amp; competitions</strong><br>(opt-in, per team)</td>
+          <td>The same figures, plus your whitelisted domains, become visible to people
+              you share a team or an accepted friendship with</td>
+          <td>Those people, and nobody else. Joining is deliberate and needs a password;
+              leaving stops it.</td>
+        </tr>
+        <tr>
+          <td><strong>Phone nudge</strong><br>(off unless you pair a phone)</td>
+          <td>A fixed message ("come back — this lapse is about to cost N points"),
+              <strong>encrypted so that only your phone can read it</strong></td>
+          <td>Your phone's push service (Google FCM on Android, Apple on iPhone), which
+              relays bytes it cannot decrypt. It is sent by <em>your</em> browser; no Focus
+              server learns that a nudge happened.</td>
+        </tr>
+        <tr>
+          <td><strong>AI page classifier</strong><br>(off by default)</td>
+          <td>The <strong>URL and title</strong> of a page you are on, if and only if you
+              switch this on</td>
+          <td>The address <em>you</em> configure. The default is a model on your own
+              machine (<code>localhost</code>), so nothing leaves it. Point it at a remote
+              service and that service receives them.</td>
+        </tr>
+        <tr>
+          <td><strong>Desktop agent</strong><br>(optional, separate install)</td>
+          <td>Nothing. It answers one question — which program is in front — to
+              <code>127.0.0.1</code> only, refuses requests from web pages, and writes
+              nothing to disk.</td>
+          <td>No-one. It has no account, no session and no network beyond loopback.</td>
+        </tr>
+      </table>
+    </div>
+    <p>With no account signed in, Focus is entirely local: everything lives in
+    <code>chrome.storage.local</code> on your own computer.</p>
+  </div>
+
+  <h2>Pairing a phone</h2>
+  <div class="card">
+    <p>The QR code you scan carries a one-time code and your browser's own public key. The
+    page you open on the phone hands back a push subscription, which lives on the server for
+    <strong>at most ten minutes</strong> and is <strong>deleted the moment your computer
+    collects it</strong>. After that the pairing exists only on your two devices. The signing
+    key is generated on your machine and never uploaded — which is the reason no server can
+    send you a notification, and therefore why no server can know when you drifted.</p>
+  </div>
+
+  <h2>Permissions, and why each exists</h2>
+  <div class="card">
+    <ul>
+      <li><strong>Access to the pages you visit</strong> — the companion has to be drawable
+        on any page you decide counts as work, and that set is yours to write, so it cannot
+        be a fixed list. The scripts run everywhere but <em>act</em> only on whitelisted
+        pages.</li>
+      <li><strong>Tabs</strong> — to tell whether the page in front is on your whitelist.</li>
+      <li><strong>Idle</strong> — to notice you have stopped, which is the entire point.</li>
+      <li><strong>Sign-in (identity)</strong> — Google sign-in, requesting only
+        <code>openid email profile</code>. Focus never reads your mail, contacts, files or
+        calendar.</li>
+      <li><strong>Downloads</strong> — to hand you the desktop-agent installer that ships
+        inside the extension. Nothing else is ever downloaded.</li>
+      <li><strong>Storage, windows, alarms, display info, scripting</strong> — settings, the
+        floating companion window and its placement, and the timers that survive the service
+        worker being suspended.</li>
+      <li><strong><code>127.0.0.1:47317</code></strong> — the optional desktop agent.</li>
+    </ul>
+  </div>
+
+  <h2>Your data, your call</h2>
+  <div class="card">
+    <ul>
+      <li><strong>Stop syncing:</strong> sign out. The extension keeps working, locally.</li>
+      <li><strong>Stop being visible to others:</strong> leave the team or competition.</li>
+      <li><strong>Stop the nudges:</strong> unpair the phone, or turn the switch off.</li>
+      <li><strong>Delete everything:</strong> ask, and your rows are deleted. Uninstalling
+        the extension removes the local copy immediately.</li>
+    </ul>
+    <p>Questions, corrections, or a deletion request: <strong>[contact email]</strong>.</p>
+  </div>
+
+  <p class="sub" style="margin-top:28px">
+    Source, issue tracker and the full data model:
+    <a href="https://github.com/noveroandrea/focus">github.com/noveroandrea/focus</a>
+  </p>
+
+</main>
+</body>
+</html>

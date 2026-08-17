@@ -24,6 +24,7 @@ The extension only activates on a **user-editable whitelist** of focus domains (
 ```bash
 npm run dev       # Local dev server (port 3000) for testing the SpriteSimulation demo
 npm run build     # Build extension to dist/ — then the agent installers into dist/agent/
+npm run package   # …then focus-<version>.zip for the Chrome Web Store (see STORE.md)
 npm run lint      # TypeScript type-check (tsc --noEmit)
 npm run clean     # Remove dist/
 npm run preview   # Preview built app
@@ -172,6 +173,8 @@ The floor is a `chrome.alarms` one-shot (`focus-sync-post`) re-armed by every po
 
 Vite compiles multiple entry points into separate `dist/` bundles:
 - `main` → index.html (demo) · `background` → service worker · `heartbeat`, `sprite` → content scripts · `popup` → popup panel · `pip` → the floating companion window · `dashboard` → the full-tab dashboard (its own entry so the wide-only charts never ship inside the popup bundle). Content-script bundles are wrapped in IIFEs so re-injection after reload doesn't throw "Identifier already declared".
+
+**`npm run package` builds the store zip, and its exclusions are DERIVED rather than named.** The dev demo (`index.html` + its entry chunk) is dropped because ~195 kB of a harness no published extension loads is dead code a human reviewer has to ask about. The obvious implementation excluded `assets/index-*.js` on the reasoning that it belongs to `index.html` — it does, and it is *also* the shared React chunk `popup.html` and `dashboard.html` load, so that package installed cleanly and opened a **blank popup**. Rollup's names are hashed and its chunking moves with the imports, so `scripts/package-extension.mjs` reads the four built HTML files, drops only what nothing but `index.html` references, and then re-opens the zip to assert every referenced file is inside it. **[`STORE.md`](STORE.md) is the submission** — listing copy, per-permission justifications, data-use disclosures, and the blocker that publishing changes the extension id, which changes `chrome.identity.getRedirectURL()` and breaks Google sign-in until the new `chromiumapp.org` URI is registered. The static `icons/` PNGs exist for the store (128 px is required) and for the moment before `background.ts` repaints the toolbar; they are committed source, not generated.
 
 `npm run build` is **`vite build` followed by `node scripts/build-agent-installer.mjs`**, which writes the two self-contained desktop-agent installers into `dist/agent/` (see the Desktop Agent section). `vite build` alone empties `dist/`, so it leaves no `agent/` — the popup then says the installer is missing from this build, which is the honest answer.
 
