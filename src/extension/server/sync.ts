@@ -40,7 +40,7 @@
 //  spurious point matters less than a missing one. Nothing here is billing.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { DayScore, HISTORY_KEY, Settings, DEFAULT_SETTINGS, weekdayName, round2 } from '../../types';
+import { DayScore, HISTORY_KEY, loadSettings, weekdayName, round2 } from '../../types';
 import {
   SUPABASE_URL, SUPABASE_ANON_KEY, PENDING_KEY, SUMMARY_KEY, TEAMS_KEY, FLAG_KEY,
   DOMAIN_FLAGS_KEY, PENDING_DOMAINS_KEY, SERVER_DOMAINS_KEY,
@@ -312,7 +312,7 @@ async function applyState(next: ServerState | null): Promise<void> {
   const domains = Array.isArray(next.domains) ? next.domains : [];
   await new Promise<void>((resolve) => {
     chrome.storage.local.get(['focusFlowSettings', SERVER_DOMAINS_KEY], (r) => {
-      const settings = { ...DEFAULT_SETTINGS, ...(r.focusFlowSettings as Settings) };
+      const settings = loadSettings(r.focusFlowSettings);
       const write: Record<string, unknown> = { [SERVER_DOMAINS_KEY]: domains };
       // Only touch the settings object when the list actually differs, so an
       // unchanged reply doesn't wake every listener in the extension twice a minute.
@@ -334,7 +334,7 @@ async function applyState(next: ServerState | null): Promise<void> {
     const programs = next.programs;
     await new Promise<void>((resolve) => {
       chrome.storage.local.get(['focusFlowSettings', SERVER_PROGRAMS_KEY], (r) => {
-        const settings = { ...DEFAULT_SETTINGS, ...(r.focusFlowSettings as Settings) };
+        const settings = loadSettings(r.focusFlowSettings);
         const write: Record<string, unknown> = { [SERVER_PROGRAMS_KEY]: programs };
         if (!sameList(settings.allowedPrograms ?? [], programs)) {
           write.focusFlowSettings = { ...settings, allowedPrograms: programs };

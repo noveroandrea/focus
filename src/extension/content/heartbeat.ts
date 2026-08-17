@@ -246,7 +246,11 @@
       } | undefined;
       const allowedDomains: string[] = stored?.allowedDomains ?? [];
       const classifyPrompt: string = stored?.classifyPrompt ?? '';
-      const aiRequestEnabled: boolean = stored?.aiRequestEnabled !== false; // default on
+      // Default OFF, matching DEFAULT_SETTINGS: the classifier needs an address, a
+      // model and a backend that is running, so absent configuration means absent
+      // feature. `=== true` rather than `!== false` so a stored object written before
+      // the key existed reads as off here exactly as it does everywhere else.
+      const aiRequestEnabled: boolean = stored?.aiRequestEnabled === true;
 
       const authorized =
         url.endsWith('.pdf') ||

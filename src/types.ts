@@ -87,19 +87,29 @@ export interface Settings {
   /** When true, force the sprite into the active state on every page regardless of real activity */
   forceActive: boolean;
   /** Seconds of no activity before the sprite goes idle (and the beep begins).
-   *  Also drives chrome.idle's system-wide detection used on PDF/viewer tabs. */
+   *  Also drives chrome.idle's system-wide detection used on PDF/viewer tabs.
+   *  **Fixed — see FIXED_TIMINGS.** */
   idleTime: number;
-  /** Active heartbeats (≈seconds of focused work) before the sprite character changes */
+  /** Active heartbeats (≈seconds of focused work) before the sprite character changes.
+   *  **Fixed — see FIXED_TIMINGS.** */
   iconChangeHeartbeats: number;
-  /** Peak volume (0–100 %) of the high-tone beep that plays while the sprite is idle/crying */
+  /** Peak volume (0–100 %) of the high-tone beep that plays while the sprite is
+   *  idle/crying. **Fixed — see FIXED_TIMINGS**; the beep is muted from the header's
+   *  speaker button (`soundEnabled`), which is the control people actually reach for. */
   cryBeepVolume: number;
-  /** How long (seconds) the idle beep lasts before it stops on its own */
+  /** How long (seconds) the idle beep lasts before it stops on its own — and therefore
+   *  how long a lapse runs, since the auto-pause is pinned to it.
+   *  **Fixed — see FIXED_TIMINGS.** */
   cryBeepDuration: number;
   /** Which idle-beep pattern to play (see CRY_BEEP_STYLES) */
   cryBeepStyle: CryBeepStyle;
   /** Master switch for the idle beep sound; when false no sound plays regardless of volume */
   soundEnabled: boolean;
-  /** When true, unknown pages are sent to the AI classifier; when false they just stay inactive */
+  /** When true, unknown pages are sent to the AI classifier; when false they just stay
+   *  inactive. **Off by default**, unlike every other feature switch: the others need
+   *  nothing, while this one needs an address, a model and a backend that is actually
+   *  running — so on by default it is a feature that silently fails for everyone who
+   *  has not set one up, and every unknown page pays a request that cannot answer. */
   aiRequestEnabled: boolean;
   /** When true, resuming work opens the floating companion window; when false it never opens */
   companionEnabled: boolean;
@@ -248,16 +258,55 @@ export function clampIdleTime(s: number): number {
   return Math.min(IDLE_TIME_MAX, Math.max(IDLE_TIME_MIN, Math.round(s)));
 }
 
+// ── The four timings that are no longer choices ───────────────────────────────
+// These were sliders, and every one of them sat at its default: nobody tunes "how
+// many heartbeats before the character changes" — they want a companion that works
+// out of the box, and four sliders between them and it is four decisions taken from
+// someone whose whole problem is deciding what to do next. They stay FIELDS rather
+// than becoming constants because a dozen places read them off `Settings` (the
+// sprite, the companion canvas, the penalty schedule, the countdowns), and turning
+// each of those into an import buys nothing: the value is pinned here instead.
+//
+// Pinned on LOAD, not merely defaulted, and that difference is the point: settings
+// merge as `{ ...DEFAULT_SETTINGS, ...stored }`, so a profile that moved a slider
+// before it was removed would keep that value forever with no UI left to change it
+// back — a beep set to 5 minutes and no way to find out why. `loadSettings()` is
+// therefore the only sanctioned way to read this object.
+export const FIXED_TIMINGS = {
+  /** Seconds of silence before a session is idle. */
+  idleTime: 20,
+  /** Heartbeats of focus per character change. */
+  iconChangeHeartbeats: 30,
+  /** Peak beep volume, %. Muting is `soundEnabled`, not a volume of 0. */
+  cryBeepVolume: 100,
+  /** Seconds a lapse runs: the beep's length, and the auto-pause pinned to it. */
+  cryBeepDuration: 60,
+} as const;
+
+/** Settings as stored, merged over the defaults, with FIXED_TIMINGS pinned last.
+ *
+ *  Every reader goes through this — background, popup, dashboard and sync — so there
+ *  is one answer to "what are the settings" rather than five merges that can drift.
+ *  `sprite.ts` and `pip.ts` are the exceptions and cannot use it (they pull individual
+ *  keys straight out of raw storage, clamping as they go, because a content script must
+ *  decide before anything else has run); `background.ts` writes the pinned values back
+ *  to storage on load so those two see them too. */
+export function loadSettings(stored: unknown): Settings {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...((stored as Partial<Settings> | undefined) ?? {}),
+    ...FIXED_TIMINGS,
+  };
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   enabled: true,
   forceActive: false,
-  idleTime: 20,
-  iconChangeHeartbeats: 30,
-  cryBeepVolume: 100,
-  cryBeepDuration: 60,
+  ...FIXED_TIMINGS,
   cryBeepStyle: 'ramp',
   soundEnabled: true,
-  aiRequestEnabled: true,
+  // Off until someone points it at a backend — see the field's comment.
+  aiRequestEnabled: false,
   companionEnabled: true,
   spriteEnabled: true,
   spriteMode: 'roam',

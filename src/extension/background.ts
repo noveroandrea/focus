@@ -1,4 +1,4 @@
-import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, PairStart, PairedPhone, PhonePlatform, DEFAULT_SETTINGS, CHARACTER_COUNT, clampCryBeepDuration, clampIdleTime, round2 } from '../types';
+import { SessionState, MessageType, Settings, ServerStatus, AgentStatus, PageStatus, PairStart, PairedPhone, PhonePlatform, DEFAULT_SETTINGS, FIXED_TIMINGS, loadSettings, CHARACTER_COUNT, clampCryBeepDuration, clampIdleTime, round2 } from '../types';
 import {
   STATUS_LOOP_MS, VIEWER_CLASSIFY_DELAY_MS, WORKING_FRESH_MS,
   IDLE_WARNING_MS, NUDGE_COOLDOWN_MS, NUDGE_REPEAT_MS, PUSH_LATENCY_MS, PAIRING_TTL_MS,
@@ -566,7 +566,19 @@ chrome.storage.local.get(['focusFlowState', 'focusFlowSettings', NUDGE_LAST_KEY]
     state = { ...state, ...(result.focusFlowState as SessionState) };
   }
   if (result.focusFlowSettings) {
-    settings = { ...DEFAULT_SETTINGS, ...(result.focusFlowSettings as Settings) };
+    const raw = result.focusFlowSettings as Partial<Settings>;
+    settings = loadSettings(raw);
+    // The four FIXED_TIMINGS have no UI any more, so a value a profile saved while
+    // they did is now unreachable. loadSettings() pins them in memory; this writes the
+    // pin back to disk, which is what makes it stick everywhere — `sprite.ts` and
+    // `pip.ts` read those keys straight out of raw storage, so a stale
+    // `cryBeepDuration` of 300 would have the sprite beeping for five minutes at a
+    // lapse the background already ended at 60 s. Once, on the first load that finds a
+    // stale value: after the write the comparison is false forever.
+    if ((Object.keys(FIXED_TIMINGS) as (keyof typeof FIXED_TIMINGS)[])
+          .some((k) => raw[k] !== FIXED_TIMINGS[k])) {
+      saveSettings(settings);
+    }
   } else {
     // First run — persist defaults so heartbeat.ts can read the domain list immediately
     chrome.storage.local.set({ focusFlowSettings: DEFAULT_SETTINGS });
@@ -624,7 +636,7 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.focusFlowSettings) {
     const prev = settings;
-    settings = { ...DEFAULT_SETTINGS, ...(changes.focusFlowSettings.newValue as Settings) };
+    settings = loadSettings(changes.focusFlowSettings.newValue);
     // Broadcast enabled change immediately so sprites show/hide
     if (prev.enabled !== settings.enabled) {
       updateState({ enabled: settings.enabled });

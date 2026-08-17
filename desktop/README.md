@@ -15,7 +15,41 @@ score, the sprite, the floating companion and the sync. The agent has no account
 session, no settings file, no window and no tray. If it stops, the extension carries on
 exactly as it did before the agent existed.
 
-## Run it
+## Install it in one step (what most people should do)
+
+Open the extension popup while signed out. Step 1 offers **one file per platform** —
+pick Linux, Windows or macOS, press download, and run it once:
+
+```bash
+sh ~/Downloads/focus-agent-linux.sh          # Linux and macOS
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\Downloads\focus-agent-windows.ps1"
+```
+
+That file **is** the agent. It carries the compiled JavaScript, the TypeScript source,
+the launcher, the icon installer, the GPL licence and the GNOME Shell bridge, embedded as
+base64 — so it downloads nothing, and needs no git, no npm and no TypeScript. It checks
+for **Node.js** (the one thing it cannot bring, because a language runtime is a decision
+about the machine), unpacks into `~/.local/share/focus-agent`
+(`~/Library/Application Support/focus-agent` · `%LOCALAPPDATA%\focus-agent`), installs the
+clickable icon, sets up the GNOME bridge if the session is GNOME, and starts it.
+
+| Flag | |
+|---|---|
+| `--autostart` / `-Autostart` | also start it at every login |
+| `--no-bridge` | skip the GNOME Shell bridge |
+| `--no-start` | install but do not launch |
+| `--uninstall` / `-Uninstall` | stop it and remove everything it wrote |
+
+The two files are **generated** by `scripts/build-agent-installer.mjs` during the
+extension's `npm run build`, from [`install/template.sh`](install/template.sh) and
+[`install/template.ps1`](install/template.ps1) — edit the templates, never the output.
+They land in `dist/agent/` and the popup serves them out of its own bundle, which is why
+the flow needs no public repository, no release process and no network.
+
+## Or run it from a clone
 
 ```bash
 cd desktop

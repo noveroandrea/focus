@@ -32,7 +32,7 @@ import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   SessionState, Settings, DayScore, ServerStatus, ServerActionResult, MessageType,
-  DEFAULT_SETTINGS, localDateKey,
+  DEFAULT_SETTINGS, loadSettings, localDateKey,
 } from '../../types';
 import {
   Activity, User, UserPlus, Users, Trophy, Plus, LogOut, Loader2, ExternalLink,
@@ -387,7 +387,7 @@ const Dashboard = () => {
     });
 
     chrome.storage.local.get(['focusFlowSettings'], (r) => {
-      if (r.focusFlowSettings) setSettings({ ...DEFAULT_SETTINGS, ...(r.focusFlowSettings as Settings) });
+      if (r.focusFlowSettings) setSettings(loadSettings(r.focusFlowSettings));
     });
 
     // Live updates, exactly as the popup receives them — the background broadcasts

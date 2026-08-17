@@ -43,6 +43,17 @@ export const GOOGLE_CLIENT_ID: string = '6850334637-raa373p6et6vunpur0gofapq3cd3
  *  than showing a QR that leads nowhere. Deployment is in web/README.md. */
 export const PUSH_LANDING_URL: string = 'https://noveroandrea.github.io/focus';
 
+/** Where the optional desktop agent can be fetched, shown as a link on the sign-in
+ *  screen. A LINK is deliberately the most the extension does here: no extension API
+ *  can install or run a local program (`chrome.runtime.connectNative` is the only one
+ *  that comes close, and its host manifest must name an exact extension ID — the same
+ *  wall that made the agent a loopback socket), and `chrome.downloads` could at best
+ *  drop a zip in the Downloads folder that still needs a terminal, node and
+ *  `npm install`. So the extension points at it and the user installs it, once.
+ *
+ *  Must point at something that actually contains `desktop/`. Empty hides the step. */
+export const AGENT_DOWNLOAD_URL: string = 'https://github.com/noveroandrea/focus/tree/notification/desktop';
+
 /** True once the pairing page has somewhere to live. */
 export function isPushConfigured(): boolean {
   return PUSH_LANDING_URL !== '';

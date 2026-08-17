@@ -90,6 +90,24 @@ npm run build      # compiles everything into dist/
 After any code change, run `npm run build` again and press the **↺ reload** icon on the
 extension card.
 
+### 3. First run
+
+Signed out, the popup is nothing but the three steps to set up, in order — the sign-in
+button used to be the only thing on it, which left the other two discoverable only by
+reading this file:
+
+1. **Install the [desktop agent](#desktop-agent-windows-macos-linux)** — optional but
+   recommended, and the one step that happens outside the browser. Pick **Linux /
+   Windows / macOS** and press download: the extension hands you **one file that
+   contains the whole agent** (compiled, plus its source and the licence), and running
+   it once installs and starts everything. Picking macOS also prints the two features
+   that platform cannot have. The extension cannot run it for you — no extension API
+   may start a local program — so this is a file plus one line to paste, and the line
+   is on screen with a copy button.
+2. **Sign in with Google** — required, and what gates the rest of the popup.
+3. **Pair your phone** — afterwards, in **Settings → Phone nudge**: turn it on and scan
+   the QR. See [Phone nudge](#phone-nudge).
+
 ---
 
 ## How it works
@@ -158,7 +176,11 @@ Settings {
   heartbeatTimeout: number         // seconds to Idle when Chrome is focused (default 2)
   preserveStateOnExternal: boolean // freeze state when you leave the browser (default true)
   externalActiveTimer: number      // seconds a frozen Active survives outside Chrome (0 = never)
-  iconChangeHeartbeats: number     // heartbeats of focus before the character changes (5–300, default 30)
+  idleTime: number                 // FIXED at 20 — seconds of no activity before Idle
+  iconChangeHeartbeats: number     // FIXED at 30 — heartbeats of focus before the character changes
+  cryBeepVolume: number            // FIXED at 100 — mute with soundEnabled, not with 0
+  cryBeepDuration: number          // FIXED at 60 — how long a lapse runs before the auto-pause
+  aiRequestEnabled: boolean        // ask the AI about unknown pages (default OFF — it needs a backend)
   allowedDomains: string[]         // the whitelist (substring-matched against the URL)
   classifyUrl: string              // AI backend address (default "http://localhost:11434"); local host:port or remote base URL
   classifyApiKey: string           // Bearer key for a remote backend (empty for a local model)
@@ -226,12 +248,28 @@ Click the Focus icon in the toolbar.
 
 ### Settings tab
 
-**Timers**
+**Timings are fixed and are not settings**
+
+Four sliders used to live here — idle time, heartbeats per character change, beep volume
+and beep duration — and every one of them sat at its default. They are now constants
+(`FIXED_TIMINGS` in `src/types.ts`), stated in the popup rather than offered:
+
+| | |
+|---|---|
+| **Idle after** | `20 s` of no activity |
+| **New character every** | `30` heartbeats of focus (≈30 s of work) |
+| **A lapse runs** | `60 s`, after which Focus switches itself to *Not working* |
+| **Beep volume** | full — muting is the **speaker button** in the header, which is a thing you do for ten minutes rather than a setting |
+
+They stay *fields* on `Settings` (a dozen places read them off it), but `loadSettings()`
+pins them over whatever is stored, so a profile that moved one of the old sliders can't
+be left holding a value with no UI left to change it back.
+
+**Idle beep**
 
 | Setting | Default | What it does |
 |---|---|---|
-| **Idle timeout in Chrome** | `2 s` | Seconds without input on an authorized page before going Idle (while Chrome is focused). |
-| **Change character every** | `30 hb` | **Heartbeats** of focused work before the character shrinks to minimum and changes. Range **5–300**. This is the slider that replaced the old "minutes" control. |
+| **Beep style** | Rising volume | `ramp` — one tone fading in from silence · `pulse` — short beeps every 5 s · `siren` — a two-tone alarm the whole time. |
 
 **Sprite on the page**
 
@@ -285,6 +323,11 @@ numbers you opened it for.
 | **Active state timer** | `60 s` | If a frozen **Active** state lasts longer than this outside the browser, it expires to Idle. `0` = never expire. |
 
 **AI Auto-classify** (optional — see below)
+
+**Off by default**, unlike every other switch: the others need nothing, while this one
+needs an address, a model and a backend that is actually running. The five fields below
+appear **under the toggle only while it is on** — off, the section is a single switch,
+because there is nothing to configure about a feature that is not asking anything.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -559,7 +602,43 @@ the score, the sprite, the floating companion and any sync. The agent has **no a
 session, no settings file, no window and no tray** — it is a sensor with an HTTP socket.
 Stop it and the extension behaves exactly as it did before the agent existed.
 
-### Run it
+### Install it in one step
+
+The signed-out popup offers **one file per platform** — pick Linux, Windows or macOS,
+press download, run it once:
+
+```bash
+sh ~/Downloads/focus-agent-linux.sh          # Linux and macOS
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\Downloads\focus-agent-windows.ps1"
+```
+
+That file **is** the agent: the compiled JavaScript, the TypeScript source, the launcher,
+the icon installer, the GPL licence and the GNOME Shell bridge are all embedded in it as
+base64. It downloads nothing and needs no git, no npm and no TypeScript — only **Node.js**,
+which it looks for first (including the nvm and Homebrew locations a desktop launcher
+cannot see) and refuses to install for you, because a language runtime is a decision about
+the machine rather than a side effect of installing a 350-line helper.
+
+It unpacks into `~/.local/share/focus-agent` (`~/Library/Application Support/focus-agent`
+· `%LOCALAPPDATA%\focus-agent`), installs the clickable icon, sets up the GNOME bridge if
+the session is GNOME, starts the agent, and prints what your platform can and cannot do.
+`--autostart` also starts it at login; `--uninstall` removes exactly what it wrote.
+
+**Why embedded rather than a link.** The two files are generated by
+`scripts/build-agent-installer.mjs` during `npm run build` (from
+`desktop/install/template.sh` and `template.ps1`) and served by the popup out of the
+extension's own bundle. A link would need the repository to be public and to keep a URL
+alive — this one is private today, so `raw.githubusercontent.com` answers 404 to anybody
+not signed in, and *a download button that silently fails is worse than no button*. This
+way the file always matches the extension you are holding, and it works with no network,
+which is often the state of the machine when someone finally sits down to install it. The
+popup needs the `downloads` permission for the save, and nothing else: the file is handed
+over as a blob, so it is never exposed to web pages.
+
+### Or run it from a clone
 
 ```bash
 cd desktop

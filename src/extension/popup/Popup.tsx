@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, PairStart, PairedPhone, PhonePlatform, localDateKey, DEFAULT_SETTINGS, clampIconChangeHeartbeats, ICON_CHANGE_MIN, ICON_CHANGE_MAX, clampCryBeepVolume, CRY_BEEP_MIN, CRY_BEEP_MAX, clampCryBeepDuration, CRY_BEEP_DURATION_MIN, CRY_BEEP_DURATION_MAX, clampIdleTime, IDLE_TIME_MIN, IDLE_TIME_MAX, CRY_BEEP_STYLES, clampCryBeepStyle, SPRITE_MODES, clampSpriteMode } from '../../types';
-import { FileText, Activity, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus, Smartphone, X, Copy, Check } from 'lucide-react';
+import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, PairStart, PairedPhone, PhonePlatform, localDateKey, DEFAULT_SETTINGS, FIXED_TIMINGS, loadSettings, CRY_BEEP_STYLES, clampCryBeepStyle, SPRITE_MODES, clampSpriteMode } from '../../types';
+import { FileText, Activity, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus, Smartphone, X, Copy, Check, Download } from 'lucide-react';
 // Drawn in the popup, never fetched: the URL encoded here carries a single-use
 // pairing secret, and asking a chart service to render it would hand them the pairing.
 import qrcode from 'qrcode-generator';
-import { isPushConfigured } from '../server/config';
+import { isPushConfigured, AGENT_DOWNLOAD_URL } from '../server/config';
 import { IDLE_WARNING_MS } from '../timings';
 import '../../index.css';
 // The sections themselves — shared verbatim with the dashboard page, which composes
@@ -248,42 +248,308 @@ function useServerAccount() {
   return { status, busy, failed, ask };
 }
 
-/** The whole popup when signed out: nothing but the button. No Working toggle, no
- *  tabs, no scores — an account is a precondition, not a feature, so offering the
- *  controls would imply the extension is already doing something. */
+// ── Step 1 of the sign-in screen: get the desktop agent ───────────────────────
+// One file per platform, carried INSIDE this extension (`dist/agent/`, built by
+// scripts/build-agent-installer.mjs) rather than linked on GitHub. Three reasons, in
+// order of how badly they bite:
+//
+//   • A link needs a public repository at a stable URL. This one is private today,
+//     so `raw.githubusercontent.com` answers 404 to anybody who is not signed in —
+//     a download button that silently fails is worse than no button.
+//   • The file the extension hands you is the one that matches the extension you are
+//     holding. A URL points at whatever the branch says today.
+//   • It works with no network, which is the state a machine is often in when
+//     somebody finally sits down to install this.
+//
+// The installer carries the agent's compiled JavaScript, its source, the launcher,
+// the icon installer and the GNOME bridge, so installing is genuinely one command
+// and needs only Node.js — no git, no npm, no TypeScript. What the extension CANNOT
+// do is run it: no extension API may start a local program (see AGENT_DOWNLOAD_URL),
+// which is why this hands over a file and prints one line to paste.
+type AgentPlatform = 'linux' | 'windows' | 'macos';
+
+const AGENT_INSTALLERS: {
+  id: AgentPlatform;
+  label: string;
+  /** Inside the extension bundle, and the name it is saved under. */
+  file: string;
+  /** The one command. Shown verbatim, with a copy button, because a mistyped path
+   *  is the most likely way this goes wrong. */
+  run: string;
+  /** What works here and what does not. Stated before installing rather than
+   *  discovered after — and stated as a list of facts, not an explanation: the reasons
+   *  are in the README, and a popup is not where anyone reads them. */
+  caveat?: React.ReactNode;
+}[] = [
+  {
+    id: 'linux',
+    label: 'Linux',
+    file: 'focus-agent-linux.sh',
+    run: 'sh ~/Downloads/focus-agent-linux.sh',
+    caveat: (
+      <>
+        <strong>X11:</strong> works. <strong>GNOME Wayland:</strong> works after a log out and
+        back in. <strong>KDE / sway / Hyprland:</strong> no program tracking — pages only.
+      </>
+    ),
+  },
+  {
+    id: 'windows',
+    label: 'Windows',
+    file: 'focus-agent-windows.ps1',
+    run: 'powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\\Downloads\\focus-agent-windows.ps1"',
+    caveat: <>Everything works, and the companion window is pinned on top for you.</>,
+  },
+  {
+    id: 'macos',
+    label: 'macOS',
+    // The same POSIX installer: it branches on `uname -s`, exactly as launch.sh and
+    // install-icon.sh already do. One file, three case arms, no drift.
+    file: 'focus-agent-linux.sh',
+    run: 'sh ~/Downloads/focus-agent-linux.sh',
+    caveat: (
+      <>
+        Program tracking works. <strong>Not available:</strong> keeping the companion window on
+        top, and making it see-through.
+      </>
+    ),
+  },
+];
+
+/** Best guess at which platform the three buttons should open on. Only a default —
+ *  someone setting up a second machine picks the other one, and `userAgentData` is
+ *  absent in enough browsers to make this a hint rather than a decision. */
+function guessPlatform(): AgentPlatform {
+  const p = (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform
+    ?? navigator.platform ?? '';
+  if (/win/i.test(p)) return 'windows';
+  if (/mac|darwin/i.test(p)) return 'macos';
+  return 'linux';
+}
+
+const AgentStep = () => {
+  const [platform, setPlatform] = useState<AgentPlatform>(guessPlatform);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+  const chosen = AGENT_INSTALLERS.find((i) => i.id === platform)!;
+  const [copied, setCopied] = useState(false);
+
+  // Fetched out of our own bundle and handed to chrome.downloads as a blob, rather
+  // than downloaded from its chrome-extension:// URL directly: that would require
+  // listing the file in web_accessible_resources, which makes it readable by every
+  // page on the web and leaks the extension id to anything that asks. A blob keeps
+  // the file private to the popup. The anchor is the fallback for a build without the
+  // downloads permission.
+  const download = () => {
+    setError('');
+    setSaved(false);
+    void (async () => {
+      try {
+        const res = await fetch(chrome.runtime.getURL(`agent/${chosen.file}`));
+        if (!res.ok) throw new Error(String(res.status));
+        const url = URL.createObjectURL(await res.blob());
+        if (chrome.downloads?.download) {
+          chrome.downloads.download({ url, filename: chosen.file, saveAs: false }, () => {
+            void chrome.runtime.lastError;
+          });
+        } else {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = chosen.file;
+          a.click();
+        }
+        setSaved(true);
+      } catch {
+        // The one way this fails: a build where `npm run build` did not reach
+        // scripts/build-agent-installer.mjs, so dist/agent/ is empty.
+        setError('The installer is missing from this build — run npm run build again.');
+      }
+    })();
+  };
+
+  const copyRun = () => {
+    navigator.clipboard?.writeText(chosen.run)
+      .then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1500); })
+      .catch(() => { /* the command is on screen either way */ });
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex gap-1">
+        {AGENT_INSTALLERS.map((i) => (
+          <button
+            key={i.id}
+            onClick={() => { setPlatform(i.id); setSaved(false); setError(''); }}
+            className={`flex-1 cursor-pointer rounded-lg border px-1 py-1 text-[10px] font-bold transition-colors ${
+              platform === i.id
+                ? 'border-blue-500 bg-blue-500 text-white'
+                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            {i.label}
+          </button>
+        ))}
+      </div>
+
+      <button
+        onClick={download}
+        className="flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-slate-100 px-2 py-1.5 text-[10px] font-bold text-slate-600 transition-colors hover:bg-slate-200"
+      >
+        <Download size={11} /> Download {chosen.file}
+      </button>
+
+      {/* Always on screen, not only after the download: "how do I install this?" is
+          the question the button raises, and answering it afterwards means the answer
+          is missing at the moment someone decides whether to press it. */}
+      <div className="space-y-1 rounded-lg bg-slate-50 p-2">
+        <p className="text-[9px] font-bold text-slate-500">
+          {saved ? 'Saved to your Downloads. Install it with:' : 'To install, run it once:'}
+        </p>
+        <div className="flex items-start gap-1">
+          <code className="min-w-0 flex-1 break-all rounded bg-white px-1.5 py-1 font-mono text-[9px] text-slate-600">
+            {chosen.run}
+          </code>
+          <button
+            onClick={copyRun}
+            title="Copy the command"
+            className={`flex flex-shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-[9px] font-bold transition-colors ${
+              copied ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600 hover:bg-slate-300'
+            }`}
+          >
+            {copied ? <Check size={10} /> : <Copy size={10} />}
+          </button>
+        </div>
+      </div>
+
+      {error && <p className="text-[9px] font-medium text-red-500">{error}</p>}
+
+      {chosen.caveat && (
+        <p className={`rounded-lg px-2 py-1.5 text-[9px] leading-relaxed ${
+          chosen.id === 'macos' ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-500'
+        }`}>
+          {chosen.caveat}
+        </p>
+      )}
+    </div>
+  );
+};
+
+/** The whole popup when signed out: the three things to do, in order. No Working
+ *  toggle, no tabs, no scores — an account is a precondition, not a feature, so
+ *  offering the controls would imply the extension is already doing something.
+ *
+ *  It is a numbered list rather than one button because signing in is only the middle
+ *  step, and the other two are invisible if nobody says them: the desktop agent has to
+ *  be installed from outside the browser (nothing in here can do it — see
+ *  AGENT_DOWNLOAD_URL), and phone nudges have to be paired from a screen that only
+ *  exists once you are signed in. Both were previously discoverable only by reading
+ *  the README, which is not where a first-run user is. */
 const SignInScreen = ({ busy, failed, onSignIn }: {
   busy: boolean;
   failed: boolean;
   onSignIn: () => void;
-}) => (
-  <div className="w-[320px] bg-white text-slate-900 font-sans">
-    <header className="border-b border-slate-100 px-4 pt-4 pb-3">
-      <h1 className="flex items-center gap-2 text-lg font-bold">
-        <Activity className="text-slate-300" size={20} />
-        Focus
-      </h1>
-    </header>
-    <div className="space-y-3 p-4">
-      <button
-        onClick={onSignIn}
-        disabled={busy}
-        className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
-      >
-        <GoogleIcon size={16} />
-        {busy ? 'Signing in…' : 'Sign in with Google'}
-      </button>
-      {failed && (
-        <p className="text-[10px] font-medium text-red-500">
-          Sign-in didn't complete — try again.
+}) => {
+  const step = (n: number, done = false) => (
+    <span className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
+      done ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-500'
+    }`}>
+      {n}
+    </span>
+  );
+
+  return (
+    <div className="w-[320px] bg-white text-slate-900 font-sans">
+      <header className="border-b border-slate-100 px-4 pt-4 pb-3">
+        <h1 className="flex items-center gap-2 text-lg font-bold">
+          <Activity className="text-slate-300" size={20} />
+          Focus
+        </h1>
+        <p className="mt-1 text-[10px] leading-snug text-slate-400">
+          Three steps and you're set up. Only the second one is required.
         </p>
-      )}
-      <p className="text-[10px] leading-snug text-slate-400">
-        Focus keeps your scores, averages and whitelisted pages on the study server, so sign in
-        before you start. Your data follows your account across devices and reinstalls.
-      </p>
+      </header>
+
+      <div className="space-y-4 p-4">
+
+        {/* 1 — the agent. First because it is the one thing that has to happen outside
+            the browser, and the one people never find out about. */}
+        <div className="space-y-1.5">
+          <div className="flex items-start gap-2">
+            {step(1)}
+            <span className="text-[11px] font-bold leading-tight text-slate-600">
+              Install the desktop agent
+              <span className="ml-1 font-normal text-slate-400">— optional, recommended</span>
+            </span>
+          </div>
+          <p className="pl-6 text-[10px] leading-snug text-slate-400">
+            Tracks work <strong>outside the browser</strong> — editors, readers, terminals.
+            Without it, only pages count. One file, one command.
+          </p>
+          <div className="pl-6">
+            <AgentStep />
+            {AGENT_DOWNLOAD_URL !== '' && (
+              <p className="mt-1 text-[9px] text-slate-400">
+                Or{' '}
+                <a href={AGENT_DOWNLOAD_URL} target="_blank" rel="noreferrer" className="text-blue-600 underline">
+                  read the source
+                </a>{' '}
+                — it is inside the installer too.
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* 2 — the account. The only step that gates the rest of the popup. */}
+        <div className="space-y-1.5">
+          <div className="flex items-start gap-2">
+            {step(2)}
+            <span className="text-[11px] font-bold leading-tight text-slate-600">
+              Sign in
+              <span className="ml-1 font-normal text-slate-400">— required</span>
+            </span>
+          </div>
+          <button
+            onClick={onSignIn}
+            disabled={busy}
+            className="ml-6 flex w-[calc(100%-1.5rem)] cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+          >
+            <GoogleIcon size={16} />
+            {busy ? 'Signing in…' : 'Sign in with Google'}
+          </button>
+          {failed && (
+            <p className="pl-6 text-[10px] font-medium text-red-500">
+              Sign-in didn't complete — try again.
+            </p>
+          )}
+          <p className="pl-6 text-[10px] leading-snug text-slate-400">
+            Your scores, averages and whitelisted pages live on the study server, so they
+            follow your account across devices and reinstalls.
+          </p>
+        </div>
+
+        {/* 3 — the phone. Cannot be done yet, which is why it is phrased as what to do
+            NEXT rather than offered as a control that would fail if pressed. */}
+        {isPushConfigured() && (
+          <div className="space-y-1.5">
+            <div className="flex items-start gap-2">
+              {step(3)}
+              <span className="text-[11px] font-bold leading-tight text-slate-600">
+                Then: buzz my phone
+                <span className="ml-1 font-normal text-slate-400">— recommended</span>
+              </span>
+            </div>
+            <p className="pl-6 text-[10px] leading-snug text-slate-400">
+              Once you're signed in, open <strong>Settings → Phone nudge</strong>, turn it on and
+              <strong> scan the QR code</strong> with your phone. It then vibrates the moment you
+              drift, counting down what the lapse is about to cost — which is the part that works
+              when you have already left the desk.
+            </p>
+          </div>
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 /** Signed-in state, condensed to one line above the tab bar: who you are and how
  *  to leave. Everything else the server knows is already on the Main tab. */
@@ -721,15 +987,6 @@ const SettingsTab = ({ settings, onChange }: {
           </div>
         )}
 
-        <div className="flex items-center justify-between">
-          <span className="text-[11px] text-slate-600">AI request</span>
-          <div
-            onClick={() => set({ aiRequestEnabled: !settings.aiRequestEnabled })}
-            className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.aiRequestEnabled ? 'bg-blue-500' : 'bg-slate-300'}`}
-          >
-            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.aiRequestEnabled ? 'translate-x-5' : ''}`} />
-          </div>
-        </div>
       </section>
 
       {/* In-page sprite. Three shapes for the same information, because what makes a
@@ -810,81 +1067,25 @@ const SettingsTab = ({ settings, onChange }: {
         </p>
       </section>
 
-      {/* Timers */}
+      {/* Idle beep.
+          What used to be four sliders — idle time, heartbeats per character, beep
+          volume, beep duration — is now the one line below stating what they are, plus
+          the single choice worth making: which sound. Every one of them sat at its
+          default in practice, and a person who cannot decide what to do next is the
+          last person to hand four numbers to. They are pinned in FIXED_TIMINGS rather
+          than merely defaulted, so nothing is left holding an old slider position with
+          no way to see or change it.
+          Muting is the header's speaker button, not a volume of zero: it is a thing you
+          do for the next ten minutes, not a setting you come in here to change. */}
       <section className="space-y-3">
-        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Timers</h3>
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Idle beep</h3>
 
-        {/* Idle time */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[11px] text-slate-600 leading-tight">
-              Idle time<br />
-              <span className="text-[10px] text-slate-400">seconds of no activity before going idle</span>
-            </span>
-            <span className="text-[12px] font-bold text-blue-600 tabular-nums w-16 text-right">
-              {clampIdleTime(settings.idleTime)} s
-            </span>
-          </div>
-          <input
-            type="range"
-            min={IDLE_TIME_MIN} max={IDLE_TIME_MAX} step={1}
-            value={clampIdleTime(settings.idleTime)}
-            onChange={e => set({ idleTime: clampIdleTime(Number(e.target.value)) })}
-            className="w-full accent-blue-500 cursor-pointer"
-          />
-          <div className="flex justify-between text-[9px] text-slate-400">
-            <span>{IDLE_TIME_MIN} s</span>
-            <span>{IDLE_TIME_MAX} s</span>
-          </div>
-        </div>
-
-        {/* Icon-change heartbeats */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[11px] text-slate-600 leading-tight">
-              Change character every<br />
-              <span className="text-[10px] text-slate-400">heartbeats of focused work before a new icon</span>
-            </span>
-            <span className="text-[12px] font-bold text-blue-600 tabular-nums w-16 text-right">
-              {clampIconChangeHeartbeats(settings.iconChangeHeartbeats)} hb
-            </span>
-          </div>
-          <input
-            type="range"
-            min={ICON_CHANGE_MIN} max={ICON_CHANGE_MAX} step={1}
-            value={clampIconChangeHeartbeats(settings.iconChangeHeartbeats)}
-            onChange={e => set({ iconChangeHeartbeats: clampIconChangeHeartbeats(Number(e.target.value)) })}
-            className="w-full accent-blue-500 cursor-pointer"
-          />
-          <div className="flex justify-between text-[9px] text-slate-400">
-            <span>{ICON_CHANGE_MIN} hb</span>
-            <span>{ICON_CHANGE_MAX} hb</span>
-          </div>
-        </div>
-
-        {/* Idle beep volume */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[11px] text-slate-600 leading-tight">
-              Idle beep volume<br />
-              <span className="text-[10px] text-slate-400">high tone that fades in while crying (0 = off)</span>
-            </span>
-            <span className="text-[12px] font-bold text-blue-600 tabular-nums w-16 text-right">
-              {clampCryBeepVolume(settings.cryBeepVolume)} %
-            </span>
-          </div>
-          <input
-            type="range"
-            min={CRY_BEEP_MIN} max={CRY_BEEP_MAX} step={1}
-            value={clampCryBeepVolume(settings.cryBeepVolume)}
-            onChange={e => set({ cryBeepVolume: clampCryBeepVolume(Number(e.target.value)) })}
-            className="w-full accent-blue-500 cursor-pointer"
-          />
-          <div className="flex justify-between text-[9px] text-slate-400">
-            <span>{CRY_BEEP_MIN} %</span>
-            <span>{CRY_BEEP_MAX} %</span>
-          </div>
-        </div>
+        <p className="rounded-lg bg-slate-50 px-2 py-1.5 text-[9px] leading-relaxed text-slate-500">
+          Fixed: idle after <strong>{FIXED_TIMINGS.idleTime} s</strong> of no activity · a new
+          character every <strong>{FIXED_TIMINGS.iconChangeHeartbeats}</strong> heartbeats of
+          focus · the beep runs <strong>{FIXED_TIMINGS.cryBeepDuration} s</strong>, after which
+          Focus switches itself to <em>Not working</em>. Use the speaker button above to mute.
+        </p>
 
         {/* Idle beep style */}
         <div className="space-y-1.5">
@@ -912,37 +1113,37 @@ const SettingsTab = ({ settings, onChange }: {
             {CRY_BEEP_STYLES.find(s => s.id === clampCryBeepStyle(settings.cryBeepStyle))?.hint}
           </p>
         </div>
-
-        {/* Idle beep duration */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[11px] text-slate-600 leading-tight">
-              Idle beep duration<br />
-              <span className="text-[10px] text-slate-400">how long the beep lasts before stopping</span>
-            </span>
-            <span className="text-[12px] font-bold text-blue-600 tabular-nums w-16 text-right">
-              {clampCryBeepDuration(settings.cryBeepDuration)} s
-            </span>
-          </div>
-          <input
-            type="range"
-            min={CRY_BEEP_DURATION_MIN} max={CRY_BEEP_DURATION_MAX} step={5}
-            value={clampCryBeepDuration(settings.cryBeepDuration)}
-            onChange={e => set({ cryBeepDuration: clampCryBeepDuration(Number(e.target.value)) })}
-            className="w-full accent-blue-500 cursor-pointer"
-          />
-          <div className="flex justify-between text-[9px] text-slate-400">
-            <span>{CRY_BEEP_DURATION_MIN} s</span>
-            <span>{CRY_BEEP_DURATION_MAX} s</span>
-          </div>
-        </div>
       </section>
 
-      {/* AI auto-classify */}
+      {/* AI auto-classify.
+          The toggle used to live up in Features, four screens above the five fields it
+          governs, all of which were on show whether or not anything would ever read
+          them — an address, a key, a model name and a prompt for a feature that was
+          off. It owns its section now, and the fields appear underneath only when it is
+          on: off, this is one switch; on, it is the form you came here to fill in.
+          Off by DEFAULT too, unlike the other switches — see aiRequestEnabled. */}
       <section className="space-y-2">
         <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">AI Auto-classify</h3>
+
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] text-slate-600 leading-tight">
+            Ask an AI about unknown pages<br />
+            <span className="text-[10px] text-slate-400">
+              auto-whitelists study pages · needs a backend you run
+            </span>
+          </span>
+          <div
+            onClick={() => set({ aiRequestEnabled: !settings.aiRequestEnabled })}
+            className={`relative flex-shrink-0 w-10 h-5 rounded-full transition-colors cursor-pointer ${settings.aiRequestEnabled ? 'bg-blue-500' : 'bg-slate-300'}`}
+          >
+            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${settings.aiRequestEnabled ? 'translate-x-5' : ''}`} />
+          </div>
+        </div>
+
+        {settings.aiRequestEnabled && (
+        <>
         <p className="text-[9px] text-slate-400">
-          Optional. Points at an Ollama-compatible AI backend to auto-whitelist study pages.
+          Points at an Ollama-compatible AI backend to auto-whitelist study pages.
           <strong> Local:</strong> put just the address+port and leave the key empty
           (run <code>OLLAMA_ORIGINS="*" ollama serve</code>). <strong>Remote:</strong> put the
           server's base URL and its API key. Without a reachable backend the extension still
@@ -1020,6 +1221,8 @@ const SettingsTab = ({ settings, onChange }: {
         <p className="text-[9px] text-slate-400">
           URL and title are appended to the prompt automatically.
         </p>
+        </>
+        )}
       </section>
 
       {/* Phone nudge. Last, because it is the only feature that leaves the machine. */}
@@ -1041,15 +1244,20 @@ const SettingsTab = ({ settings, onChange }: {
           </div>
         </div>
 
-        {settings.pushEnabled && <PhonePairing />}
-
-        <p className="text-[9px] text-slate-400 leading-snug">
-          One nudge when you drift, then a repeat every 5 seconds counting down to what it
-          will cost — until you come back, or Focus switches itself to Not working and says
-          so. At most one such burst every 5 minutes: a buzz per lapse is a phone you'd
-          silence by lunchtime. The message names no page and no program, and it goes from this browser
-          straight to your phone: nothing about it reaches any server.
-        </p>
+        {/* The QR, the paired phones and the test button appear only once the switch is
+            on — including the explanation, so off this section is a single line. There
+            is nothing to say about a pairing flow you have not asked for. */}
+        {settings.pushEnabled && (
+          <>
+            <PhonePairing />
+            <p className="text-[9px] text-slate-400 leading-snug">
+              One nudge when you drift, then a repeat every 5 seconds counting down to what it
+              will cost — until you come back, or Focus switches itself to Not working and says
+              so. The message names no page and no program, and it goes from this browser
+              straight to your phone: nothing about it reaches any server.
+            </p>
+          </>
+        )}
       </section>
     </div>
   );
@@ -1099,9 +1307,7 @@ const Popup = () => {
 
     // Load settings
     chrome.storage.local.get(['focusFlowSettings'], (result) => {
-      if (result.focusFlowSettings) {
-        setSettings({ ...DEFAULT_SETTINGS, ...(result.focusFlowSettings as Settings) });
-      }
+      if (result.focusFlowSettings) setSettings(loadSettings(result.focusFlowSettings));
     });
 
     // Live state updates
