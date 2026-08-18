@@ -31,7 +31,15 @@ has a locally generated ID; a **published** one gets a permanent ID from the sto
 first thing a real user does (press *Sign in with Google*) fails with
 `redirect_uri_mismatch` until you fix it.
 
-After the first upload, take the item's ID from the dashboard and:
+**Do it now, not after it goes live.** The ID is assigned when the *item* is created — the
+moment the first zip is uploaded — not when it is published, and it never changes
+afterwards. It is the 32-lowercase-letter string in the dashboard URL of the item
+(`.../devconsole/…/<extension-id>/edit`). So the redirect URI can be registered while the
+item is still a draft in review, and by the time anyone can install it, sign-in already
+works. Waiting for publication buys nothing and guarantees a window in which the first
+thing a user does fails.
+
+Take that ID and:
 
 1. Google Cloud Console → APIs & Services → Credentials → your **Web application** OAuth
    client → *Authorized redirect URIs* → add
@@ -283,10 +291,18 @@ the GitHub Pages site next to `privacy.html` and have the popup link them instea
 serving them from the bundle. Do not do it pre-emptively — hosting them means they can
 drift from the extension that offers them, and today they cannot.
 
-**2. Review takes days, and the first version sets the ID.** Upload as **Unlisted**
-first, install from the store link yourself, and check the OAuth redirect fix above
-actually works before going public. An item's ID never changes, so this is the one
-mistake with no cheap undo.
+**2. Review takes days, and the first version sets the ID.** Set *visibility* to
+**Non in elenco / Unlisted** for the first submission, install from the store link
+yourself, and check the OAuth redirect fix above actually works before switching to
+Public. An item's ID never changes, so this is the one mistake with no cheap undo.
+
+Note that visibility and **"publish automatically once it passes review"** are two separate
+controls and are usually confused. With visibility set to Unlisted the checkbox is
+harmless and worth leaving on: the item goes live the moment it clears review, reachable
+only by direct link, so you can test sign-in at once instead of waiting to notice an email.
+With visibility set to **Public** the same checkbox is the thing to switch off — otherwise
+review can pass overnight and a broken sign-in is in front of real users before you have
+looked at it.
 
 ---
 
