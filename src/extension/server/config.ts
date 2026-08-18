@@ -52,7 +52,7 @@ export const PUSH_LANDING_URL: string = 'https://noveroandrea.github.io/focus';
  *  `npm install`. So the extension points at it and the user installs it, once.
  *
  *  Must point at something that actually contains `desktop/`. Empty hides the step. */
-export const AGENT_DOWNLOAD_URL: string = 'https://github.com/noveroandrea/focus/tree/notification/desktop';
+export const AGENT_DOWNLOAD_URL: string = 'https://github.com/noveroandrea/focus/tree/main/desktop';
 
 /** True once the pairing page has somewhere to live. */
 export function isPushConfigured(): boolean {

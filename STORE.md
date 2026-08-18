@@ -16,11 +16,12 @@ npm run package        # build + focus-<version>.zip, ready to upload
 | | |
 |---|---|
 | **1. Developer account** | $5 one-time fee at <https://chrome.google.com/webstore/devconsole>. Verify the publisher email; an unverified publisher cannot publish. |
-| **2. Privacy policy URL** | `web/privacy.html` is written and ready. Deploy it: `git subtree push --prefix web origin gh-pages`, then use <https://noveroandrea.github.io/focus/privacy.html>. **Fill in `[contact email]` first** — it is the only placeholder in the file, and a policy with no contact is a rejection. |
-| **3. Store icon** | Upload **`store/icon-128.png`** — 128×128, the ring mark inset into the middle 96×96 with transparent padding, which is the framing the listing asks for. (`icons/icon128.png` is the full-bleed version that ships *inside* the package; both are the same artwork, so the tile and the toolbar match.) |
-| **4. Screenshots** | At least one, 1280×800 or 640×400 PNG. The obvious three: the popup on a whitelisted page, the companion window over an editor, the dashboard. **No mock data** — reviewers reject screenshots that show a UI the extension does not produce. |
-| **5. The OAuth redirect URI** | See the blocker below. Do this *before* you tell anyone to install it. |
-| **6. Ethics** | This build ships the study backend. Whatever your ethics approval says about consent, the extension is now the thing collecting the data — the consent flow has to exist before the listing goes public, not after. |
+| **2. Privacy policy URL** | **Done and live**: <https://noveroandrea.github.io/focus/privacy.html> (`gh-pages` carries `web/`, contact address filled in). Paste that into *URL norme sulla privacy*. Re-deploy after any edit to `web/`: `git subtree push --prefix web origin gh-pages`. |
+| **3. Store icon** | Upload **`store/icon-128.png`** — 128×128, the mark inset into the middle 96×96 with transparent padding, which is the framing the listing asks for. (`icons/icon128.png` is the full-bleed version that ships *inside* the package; both are the same artwork, so the tile and the toolbar match.) |
+| **4. Screenshots** | The six in **`screenshots/focus_*.png`**, all 1280×800 (the store takes only that or 640×400, landscape). `notifications.png` is the raw phone capture they came from — portrait, and JPEG bytes under a `.png` name, so it is rejected on both counts; `focus_notification.png` is it letterboxed onto a 1280×800 slate canvas rather than cropped, because cropping cuts off the notification text the shot exists to show. **No mock data** — reviewers reject screenshots that show a UI the extension does not produce. |
+| **5. Promotional tiles** | Optional, but the small one is what the store shows in category and search listings, so an item without it is a plain text row. Upload **`store/promo-small-440x280.png`** and **`store/promo-marquee-1400x560.png`** (the marquee only ever appears if the store features the item). Both are **24-bit RGB with no alpha**, which the dashboard requires and rejects silently. Regenerate with `python3 scripts/make-promo.py`. |
+| **6. The OAuth redirect URI** | See the blocker below. Do this *before* you tell anyone to install it. |
+| **7. Ethics** | This build ships the study backend. Whatever your ethics approval says about consent, the extension is now the thing collecting the data — the consent flow has to exist before the listing goes public, not after. |
 
 ### ⚠ Blocker: publishing changes the extension ID, which breaks sign-in
 
@@ -148,7 +149,14 @@ stored by the extension.
 
 **`alarms`** — `An MV3 service worker is suspended constantly and its timers do not fire. Alarms are used for the periodic server check-in and to finish a phone-pairing flow that takes minutes on another device.`
 
-**`windows`** — `To open and track the floating companion window, and to know which browser window has focus.`
+**`windows`** — **the dashboard will not ask you for this one, and that is the tell.**
+`"windows"` is in `manifest.json` but is **not a permission Chrome recognises**: the
+`chrome.windows` API is available to every extension, and URL access through it comes from
+`tabs`, which is already declared. An unrecognised entry there earns an install-time
+warning (*"Permission 'windows' is unknown or URL pattern is malformed"*) that a reviewer
+sees and a user can see, in exchange for nothing. **Remove it and re-upload the zip**; the
+floating companion is unaffected. The store's form listing every permission except this
+one is the confirmation.
 
 **`system.display`** — `To place one floating companion window on each monitor, bottom-right of each. Without it the windows all open on the primary display, stacked on top of each other.`
 
@@ -159,6 +167,17 @@ stored by the extension.
 **`host_permissions` for `https://*.supabase.co/*`** — `The study's own backend, which stores the user's scores and whitelists under row-level security.`
 
 **`host_permissions` for `http://127.0.0.1:47317/*`** — `The optional desktop agent, which runs on the user's own machine and answers one question: which program is in the foreground. Loopback only.`
+
+**Remote code** — answer **`No, I do not use Remote code`**:
+
+```
+All JavaScript that runs is inside the package. There is no eval(), no new Function(), no
+importScripts(), and no script element pointing at a URL — every script tag in the four
+HTML pages is a relative path to a bundled file. The extension does make network requests
+(the study backend, the user's own AI endpoint, the loopback desktop agent, Web Push), but
+every one of them exchanges JSON or plain text that is parsed as data. None of it is
+evaluated as code.
+```
 
 ---
 
@@ -174,14 +193,32 @@ Tick honestly; a wrong tick here is what gets an item taken down later.
 | Authentication information | **Yes** — the sign-in session token, stored locally |
 | Personal communications | No |
 | Location | No |
-| Web history | **No** — see the note below |
+| Web history | **Yes** — see the note below |
 | User activity | **Yes** — whether the user was active, per second, on pages they whitelisted |
 | Website content | No |
 
-**On "Web history":** the extension stores the *domain strings the user typed into their
-own whitelist* and never records which pages they visited or when. If a reviewer reads
-"whitelist" as history, the honest expansion is the sentence above — say it in the
-justification box rather than ticking a box that implies a browsing log exists.
+**On "Web history", which is the one genuinely arguable tick.** Nothing here keeps a
+browsing log: the server stores the *domain strings the user typed into their own
+whitelist* (`user_domains` — the whitelist and an `added_at`, no visits, no timestamps of
+visits), and the scores are one number a day.
+
+But `classifyPage()` sends `URL: <url>\nTitle: <title>` in the body of a request to the AI
+endpoint, which is a visited page's address and title leaving the machine. It is off by
+default and its default address is `localhost`, so for most users this never happens — and
+none of it is retained. **Tick Yes anyway.** Under-declaring is the mistake with teeth (it
+gets an item pulled after the fact); over-declaring costs a label on the listing. A
+reviewer reading the source will find that string in a `fetch` body, and "we decided it
+did not count" is a much worse conversation than the disclosure. Say exactly this:
+
+```
+Only when the user switches on the optional AI classifier, which is off by default. In
+that one case the address and title of a page they are visiting are sent to the endpoint
+THEY configured, to get back a yes/no about whether it is study material. The default
+endpoint is a model on their own computer (http://localhost:11434), so by default nothing
+leaves the machine. Nothing is retained: no visit log, no history, no timestamps of
+visits. The extension's own backend never receives a URL — it stores the whitelist the
+user typed and one score per day.
+```
 
 Then certify all three: **not sold to third parties**, **not used for anything unrelated
 to the single purpose**, **not used to determine creditworthiness or for lending**.
