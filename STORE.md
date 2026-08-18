@@ -181,6 +181,52 @@ evaluated as code.
 
 ---
 
+## Test instructions (the dashboard's "Istruzioni per il test")
+
+**This section is not optional for this build, and the reason is `Popup.tsx`.** With a
+server configured in `config.ts` — which it is — the popup is *gated*: signed out, the only
+thing that renders is the sign-in screen, so a reviewer pressing the toolbar button reaches
+a wall and can see no setting, no whitelist and no score.
+
+What saves the review is that the **companion itself needs no account**. The content
+scripts read the whitelist straight out of storage and `DEFAULT_SETTINGS.allowedDomains`
+ships with `wikipedia.org` on it, so the core feature is one navigation away from a fresh
+install. Lead with that, then hand over the account for the rest.
+
+**Ulteriori istruzioni** (492 of the 500 characters allowed):
+
+```
+No account is needed for the core feature. After installing, open en.wikipedia.org - it is on the default whitelist. An animated character appears in the page: type or move the mouse and it steps and shrinks; after ~30s it bursts into fireworks and a new one starts. Stop for 20s and it trembles, cries and the score falls. A site not on the whitelist is untouched: nothing drawn, counted or sent.
+
+The toolbar popup (settings, whitelist, scores) needs Google sign-in - use the account above.
+```
+
+**Nome utente / Password** — a **dedicated throwaway Gmail account**, created for this and
+nothing else. Never the personal one: the box is shared with the review team, and the
+account will be signed into from a machine and a country that are not yours.
+
+Three things decide whether that account actually works, and all three are outside the
+extension:
+
+1. **Two-factor authentication off.** A reviewer cannot answer a prompt on your phone.
+2. **The OAuth consent screen must be *In production*.** While it is in *Testing*, only
+   the accounts listed as test users can sign in — so the credentials you hand over fail
+   with a Google error that looks nothing like an extension bug.
+3. **The published extension's `chromiumapp.org` redirect URI must be registered** (see
+   the blocker above). Same failure, same confusion.
+
+Even with all three right, Google routinely blocks a sign-in from an unfamiliar device and
+location, and there is nothing you can do about it from here. That is exactly why the
+instructions put the no-account path first: if the credentials fail, the reviewer has still
+seen the extension's core function.
+
+*If this ever becomes a recurring review problem, the structural fix is to ungate the
+popup — whitelist and settings signed out, sign-in only for sync and teams. It is a real
+change, not a tweak: the gate is deliberate, because the study wants participants signed
+in. Do not do it just to make one review easier.*
+
+---
+
 ## Data-use disclosures
 
 Tick honestly; a wrong tick here is what gets an item taken down later.
