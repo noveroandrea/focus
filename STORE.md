@@ -149,14 +149,14 @@ stored by the extension.
 
 **`alarms`** — `An MV3 service worker is suspended constantly and its timers do not fire. Alarms are used for the periodic server check-in and to finish a phone-pairing flow that takes minutes on another device.`
 
-**`windows`** — **the dashboard will not ask you for this one, and that is the tell.**
-`"windows"` is in `manifest.json` but is **not a permission Chrome recognises**: the
-`chrome.windows` API is available to every extension, and URL access through it comes from
-`tabs`, which is already declared. An unrecognised entry there earns an install-time
-warning (*"Permission 'windows' is unknown or URL pattern is malformed"*) that a reviewer
-sees and a user can see, in exchange for nothing. **Remove it and re-upload the zip**; the
-floating companion is unaffected. The store's form listing every permission except this
-one is the confirmation.
+**`windows` — removed, and do not put it back.** It sat in `permissions` from the first
+commit and is **not a permission Chrome recognises**: the `chrome.windows` API is available
+to every extension, and URL access through it comes from `tabs`, which is declared. All ten
+`chrome.windows` calls in `background.ts` — the companion window, `onFocusChanged`,
+`getLastFocused` — work exactly as before without it. What it bought was the install-time
+warning *"Permission 'windows' is unknown or URL pattern is malformed"*, which a reviewer
+mid-review can see. The dashboard asking for a justification for every other permission in
+the manifest and not this one is how you can tell.
 
 **`system.display`** — `To place one floating companion window on each monitor, bottom-right of each. Without it the windows all open on the primary display, stacked on top of each other.`
 
