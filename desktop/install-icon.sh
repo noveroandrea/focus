@@ -34,11 +34,15 @@ Icon=$ICON
 Terminal=false
 Categories=Utility;
 StartupNotify=false
-Actions=Stop;
+Actions=Stop;Remove;
 
 [Desktop Action Stop]
 Name=Stop the agent
 Exec=$LAUNCH stop
+
+[Desktop Action Remove]
+Name=Remove Focus agent
+Exec=$LAUNCH remove
 EOF
   chmod +x "$ENTRY"
 
@@ -68,7 +72,8 @@ EOF
   [ "${AUTOSTART:-0}" = "1" ] && echo "  $HOME/.config/autostart/focus-agent.desktop  (starts at login)"
   echo
   echo 'Search "Focus agent" in your applications, or double-click it on the desktop.'
-  echo 'Right-click the icon → "Stop the agent" to stop it.'
+  echo 'Right-click the icon → "Stop the agent" to stop it,'
+  echo '                        → "Remove Focus agent" to uninstall it (it asks first).'
   [ "${AUTOSTART:-0}" = "1" ] || echo 'To start it automatically at login: ./install-icon.sh --autostart'
 }
 
