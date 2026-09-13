@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Focus",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Focus companion that helps you stay on task while studying or working.",
   "permissions": ["tabs", "storage", "scripting", "activeTab", "idle", "identity", "alarms", "system.display", "downloads"],
   "host_permissions": [

@@ -32,6 +32,14 @@
 //  were minted against the old public key. That is why send() prunes on those codes
 //  and the popup says "pair again" rather than silently going quiet.
 //
+//  ── A PHONE BELONGS TO AN ACCOUNT, NOT TO THIS INSTALL ──────────────────────
+//  The keypair is per install; the PAIRINGS are per user. Every record carries the
+//  `userId` that created it and every read here filters on the signed-in one, because
+//  the alternative was demonstrated: sign out, sign in as somebody else, and the first
+//  person's phone kept buzzing for the second person's idle lapses. The one thing this
+//  extension must never leak across accounts is precisely what a nudge carries — when
+//  you stopped paying attention.
+//
 //  ── WHAT IS ACTUALLY SENT ───────────────────────────────────────────────────
 //  A fixed, encrypted, one-line message. RFC 8291 (aes128gcm) is not optional: push
 //  services refuse to carry a plaintext payload, and the encryption is end-to-end —
@@ -63,9 +71,10 @@ export const TEST_PUSH_TTL_S = 300;
  *  why it is a minute and not the test's five. */
 export const PAUSE_PUSH_TTL_S = 60;
 
-// The one import here, and only for the VAPID `sub` claim below. config.ts imports
-// nothing itself, so this cannot become a cycle.
+// Two imports, neither of which can become a cycle: config.ts imports nothing, and
+// auth.ts imports only config.
 import { PUSH_LANDING_URL } from './server/config';
+import { getSession } from './server/auth';
 
 /** One paired phone. `endpoint` is the push service's URL for that device; the two
  *  keys are the device's own, used to encrypt so that only it can read the payload. */
@@ -76,6 +85,22 @@ export interface PushSubscriptionRecord {
   /** Which phone the user said this was, for the popup's list. Display only. */
   platform: 'android' | 'ios' | 'other';
   addedAt: number;
+  /** **Which account paired this phone**, and the reason every read below is a
+   *  filter rather than a plain load.
+   *
+   *  A subscription is a piece of *hardware* the browser knows how to reach, so the
+   *  obvious storage is one flat list per install — and that is exactly wrong here.
+   *  Pairing goes through the signed-in account (the QR's nonce is minted by
+   *  `create_pairing`, and `take_pairing` refuses a caller who is not its owner), so a
+   *  phone belongs to a person, not to a profile. Without this field, signing out and
+   *  signing in as somebody else left the previous person's phone buzzing for the new
+   *  one's lapses — one user's idle timings delivered to another user's pocket, which
+   *  is the single most sensitive thing this extension produces.
+   *
+   *  It is stamped from the pairing that created the record, not from whoever happens
+   *  to be signed in when the phone answers: the flow takes minutes on a second device
+   *  and the alarm that completes it can easily outlive the session that started it. */
+  userId: string;
 }
 
 /** Storage key for the VAPID keypair, as a pair of JWKs. */
@@ -180,9 +205,44 @@ export async function publicKeyB64(): Promise<string> {
 }
 
 // ── Paired devices ───────────────────────────────────────────────────────────
-export async function listSubscriptions(): Promise<PushSubscriptionRecord[]> {
+//  Stored as one list for the whole profile and read as one list *per account*. Every
+//  exported function below is scoped to the signed-in user, so there is no way for a
+//  caller to reach another account's phones by forgetting a filter — including
+//  sendPush, which is the one that matters.
+
+/** Everything on disk, including any record belonging to another account.
+ *
+ *  Also the one-shot migration off the flat list this used to be. A record with no
+ *  `userId` was written before phones were bound to accounts, and there is no way to
+ *  find out whose it was — the pairing row that knew is deleted by `take_pairing` the
+ *  moment it is collected. Handing it to whoever is signed in now would reproduce the
+ *  exact bug this field exists to fix, so it is dropped instead, once, loudly: the cost
+ *  is re-pairing a phone one time, against silently pushing one person's idle timings
+ *  to another person's device. */
+async function readAll(): Promise<PushSubscriptionRecord[]> {
   const subs = await readStored<PushSubscriptionRecord[]>(SUBS_KEY);
-  return Array.isArray(subs) ? subs : [];
+  if (!Array.isArray(subs)) return [];
+  const owned = subs.filter((s) => typeof s.userId === 'string' && s.userId);
+  if (owned.length !== subs.length) {
+    console.warn(
+      `Focus: dropped ${subs.length - owned.length} phone pairing(s) from before pairings were tied to an account — pair the phone again from the popup.`,
+    );
+    await writeSubscriptions(owned);
+  }
+  return owned;
+}
+
+/** Whose phones we may talk to right now. Null when signed out, which is why a
+ *  signed-out browser pushes to nobody rather than to the last person who used it. */
+async function currentOwner(): Promise<string | null> {
+  return (await getSession())?.userId ?? null;
+}
+
+/** The signed-in account's paired phones. Empty when signed out. */
+export async function listSubscriptions(): Promise<PushSubscriptionRecord[]> {
+  const owner = await currentOwner();
+  if (!owner) return [];
+  return (await readAll()).filter((s) => s.userId === owner);
 }
 
 async function writeSubscriptions(subs: PushSubscriptionRecord[]): Promise<void> {
@@ -190,15 +250,23 @@ async function writeSubscriptions(subs: PushSubscriptionRecord[]): Promise<void>
 }
 
 /** Add a paired phone, replacing any entry with the same endpoint — re-pairing the
- *  same device must update it rather than push to it twice. */
+ *  same device must update it rather than push to it twice.
+ *
+ *  The endpoint match ignores the owner deliberately: one physical phone has one
+ *  endpoint, so re-pairing it to a second account MOVES it rather than making both
+ *  accounts push to the same device. */
 export async function addSubscription(sub: PushSubscriptionRecord): Promise<void> {
-  const subs = await listSubscriptions();
+  const subs = await readAll();
   await writeSubscriptions([...subs.filter((s) => s.endpoint !== sub.endpoint), sub]);
 }
 
+/** Forget one of the signed-in account's phones. Another account's is left alone —
+ *  the popup cannot list it, so it cannot have meant it. */
 export async function removeSubscription(endpoint: string): Promise<void> {
-  const subs = await listSubscriptions();
-  await writeSubscriptions(subs.filter((s) => s.endpoint !== endpoint));
+  const owner = await currentOwner();
+  if (!owner) return;
+  const subs = await readAll();
+  await writeSubscriptions(subs.filter((s) => !(s.endpoint === endpoint && s.userId === owner)));
 }
 
 // ── VAPID ────────────────────────────────────────────────────────────────────
@@ -284,7 +352,12 @@ async function encryptPayload(sub: PushSubscriptionRecord, plaintext: string): P
 
 // ── Sending ──────────────────────────────────────────────────────────────────
 /**
- * Push one message to every paired phone.
+ * Push one message to every phone paired *by the signed-in account*.
+ *
+ * Signed out, that set is empty and this returns 0 without sending anything. That is
+ * the intended behaviour and not a degradation: a browser with nobody signed into it
+ * has no idea whose lapse it is watching, so it has no business buzzing anyone's
+ * pocket about it.
  *
  * Failures are per-device and never retried. A nudge is only worth delivering inside
  * the few seconds the warning lasts, so a queue would deliver noise; and the caller
@@ -356,8 +429,10 @@ export async function sendPush(title: string, body: string, ttlSeconds = 0): Pro
     }
   }));
 
+  // Re-read the FULL list, not this account's slice: writing back a filtered view
+  // would delete every other account's pairing as a side effect of one dead endpoint.
   if (dead.length) {
-    const left = (await listSubscriptions()).filter((s) => !dead.includes(s.endpoint));
+    const left = (await readAll()).filter((s) => !dead.includes(s.endpoint));
     await writeSubscriptions(left);
   }
   return delivered;

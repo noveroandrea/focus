@@ -806,6 +806,81 @@ do not fire. The popup asks `PUSH_PAIR_RESUME` on open and rejoins the QR alread
 flight. One minute of alarm granularity is fine — the popup's own 2-second poll still makes
 the ✓ instant whenever somebody is actually watching.
 
+### A phone kept buzzing for the next person who signed in
+**Status: fixed — `PushSubscriptionRecord.userId`**
+
+Paired phones lived in one flat list in `chrome.storage.local`, keyed by nothing. Sign out,
+sign in as somebody else, and `sendPush` went on delivering to the first person's phone —
+the second person's idle lapses, on the first person's lock screen. Of everything this
+extension produces, when you stop paying attention is the piece with no business crossing
+an account boundary.
+
+The shape of the mistake was treating a subscription as a property of the *install* because
+that is where the keypair lives. It is not: pairing goes through the signed-in account
+(`create_pairing` mints the nonce, `take_pairing` refuses anyone but its owner), so a phone
+belongs to a person. Every record now carries the `userId` that paired it and every read in
+`push.ts` filters on the signed-in one — including `sendPush`, so no future caller can leak
+across accounts by forgetting a filter. Signing out leaves the rows alone; signing back in
+finds the same phones.
+
+Two details that are not incidental:
+
+* The owner is stamped from the **pairing**, not from whoever is signed in when the phone
+  answers. That flow takes minutes on a second device and the `focus-pair-poll` alarm can
+  outlive the session that started it, so `PendingPair` carries the `userId` and
+  `collectPairing` abandons a pairing with nobody left to own it rather than reassigning it
+  — reassigning is the bug, in miniature.
+* `sendPush`'s 404/410 prune re-reads the **full** list before writing. Writing back the
+  account-scoped view would have deleted every other account's pairing as a side effect of
+  one dead endpoint.
+
+Records from before the field existed are dropped once, with a console line telling the
+user to pair again. There is no way to find out whose they were — `take_pairing` deleted the
+row that knew — and adopting them to whoever is signed in now is precisely the bug.
+
+### Signing out left the session running, sound and all
+**Status: fixed — `SERVER_SIGN_OUT` writes `forceActive`**
+
+Signing out with Working still on stopped the syncing and nothing else. The character kept
+walking, the beep kept sounding, an idle lapse still docked points, and the phone still
+buzzed — for an account that had left, into a score banked nowhere.
+
+Everything a running session does is addressed to an account: the score is posted to it,
+the leaderboard is its, the phones are the ones it paired. "Not signed in" already means
+"nothing is being counted" everywhere else in the extension; the switch simply did not say
+so. Sign-out now writes `forceActive: true` — through `chrome.storage.local`, never by
+assigning `settings`, so the `storage.onChanged` listener owns every consequence exactly as
+it does for the popup's own toggle and for the auto-pause. It also clears any pending
+pairing, whose QR belongs to the account that just left.
+
+The popup needed a second half: it reads `Settings` once when it opens, so the panel that
+issued the sign-out went on showing **Working** over a session that had stopped — and the
+next click on that button would have written the stale copy back, resuming a signed-out
+browser. `ask()` gained an `onDone` callback for that one caller. The dashboard's sign-out
+closes its tab, so it never had the problem.
+
+### A companion faded enough to ignore is faded too much to read
+**Status: fixed — pointer hover clears the translucency**
+
+The companion window's uniform translucency is a compromise with no right value: high
+enough to be caught out of the corner of your eye, low enough not to hide the wallpaper.
+Whatever the slider says, the moment you go over to actually *read* the score it is wrong.
+
+Hovering is the plainest available statement that you want to read it right now, so the
+window goes fully opaque while the pointer is inside it and back afterwards. Nothing to
+configure and nothing to click. It is implemented where the fade is — outside the window —
+which on GNOME means a **pointer poll** rather than an enter/leave handler: the window
+actor is not reactive, so Clutter delivers it no crossing events; they go to the browser,
+on the far side of the wall the bridge exists to reach across. The poll runs only while a
+companion is open, and writes to the actor only on the transition.
+
+On Windows the same behaviour needed the pin pass split in two. Finding the companions
+meant enumerating every top-level window, which is why it ran once every two seconds — a
+window that only cleared two seconds after the pointer arrived reads as broken rather than
+as a feature. `Scan` now caches the handles on that cadence and `Fade` applies the alpha on
+every 500 ms pass, comparing `GetCursorPos` against each cached rectangle and re-validating
+the handle with `IsWindow`. macOS gets nothing here for the same reason it gets no pin.
+
 ### A program in the page whitelist would have matched half the web
 **Status: designed around — `20260812090000_program_flags.sql`**
 

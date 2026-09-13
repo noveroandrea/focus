@@ -72,7 +72,12 @@ const PIN_MAX_H = 700;
  *  the companion, since the value is re-applied on every pin pass.
  *
  *  255 disables it: the window is left exactly as the browser painted it, and the
- *  layered style is never set. */
+ *  layered style is never set.
+ *
+ *  Whatever it is set to, the window goes FULLY OPAQUE while the pointer is over it and
+ *  back afterwards — the same behaviour the GNOME bridge implements, for the same
+ *  reason: no single value is right both for a window you are watching out of the
+ *  corner of your eye and for one you have gone over to read. */
 const COMPANION_OPACITY = (() => {
   const raw = Number.parseInt(process.env.FOCUS_COMPANION_OPACITY ?? '', 10);
   // Clamped to the same 100..255 the GNOME slider offers, so a typo in a shell profile
@@ -105,7 +110,7 @@ export function note(): string | null {
  *  no elevation. The label is the executable's FileDescription — the string Task
  *  Manager shows — which comes from the binary's version resource, not a window.
  *
- *  It also pins AND fades the companion window (see PIN_TITLE), which is Windows'
+ *  It also pins, fades and un-fades-on-hover the companion window (see PIN_TITLE), which is Windows'
  *  equivalent of what the GNOME bridge does from inside the compositor: Windows has no
  *  built-in always-on-top, so without this the only route is a third-party tool like
  *  PowerToys, and a browser cannot make its own window see-through on any platform.
@@ -131,25 +136,49 @@ Add-Type -Namespace FocusNative -Name Win -MemberDefinition @'
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class FocusPin {
   delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
   [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
   [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
   [DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, uint flags);
   [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
   static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
   const int GWL_EXSTYLE = -20;
   const int WS_EX_TOPMOST = 0x00000008;
   const int WS_EX_LAYERED = 0x00080000;
   const uint LWA_ALPHA = 0x00000002;
   const uint SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOACTIVATE = 0x0010;
-  public static void Pin(string title, int maxW, int maxH, int alpha) {
+
+  // The companions found by the last Scan, so Fade can run on every pass without
+  // walking every top-level window on the machine eight times a minute. Handles are
+  // re-validated with IsWindow before use — a closed companion leaves a stale one.
+  static List<IntPtr> found = new List<IntPtr>();
+  // What each window's alpha was last set to, so hovering writes once on the way in
+  // and once on the way out rather than twice a second.
+  static Dictionary<IntPtr,int> applied = new Dictionary<IntPtr,int>();
+
+  static void Alpha(IntPtr h, int alpha) {
+    int was;
+    if (applied.TryGetValue(h, out was) && was == alpha) return;
+    int ex = GetWindowLong(h, GWL_EXSTYLE);
+    if ((ex & WS_EX_LAYERED) == 0) SetWindowLong(h, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+    if (SetLayeredWindowAttributes(h, 0, (byte)alpha, LWA_ALPHA)) applied[h] = alpha;
+  }
+
+  // Find the companion windows and pin them. The dear half of the job — enumerating
+  // every top-level window — which is why it runs a quarter as often as Fade.
+  public static void Scan(string title, int maxW, int maxH) {
+    List<IntPtr> hits = new List<IntPtr>();
     EnumWindows(delegate (IntPtr h, IntPtr l) {
       if (!IsWindowVisible(h)) return true;
       StringBuilder sb = new StringBuilder(160);
@@ -158,16 +187,7 @@ public static class FocusPin {
       RECT r;
       if (!GetWindowRect(h, out r)) return true;
       if (r.Right - r.Left > maxW || r.Bottom - r.Top > maxH) return true;
-
-      // Translucency: what the GNOME bridge does with the window actor, done here
-      // with the layered-window style. Applied on EVERY pass rather than once, so
-      // restarting the agent with a different value updates companions that are
-      // already open — the size guard above is what keeps that safe.
-      if (alpha < 255) {
-        int ex = GetWindowLong(h, GWL_EXSTYLE);
-        if ((ex & WS_EX_LAYERED) == 0) SetWindowLong(h, GWL_EXSTYLE, ex | WS_EX_LAYERED);
-        SetLayeredWindowAttributes(h, 0, (byte)alpha, LWA_ALPHA);
-      }
+      hits.Add(h);
 
       // The pin, unlike the fade, is one-shot: a window the user un-pinned by hand
       // must not be fought over twice a second.
@@ -175,6 +195,34 @@ public static class FocusPin {
         SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
       return true;
     }, IntPtr.Zero);
+    found = hits;
+    // Forget closed windows, so the alpha cache cannot answer for a handle Windows
+    // has since handed to somebody else.
+    List<IntPtr> stale = new List<IntPtr>();
+    foreach (IntPtr h in applied.Keys) if (!hits.Contains(h)) stale.Add(h);
+    foreach (IntPtr h in stale) applied.Remove(h);
+  }
+
+  // Translucency: what the GNOME bridge does with the window actor, done here with
+  // the layered-window style — and, like the bridge, cleared while the pointer is
+  // over the window. The fade is a compromise between being noticeable and not
+  // hiding what is behind it, and reaching for the window is the plainest possible
+  // statement that right now you want to read it.
+  //
+  // Re-applied on every pass rather than once, so restarting the agent with a
+  // different value updates companions that are already open.
+  public static void Fade(int alpha) {
+    if (alpha >= 255 || found.Count == 0) return;
+    POINT p;
+    bool haveCursor = GetCursorPos(out p);
+    foreach (IntPtr h in found) {
+      if (!IsWindow(h)) continue;
+      bool hovered = false;
+      RECT r;
+      if (haveCursor && GetWindowRect(h, out r))
+        hovered = p.X >= r.Left && p.X < r.Right && p.Y >= r.Top && p.Y < r.Bottom;
+      Alpha(h, hovered ? 255 : alpha);
+    }
   }
 }
 '@
@@ -197,8 +245,14 @@ while ($true) {
   }
   # Every fourth pass: enumerating every top-level window is far dearer than one
   # foreground read, and a companion window that appears is not urgent to the second.
+  # Only the finding and the pinning are on this cadence — the fade below is not.
   $tick++
-  if ($tick % 4 -eq 0) { [FocusPin]::Pin('${PIN_TITLE}', ${PIN_MAX_W}, ${PIN_MAX_H}, ${COMPANION_OPACITY}) }
+  if ($tick % 4 -eq 0) { [FocusPin]::Scan('${PIN_TITLE}', ${PIN_MAX_W}, ${PIN_MAX_H}) }
+  # Every pass, unlike the scan: this is where hovering clears the translucency, and a
+  # window that only cleared two seconds after the pointer arrived would read as broken
+  # rather than as a feature. It touches only the handles the last scan found, so the
+  # cost is a cursor read and one rectangle per companion.
+  [FocusPin]::Fade(${COMPANION_OPACITY})
   Start-Sleep -Milliseconds 500
 }
 `;

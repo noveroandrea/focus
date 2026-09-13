@@ -112,6 +112,29 @@ const PLACE_MARGIN = 16;
  *  the second one nobody asked for. */
 const OPACITY_KEY = 'companion-opacity';
 
+/** How often the pointer is compared against the companions' rectangles.
+ *
+ *  Hovering a companion makes it FULLY OPAQUE for as long as the pointer is over it,
+ *  which is the answer to the one real cost of uniform translucency: the setting is a
+ *  compromise between being noticeable and not hiding the wallpaper, and there is no
+ *  value that is right both when the window is in the corner of your eye and when you
+ *  have gone over to read the score. Reaching for it IS the signal that you want to
+ *  read it, so nothing has to be configured and nothing has to be clicked.
+ *
+ *  It is a pointer POLL rather than an enter/leave handler because the companion's
+ *  contents belong to the browser: the window actor is not reactive, so Clutter
+ *  delivers it no crossing events — they go to the client, which is on the other side
+ *  of the wall this whole file exists to reach across.
+ *
+ *  120 ms is chosen against the hand rather than the eye: fast enough that the window
+ *  has cleared by the time a pointer that was moving towards it arrives, slow enough
+ *  that the tick costs nothing. It only runs while a companion is actually open — see
+ *  _syncHoverTimer — so the usual state of this timer is "not running". */
+const HOVER_INTERVAL_MS = 120;
+
+/** Fully opaque. What a hovered companion is set to, whatever the slider says. */
+const OPAQUE = 255;
+
 export default class FocusCompanionExtension extends Extension {
     enable() {
         this._current = '';
@@ -136,6 +159,10 @@ export default class FocusCompanionExtension extends Extension {
         // Which monitor each companion was given, so the next one goes somewhere else.
         // Keyed by window, cleaned on unmanaged — a closed companion frees its screen.
         this._placed = new Map();
+        // Which companions the pointer is currently over, so the opacity is written on
+        // the transition rather than eight times a second.
+        this._hovered = new Set();
+        this._hoverTimer = null;
         this._createdId = global.display.connect('window-created', (_d, win) => this._watch(win));
         for (const actor of global.get_window_actors())
             this._watch(actor.meta_window);
@@ -161,6 +188,11 @@ export default class FocusCompanionExtension extends Extension {
             this._titleIds.clear();
             this._titleIds = null;
         }
+        if (this._hoverTimer) {
+            GLib.source_remove(this._hoverTimer);
+            this._hoverTimer = null;
+        }
+        this._hovered = null;
         if (this._opacityId) {
             this._settings.disconnect(this._opacityId);
             this._opacityId = null;
@@ -218,6 +250,8 @@ export default class FocusCompanionExtension extends Extension {
             done();
             // Its screen is free again, so the next companion can have it.
             this._placed?.delete(win);
+            this._hovered?.delete(win);
+            this._syncHoverTimer();
         });
 
         if (this._pin(win))
@@ -253,6 +287,7 @@ export default class FocusCompanionExtension extends Extension {
             // it rather than stacking it exactly on top of an existing companion.
             if (monitor < 0) {
                 this._placed.set(win, win.get_monitor());
+                this._syncHoverTimer();
                 return;
             }
 
@@ -271,6 +306,7 @@ export default class FocusCompanionExtension extends Extension {
                 area.y + area.height - rect.height - PLACE_MARGIN,
             );
             this._placed.set(win, monitor);
+            this._syncHoverTimer();
         } catch {
             // A window that closed mid-placement, or a Shell without move_frame.
             // Costs the automatic placement and nothing else.
@@ -316,8 +352,11 @@ export default class FocusCompanionExtension extends Extension {
      *  mapped. */
     _fade(win) {
         const actor = win.get_compositor_private();
-        if (actor && this._settings)
-            actor.opacity = this._settings.get_int(OPACITY_KEY);
+        if (actor && this._settings) {
+            actor.opacity = this._hovered?.has(win)
+                ? OPAQUE
+                : this._settings.get_int(OPACITY_KEY);
+        }
     }
 
     /** Re-fade every companion, on any change to the setting.
@@ -331,6 +370,62 @@ export default class FocusCompanionExtension extends Extension {
             return;
         for (const win of this._placed.keys()) {
             try { this._fade(win); } catch { /* window closed mid-iteration */ }
+        }
+    }
+
+    /** Run the pointer poll exactly while there is a companion to poll for.
+     *
+     *  Called from both places `_placed` changes — the placement itself and `unmanaged`
+     *  — so the timer cannot outlive the last companion, and cannot fail to exist while
+     *  one is open. With no companion on screen this extension is back to one 500 ms
+     *  timer, which is what it costs a user who never opens the window. */
+    _syncHoverTimer() {
+        const wanted = (this._placed?.size ?? 0) > 0;
+        if (wanted && !this._hoverTimer) {
+            this._hoverTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, HOVER_INTERVAL_MS, () => {
+                this._hoverTick();
+                return GLib.SOURCE_CONTINUE;
+            });
+        } else if (!wanted && this._hoverTimer) {
+            GLib.source_remove(this._hoverTimer);
+            this._hoverTimer = null;
+        }
+    }
+
+    /** Clear the translucency of whichever companion the pointer is over, and restore
+     *  it on the others.
+     *
+     *  The FRAME rect, not the buffer rect: the frame is what the user is aiming at,
+     *  shadow and all, and the two differ by enough that a companion would flicker back
+     *  to translucent along its own edge. Only transitions write to the actor — the
+     *  common tick is a handful of integer comparisons and no compositor work at all. */
+    _hoverTick() {
+        if (!this._placed || !this._hovered)
+            return;
+        let px = 0;
+        let py = 0;
+        try {
+            [px, py] = global.get_pointer();
+        } catch {
+            return;
+        }
+        for (const win of this._placed.keys()) {
+            let inside = false;
+            try {
+                const r = win.get_frame_rect();
+                inside = px >= r.x && px < r.x + r.width && py >= r.y && py < r.y + r.height;
+            } catch {
+                // Window closed between the iteration and the read; unmanaged will
+                // clear it a moment from now.
+                inside = false;
+            }
+            if (inside === this._hovered.has(win))
+                continue;
+            if (inside)
+                this._hovered.add(win);
+            else
+                this._hovered.delete(win);
+            try { this._fade(win); } catch { /* window gone */ }
         }
     }
 

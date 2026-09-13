@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SessionState, Settings, ServerStatus, ServerActionResult, MessageType, PairStart, PairedPhone, PhonePlatform, localDateKey, DEFAULT_SETTINGS, FIXED_TIMINGS, loadSettings, CRY_BEEP_STYLES, clampCryBeepStyle, SPRITE_MODES, clampSpriteMode } from '../../types';
 import { FileText, Maximize2, Settings2, Plus, Zap, ZapOff, Volume2, VolumeX, Info, LogOut, Users, Trophy, UserPlus, Smartphone, X, Copy, Check, Download } from 'lucide-react';
@@ -230,7 +230,15 @@ function useServerAccount() {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
 
-  const ask = (type: 'SERVER_STATUS' | 'SERVER_SIGN_IN' | 'SERVER_SIGN_OUT') => {
+  // `onDone` exists for one caller: signing out pauses the session in the background,
+  // and this panel is holding a copy of Settings that was read when it opened. Without
+  // a nudge to re-read it, the Working button goes on saying "Working" over a session
+  // that has stopped — and the next click on it would write that stale copy back,
+  // resuming a signed-out browser.
+  const ask = (
+    type: 'SERVER_STATUS' | 'SERVER_SIGN_IN' | 'SERVER_SIGN_OUT',
+    onDone?: () => void,
+  ) => {
     setBusy(type !== 'SERVER_STATUS');
     chrome.runtime.sendMessage({ type }, (res?: ServerStatus) => {
       void chrome.runtime.lastError;
@@ -240,6 +248,7 @@ function useServerAccount() {
       // round trip. ServerStatus carries no error channel, so infer it here —
       // otherwise the button simply goes quiet and reads as broken.
       setFailed(type === 'SERVER_SIGN_IN' && !!res && !res.signedIn);
+      onDone?.();
     });
   };
 
@@ -1288,6 +1297,15 @@ const Popup = () => {
   const [currentTabId, setCurrentTabId] = useState<number | null>(null);
   const { status, busy: accountBusy, failed: signInFailed, ask } = useServerAccount();
 
+  // Pull Settings back off disk. Called on open, and again after signing out — which
+  // pauses the session from the background, i.e. changes a setting this panel is
+  // holding a copy of.
+  const reloadSettings = useCallback(() => {
+    chrome.storage.local.get(['focusFlowSettings'], (result) => {
+      if (result.focusFlowSettings) setSettings(loadSettings(result.focusFlowSettings));
+    });
+  }, []);
+
   useEffect(() => {
     // Load session state
     const fetchState = () => {
@@ -1306,9 +1324,7 @@ const Popup = () => {
     const retry = setTimeout(() => { if (!state) fetchState(); }, 500);
 
     // Load settings
-    chrome.storage.local.get(['focusFlowSettings'], (result) => {
-      if (result.focusFlowSettings) setSettings(loadSettings(result.focusFlowSettings));
-    });
+    reloadSettings();
 
     // Live state updates
     const listener = (msg: any) => {
@@ -1458,7 +1474,7 @@ const Popup = () => {
         <AccountRow
           email={status.email}
           busy={accountBusy}
-          onSignOut={() => ask('SERVER_SIGN_OUT')}
+          onSignOut={() => ask('SERVER_SIGN_OUT', reloadSettings)}
         />
       )}
 

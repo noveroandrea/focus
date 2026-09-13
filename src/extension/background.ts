@@ -511,6 +511,11 @@ interface PendingPair {
   platform: PhonePlatform;
   url: string;
   expiresAt: number;
+  /** The account that started this pairing. Recorded here rather than read at
+   *  collection time because the flow takes minutes on a *different* device and the
+   *  alarm that finishes it can easily outlive the session — signing out mid-pairing
+   *  must not hand the phone to whoever signs in next. */
+  userId: string;
 }
 
 function readPendingPair(): Promise<PendingPair | null> {
@@ -530,9 +535,32 @@ function clearPendingPair(): void {
   chrome.alarms.clear(PAIR_ALARM);
 }
 
+/** Who this pairing belongs to.
+ *
+ *  The record written when the QR was drawn is the authority; the live session is only
+ *  the fallback, for a pairing polled by a popup after the pending record has expired
+ *  out from under it. Null means nobody is signed in and the pairing cannot be owned. */
+async function pairingOwner(nonce: string): Promise<string | null> {
+  const pending = await readPendingPair();
+  if (pending?.nonce === nonce && pending.userId) return pending.userId;
+  return (await getSession())?.userId ?? null;
+}
+
 /** Has the phone answered? Finishes the pairing if so and returns how many devices the
  *  confirmation push reached; null while there is still nothing to collect. */
 async function collectPairing(nonce: string, platform: PhonePlatform): Promise<number | null> {
+  // Resolved BEFORE the row is taken, because take_pairing deletes what it returns:
+  // discovering afterwards that there is nobody to own the subscription would mean
+  // throwing away a phone's answer that can never be asked for again.
+  const owner = await pairingOwner(nonce);
+  if (!owner) {
+    // The account that showed this QR is no longer signed in. There is no honest way
+    // to decide whose phone this is, and guessing is the bug this whole field exists
+    // to prevent — so the pairing is abandoned rather than reassigned.
+    console.warn('Focus: pairing abandoned — no account is signed in to own it. Sign in and pair again.');
+    clearPendingPair();
+    return null;
+  }
   const sub = await takePairing(nonce);
   if (!sub?.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) return null;
   await addSubscription({
@@ -541,6 +569,7 @@ async function collectPairing(nonce: string, platform: PhonePlatform): Promise<n
     auth: sub.keys.auth,
     platform,
     addedAt: Date.now(),
+    userId: owner,
   });
   clearPendingPair();
   // Straight away, and from here rather than from the popup: this is the moment the
@@ -1147,7 +1176,8 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
         // returns null both when there is no session and when the request came back
         // an error. Collapsing them told a signed-in user to sign in, which is a
         // message that sends someone to fix the one thing that was already right.
-        if (!(await getSession())) {
+        const session = await getSession();
+        if (!session) {
           sendResponse({ ok: false, error: 'Sign in first — pairing goes through your account' } satisfies PairStart);
           return;
         }
@@ -1171,7 +1201,9 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
         // popup is still open to watch it.
         const expiresAt = Date.now() + PAIRING_TTL_MS;
         chrome.storage.local.set({
-          [PAIR_PENDING_KEY]: { nonce, platform: message.platform, url, expiresAt } satisfies PendingPair,
+          [PAIR_PENDING_KEY]: {
+            nonce, platform: message.platform, url, expiresAt, userId: session.userId,
+          } satisfies PendingPair,
         });
         chrome.alarms.create(PAIR_ALARM, { periodInMinutes: 1 });
         sendResponse({ ok: true, nonce, url, ttlMs: PAIRING_TTL_MS, platform: message.platform } satisfies PairStart);
@@ -1376,8 +1408,33 @@ chrome.runtime.onMessage.addListener((message: MessageType, sender, sendResponse
       });
       break;
 
+    // Signing out STOPS THE SESSION, and that is not a courtesy — it is the only way
+    // the surfaces can stay honest.
+    //
+    // Everything a running session does is addressed to an account: the score is posted
+    // to it, the phone nudge is delivered to the phones paired by it, the leaderboard
+    // the sprite is earning towards belongs to it. Sign out with Working still on and
+    // all of that keeps running with nowhere to go — the character walks, the beep
+    // sounds, an idle lapse still docks points that are now banked nowhere, and the
+    // phone (until the ownership fix above) buzzed for a person who had left. Pausing
+    // is what "not signed in" already means everywhere else; this makes the switch say
+    // so.
+    //
+    // Written the way the auto-pause writes it — through storage, never by assigning
+    // `settings` — so the storage.onChanged listener owns every consequence: the sprite
+    // snap, the toolbar recolour, the cleared lapse bookkeeping. See the note on that
+    // listener; a write here that touched `settings` first would make it see no change
+    // and skip all of them.
     case 'SERVER_SIGN_OUT':
-      signOut().then(() => replyServerStatus(sendResponse));
+      signOut().then(() => {
+        // A QR minted by the account that just left cannot be claimed by anyone —
+        // collectPairing would refuse it, and PUSH_PAIR_RESUME must not offer it back.
+        clearPendingPair();
+        if (!settings.forceActive) {
+          chrome.storage.local.set({ focusFlowSettings: { ...settings, forceActive: true } });
+        }
+        void replyServerStatus(sendResponse);
+      });
       break;
 
     case 'SERVER_STATUS':
